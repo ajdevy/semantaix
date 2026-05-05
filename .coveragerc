@@ -1,0 +1,11 @@
+[run]
+source =
+    platform_common
+    services
+omit =
+    */__init__.py
+
+[report]
+fail_under = 100
+show_missing = true
+skip_covered = false

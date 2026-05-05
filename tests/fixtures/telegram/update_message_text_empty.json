@@ -1,0 +1,17 @@
+{
+  "update_id": 1002,
+  "message": {
+    "message_id": 502,
+    "from": {
+      "id": 9002,
+      "is_bot": false,
+      "first_name": "Bob"
+    },
+    "chat": {
+      "id": 9002,
+      "type": "private"
+    },
+    "date": 1710000001,
+    "text": "   "
+  }
+}
