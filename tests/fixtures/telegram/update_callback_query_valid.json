@@ -1,0 +1,13 @@
+{
+  "update_id": 1004,
+  "callback_query": {
+    "id": "abc123",
+    "from": {
+      "id": 9004,
+      "is_bot": false,
+      "first_name": "Cara"
+    },
+    "chat_instance": "xyz",
+    "data": "btn_click"
+  }
+}

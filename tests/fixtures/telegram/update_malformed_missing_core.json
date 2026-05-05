@@ -1,0 +1,10 @@
+{
+  "message": {
+    "message_id": 503,
+    "chat": {
+      "id": 9003,
+      "type": "private"
+    },
+    "text": "Missing update_id and from"
+  }
+}
