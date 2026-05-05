@@ -4,7 +4,6 @@ from pydantic import BaseModel
 from platform_common.app_factory import create_service_app
 from services.api.app.openrouter_client import OpenRouterClient
 
-
 app = create_service_app("api")
 openrouter_client = OpenRouterClient()
 

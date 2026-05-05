@@ -9,7 +9,6 @@ from services.bot_gateway.app.telegram_update import (
     normalize_update,
 )
 
-
 app = create_service_app("bot_gateway")
 logger = logging.getLogger(__name__)
 
