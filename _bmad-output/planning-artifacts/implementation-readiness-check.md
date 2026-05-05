@@ -68,3 +68,23 @@ Proceed to BMAD implementation phase initialization:
 - Create sprint status artifact for this project
 - Start **Epic 01 / Story 01.01** as the first implementation story
 
+## Epic 08 Readiness Notes (Planning Add-On, 2026-05-05)
+
+Epic **08 — Tenant Knowledge Operations, Answer Transparency, and Correction Loop** extends the roadmap **after** Epic 07. It is documented for planning traceability (**PRD FR-15–FR-17**, `architecture.md`) but is **not** part of initial MVP sequencing.
+
+### New / Updated Dependencies
+
+- **Hard**: Epic **05** (stable chunk ids + retrieval payload shape), Epic **03** (guardrail decision contract for traces), Epic **06** (optional moderation gate for NL ops and corrections), Epic **02** (incidents for trace/op/reindex failures).
+- **Semantic**: MVP PRD §2 currently lists multi-tenant architecture as a non-goal; Epic 08 assumes **tenant isolation** for traces and knowledge. Product must either promote multi-tenant support to an explicit phased goal or scope Epic 08 to “single deployment / multiple logical tenants” with a documented isolation model before implementation starts.
+
+### Risks
+
+1. **NL mutation safety**: unparsed or malicious prompts could widen attack surface; require allowlists, strong confirmation UX, rate limits, and optional moderation-by-default for production tenants.
+2. **Trace cost and retention**: payloads can grow quickly; enforce max chunk list size, truncation, retention policy, and PII alignment with structured logging rules.
+3. **UX fragmentation**: bot-first NL ops versus Web UI parity—define minimum bar (bot complete, UI transparency required) before sprinting.
+4. **Contract drift**: if Epic 05 chunk metadata or Epic 03 guardrail fields change without versioning, trace rendering breaks; add explicit DTO version field in trace JSON.
+
+### Status
+
+**Planning-only**: no implementation gate change for Epics 01–07; Epic 08 starts only after Epic 07 exit criteria and explicit signoff on tenant isolation approach.
+

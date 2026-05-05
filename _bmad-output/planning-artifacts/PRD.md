@@ -196,6 +196,41 @@ Acceptance criteria:
 - Last backup timestamp and location are visible in UI.
 - Restore operation is auditable and reports success/failure events.
 
+### FR-15 Tenant-Scoped Answer Transparency (“Why This Answer”)
+
+- For delivered or policy-blocked AI paths tied to a stored end-user message, the system persists a queryable **answer trace** capturing retrieval lineage (chunk references and scores), guardrail/policy outcome, model routing metadata, and an MVP grounding/confidence snapshot.
+- Tenant-authorized Web UI users can open a conversation message and view that trace (read-only).
+
+Acceptance criteria:
+
+- Trace records are durable, tenant-scoped, and **append-only** (corrections create new knowledge versions; they do not rewrite historical traces).
+- Missing or failed trace persistence raises an operational incident per the Epic 02 backbone.
+
+*Delivery:* see **Epic 08** (`epic-08-tenant-knowledge-ops-and-answer-traces.md`), Story 08.01–08.02; builds on **Epic 05** retrieval payloads and **Epic 03** guardrail decision fields.
+
+### FR-16 Natural-Language Tenant Knowledge Operations
+
+- Paying clients (tenants) can create, update, or retire tenant knowledge through a **conversational** flow (bot-first), including preview, explicit confirmation, versioning, reindex enqueue, and full audit logging.
+- Tenants may be configured so mutating NL operations create **moderation candidates** instead of immediate publish, reusing **FR-6 / Epic 06** when strict quality gates apply.
+
+Acceptance criteria:
+
+- No silent writes: destructive or ambiguous intents require clarification or explicit confirm.
+- Every successful or abandoned mutating session leaves **audit_logs** evidence.
+
+*Delivery:* **Epic 08**, Story 08.03; indexes through **Epic 05**; optional candidate path through **Epic 06**.
+
+### FR-17 Trace-Originated Knowledge Correction Loop
+
+- From a specific answer trace, tenant users can initiate a guided correction that updates future retrieval behavior, with optional moderation handoff, reindex completion signaling, and cross-linked audit history.
+
+Acceptance criteria:
+
+- Correction flow links trace → draft/candidate → approval (when moderation on) → reindex outcome, without altering past traces.
+- Failures enqueue incidents and surface user-visible retry or support state where appropriate.
+
+*Delivery:* **Epic 08**, Story 08.04; moderation mechanics per **Epic 06**.
+
 ## 5. Non-Functional Requirements (NFR)
 
 ### NFR-1 Reliability
@@ -242,6 +277,7 @@ Acceptance criteria:
   - knowledge_versions
   - knowledge_candidates
   - audit_logs
+  - answer_traces (Epic 08; tenant-scoped, append-only transparency records)
 
 ## 7. Success Metrics
 
@@ -271,3 +307,5 @@ Acceptance criteria:
 ## 10. Delivery Mapping (Current Backlog)
 
 This PRD maps directly to the existing ordered Linear execution sequence (`FLE-5` to `FLE-18`) under project `semantaix`.
+
+Post-MVP tenant capabilities (**FR-15–FR-17**) are planned in **Epic 08** and assume completion of Epics **03** (guardrail payload), **05** (RAG lineage), **06** (moderation/reindex), and **02** (incidents)—see `epics/epic-08-tenant-knowledge-ops-and-answer-traces.md`.
