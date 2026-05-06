@@ -8,6 +8,7 @@ from platform_common.settings import get_settings
 from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.hitl import HitlTicketRepository
 from services.api.app.incidents import IncidentRepository
+from services.api.app.knowledge import KnowledgeCandidateRepository
 from services.api.app.openrouter_client import OpenRouterClient
 from services.api.app.rag import RagRepository
 from services.api.app.telegram_bot_sender import TelegramBotSender
@@ -26,6 +27,10 @@ telegram_notifier = TelegramIncidentNotifier(
     alert_username=settings.telegram_alert_username,
 )
 hitl_ticket_repository = HitlTicketRepository(settings.hitl_ticket_db_path)
+knowledge_candidate_repository = KnowledgeCandidateRepository(
+    db_path=settings.knowledge_db_path,
+    transcript_db_path=settings.persistence_db_path,
+)
 rag_repository = RagRepository(settings.rag_db_path)
 telegram_bot_sender = TelegramBotSender(bot_token=settings.telegram_bot_token)
 
@@ -53,6 +58,10 @@ class HitlRouteRequest(BaseModel):
 class HitlReplyRequest(BaseModel):
     operator_username: str
     reply_text: str
+
+
+class KnowledgeExtractRequest(BaseModel):
+    conversation_id: int | None = None
 
 
 class RagIngestRequest(BaseModel):
@@ -438,4 +447,40 @@ async def deliver_hitl_ticket_reply(ticket_id: int, request: HitlReplyRequest) -
         "delivered": True,
         "chat_id": ticket.target_chat_id,
         "message_id": message_id,
+    }
+
+
+@app.post("/knowledge/extract")
+def extract_knowledge_candidates(request: KnowledgeExtractRequest) -> dict[str, object]:
+    try:
+        inserted = knowledge_candidate_repository.extract_from_transcripts(
+            conversation_id=request.conversation_id
+        )
+    except Exception as exc:
+        incident = incident_repository.ingest(
+            fingerprint="knowledge_extraction_failures",
+            severity="critical",
+            summary=f"Knowledge extraction failed: {exc}",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="knowledge_extract_failed",
+            details=f"conversation_id={request.conversation_id}",
+        )
+        raise HTTPException(status_code=500, detail="knowledge_extraction_failed") from exc
+
+    candidates = knowledge_candidate_repository.list_candidates(
+        conversation_id=request.conversation_id
+    )
+    return {
+        "inserted_candidates": inserted,
+        "items": [
+            {
+                "id": item.id,
+                "conversation_id": item.conversation_id,
+                "source_message_id": item.source_message_id,
+                "candidate_text": item.candidate_text,
+            }
+            for item in candidates
+        ],
     }

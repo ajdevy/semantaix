@@ -18,6 +18,7 @@ def test_settings_defaults(monkeypatch):
     assert settings.hitl_ticket_db_path == ".data/semantaix_hitl.db"
     assert settings.hitl_primary_operator_username == "@ajdevy"
     assert settings.rag_db_path == ".data/semantaix_rag.db"
+    assert settings.knowledge_db_path == ".data/semantaix_knowledge.db"
     assert settings.hitl_config_admin_username == "@ajdevy"
 
 
@@ -35,6 +36,7 @@ def test_settings_env_override(monkeypatch):
     monkeypatch.setenv("HITL_TICKET_DB_PATH", ".tmp/hitl.sqlite3")
     monkeypatch.setenv("HITL_PRIMARY_OPERATOR_USERNAME", "@ops")
     monkeypatch.setenv("RAG_DB_PATH", ".tmp/rag.sqlite3")
+    monkeypatch.setenv("KNOWLEDGE_DB_PATH", ".tmp/knowledge.sqlite3")
     monkeypatch.setenv("HITL_CONFIG_ADMIN_USERNAME", "@admin")
     settings = AppSettings(_env_file=None)
     assert settings.app_env == "test"
@@ -50,4 +52,5 @@ def test_settings_env_override(monkeypatch):
     assert settings.hitl_ticket_db_path == ".tmp/hitl.sqlite3"
     assert settings.hitl_primary_operator_username == "@ops"
     assert settings.rag_db_path == ".tmp/rag.sqlite3"
+    assert settings.knowledge_db_path == ".tmp/knowledge.sqlite3"
     assert settings.hitl_config_admin_username == "@admin"
