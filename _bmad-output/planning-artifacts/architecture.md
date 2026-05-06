@@ -9,6 +9,18 @@
 - **PostgreSQL**: system of record for conversations, messages, knowledge entities, audit, incidents, backups metadata.
 - **Qdrant**: vector retrieval store; chunk payloads must carry stable ids for trace lineage (**Epic 05**).
 
+## Epic 04 — HITL Runtime Configuration and Delivery
+
+- HITL ticketing is persisted in SQLite during bootstrap (`hitl_tickets` + runtime config keys).
+- Runtime routing settings are read with DB-first precedence and `.env` fallback:
+  - `hitl_primary_operator_username`
+  - `telegram_alert_chat_id`
+- Bot gateway supports admin-only command updates:
+  - `/hitl_config @username <chat_id>`
+  - Admin gate uses `HITL_CONFIG_ADMIN_USERNAME` (currently `@ajdevy`).
+- API escalation and route paths consume runtime-configured operator mapping.
+- Outbound end-user delivery remains bot-authored via Telegram `sendMessage` with no operator metadata leakage.
+
 ## Epic 08 — Data and API Touchpoints (Tenant Knowledge + Answer Traces)
 
 Layered **after** RAG (**Epic 05**), guardrails (**Epic 03**), moderation/reindex (**Epic 06**), and incidents (**Epic 02**).

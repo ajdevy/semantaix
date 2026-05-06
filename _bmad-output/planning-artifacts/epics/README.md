@@ -20,5 +20,9 @@ This directory contains the BMAD feature-based sequential epic layout.
 7. `epic-07-backup-restore-hardening.md`
 8. `epic-08-tenant-knowledge-ops-and-answer-traces.md`
 
+## Recent Implementation Notes
+- **Epic 04 (HITL escalation):** runtime HITL recipient/chat routing can be updated by Telegram command `/hitl_config @username <chat_id>`.
+- **Access control:** only `HITL_CONFIG_ADMIN_USERNAME` (currently `@ajdevy`) is authorized to apply runtime HITL configuration changes.
+
 ## Carry-forward Constraint
 From Epic 03 onward, every epic must integrate with the incident/alerts solution from Epic 02.

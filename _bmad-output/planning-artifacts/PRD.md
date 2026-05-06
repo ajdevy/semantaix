@@ -76,11 +76,15 @@ Acceptance criteria:
 ### FR-4 Configurable HITL Recipient
 
 - Web UI Settings allows updating primary Telegram recipient for fallback routing.
+- Telegram command path also allows runtime updates via bot command:
+  - `/hitl_config @username <chat_id>`
+- Runtime bot configuration is admin-gated by configured username (`HITL_CONFIG_ADMIN_USERNAME`, currently `@ajdevy`).
 
 Acceptance criteria:
 
 - Setting update persists in DB and is used without service restart.
 - Invalid Telegram username format is rejected with clear error.
+- Non-admin command attempts are ignored and audit/logged as unauthorized configuration attempts.
 
 ### FR-5 Full Transcript Storage + Knowledge Candidate Extraction
 
