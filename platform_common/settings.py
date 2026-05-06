@@ -18,6 +18,8 @@ class AppSettings(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "openai/gpt-4o-mini"
+    incident_db_path: str = ".data/semantaix_incidents.db"
+    incident_dedup_window_seconds: int = 300
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

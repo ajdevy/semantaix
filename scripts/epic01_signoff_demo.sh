@@ -8,6 +8,14 @@ cd "${ROOT_DIR}"
 mkdir -p .data
 rm -f "${DB_PATH}"
 
+# Load local environment (including OPENROUTER_API_KEY) when available.
+if [[ -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+
 export PERSISTENCE_DB_PATH="${DB_PATH}"
 export OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-demo-key-not-used}"
 
