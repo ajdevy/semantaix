@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from fastapi import HTTPException
 from pydantic import BaseModel
 
@@ -92,13 +94,33 @@ async def ingest_incident_event(request: IncidentEventRequest) -> dict[str, obje
         severity=request.severity,
         summary=request.summary,
     )
-    sent, delivery_status = await telegram_notifier.notify_if_critical(
-        incident_id=incident.id,
-        fingerprint=incident.fingerprint,
-        severity=incident.severity,
-        summary=incident.summary,
-        occurrence_count=incident.occurrence_count,
-    )
+    sent = False
+    delivery_status = "not_critical"
+    if telegram_notifier.is_critical_event(
+        fingerprint=request.fingerprint,
+        severity=request.severity,
+    ):
+        last_sent_at = incident_repository.get_last_telegram_sent_at(incident.id)
+        if last_sent_at is not None:
+            elapsed = (datetime.now(UTC) - last_sent_at).total_seconds()
+            if elapsed < settings.telegram_alert_debounce_seconds:
+                delivery_status = "debounced"
+            else:
+                sent, delivery_status = await telegram_notifier.notify_if_critical(
+                    incident_id=incident.id,
+                    fingerprint=request.fingerprint,
+                    severity=request.severity,
+                    summary=request.summary,
+                    occurrence_count=incident.occurrence_count,
+                )
+        else:
+            sent, delivery_status = await telegram_notifier.notify_if_critical(
+                incident_id=incident.id,
+                fingerprint=request.fingerprint,
+                severity=request.severity,
+                summary=request.summary,
+                occurrence_count=incident.occurrence_count,
+            )
     incident_repository.append_event(
         incident_id=incident.id,
         event_type="telegram_notify",

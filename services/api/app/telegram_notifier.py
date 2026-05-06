@@ -33,7 +33,7 @@ class TelegramIncidentNotifier:
         summary: str,
         occurrence_count: int,
     ) -> tuple[bool, str]:
-        if severity.lower() != "critical" or fingerprint not in CRITICAL_FINGERPRINTS:
+        if not self.is_critical_event(fingerprint=fingerprint, severity=severity):
             return False, "not_critical"
 
         if self.bot_token == "replace-me" or not self.bot_token:
@@ -56,3 +56,7 @@ class TelegramIncidentNotifier:
             )
             response.raise_for_status()
         return True, "sent"
+
+    @staticmethod
+    def is_critical_event(*, fingerprint: str, severity: str) -> bool:
+        return severity.lower() == "critical" and fingerprint in CRITICAL_FINGERPRINTS

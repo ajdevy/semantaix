@@ -24,6 +24,7 @@ class AppSettings(BaseSettings):
     incident_dedup_window_seconds: int = 300
     telegram_alert_username: str = "@ajdevy"
     telegram_alert_chat_id: str | None = None
+    telegram_alert_debounce_seconds: int = 300
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

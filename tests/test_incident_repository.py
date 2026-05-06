@@ -131,3 +131,29 @@ def test_append_event_adds_timeline_entry(tmp_path):
     timeline = repository.get_timeline(created.id)
     assert timeline[-1].event_type == "manual_note"
     assert timeline[-1].details == "Operator added investigation note"
+
+
+def test_get_last_telegram_sent_at_reads_latest_sent_event(tmp_path):
+    repository = IncidentRepository(
+        db_path=str(tmp_path / "incidents.sqlite3"),
+        dedup_window_seconds=300,
+    )
+    created = repository.ingest(
+        fingerprint="provider429_spike",
+        severity="critical",
+        summary="Provider 429 spike",
+    )
+
+    repository.append_event(
+        incident_id=created.id,
+        event_type="telegram_notify",
+        details="status=missing_bot_token",
+    )
+    assert repository.get_last_telegram_sent_at(created.id) is None
+
+    repository.append_event(
+        incident_id=created.id,
+        event_type="telegram_notify",
+        details="status=sent",
+    )
+    assert repository.get_last_telegram_sent_at(created.id) is not None
