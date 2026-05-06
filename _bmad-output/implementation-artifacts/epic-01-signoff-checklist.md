@@ -7,6 +7,12 @@
 
 ## Manual scripted flow
 
+Run:
+
+```bash
+bash scripts/epic01_signoff_demo.sh
+```
+
 1. Start `bot_gateway` on port `8002`.
 2. POST `tests/fixtures/telegram/update_message_text_basic.json` to `/telegram/webhook`.
 3. Verify response is `{"status":"accepted", "trace_id":"..."}`.
