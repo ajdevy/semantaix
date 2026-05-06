@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+import httpx
+
+CRITICAL_FINGERPRINTS = {
+    "provider429_spike",
+    "provider5xx_spike",
+    "vectordb_down",
+    "db_down",
+    "queue_dlq_growth",
+    "hitl_delivery_failures",
+}
+
+
+class TelegramIncidentNotifier:
+    def __init__(
+        self,
+        *,
+        bot_token: str,
+        alert_chat_id: str | None,
+        alert_username: str,
+    ) -> None:
+        self.bot_token = bot_token
+        self.alert_chat_id = alert_chat_id
+        self.alert_username = alert_username
+
+    async def notify_if_critical(
+        self,
+        *,
+        incident_id: int,
+        fingerprint: str,
+        severity: str,
+        summary: str,
+        occurrence_count: int,
+    ) -> tuple[bool, str]:
+        if severity.lower() != "critical" or fingerprint not in CRITICAL_FINGERPRINTS:
+            return False, "not_critical"
+
+        if self.bot_token == "replace-me" or not self.bot_token:
+            return False, "missing_bot_token"
+        if not self.alert_chat_id:
+            return False, "missing_alert_chat_id"
+
+        text = (
+            f"Critical incident for {self.alert_username}\n"
+            f"- incident_id: {incident_id}\n"
+            f"- fingerprint: {fingerprint}\n"
+            f"- summary: {summary}\n"
+            f"- occurrences: {occurrence_count}"
+        )
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.post(
+                f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+                json={"chat_id": self.alert_chat_id, "text": text},
+            )
+            response.raise_for_status()
+        return True, "sent"
