@@ -3,6 +3,7 @@ from pydantic import BaseModel
 
 from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
+from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.incidents import IncidentRepository
 from services.api.app.openrouter_client import OpenRouterClient
 
@@ -39,11 +40,42 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
     except Exception as exc:  # pragma: no cover - external provider failure path
         raise HTTPException(status_code=502, detail=f"OpenRouter call failed: {exc}") from exc
 
+    decision = evaluate_suggestion(suggestion)
+    if not decision.valid:
+        incident = incident_repository.ingest(
+            fingerprint="guardrail_invalid_suggestion",
+            severity="warning",
+            summary=f"Suggestion blocked by guardrails: {','.join(decision.reasons)}",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="guardrail_blocked",
+            details=f"reasons={','.join(decision.reasons)}",
+        )
+        return {
+            "suggestion": None,
+            "is_suggestion_only": True,
+            "response_mode": "blocked_invalid",
+            "guardrails_applied": True,
+            "guardrail_decision": {
+                "valid": decision.valid,
+                "reasons": decision.reasons,
+                "score": decision.score,
+            },
+            "delivery_blocked": True,
+        }
+
     return {
         "suggestion": f"[Suggestion mode] {suggestion}",
         "is_suggestion_only": True,
         "response_mode": "suggestion_only",
-        "guardrails_applied": False,
+        "guardrails_applied": True,
+        "guardrail_decision": {
+            "valid": decision.valid,
+            "reasons": decision.reasons,
+            "score": decision.score,
+        },
+        "delivery_blocked": False,
     }
 
 

@@ -245,6 +245,17 @@ class IncidentRepository:
                 for row in rows
             ]
 
+    def append_event(self, *, incident_id: int, event_type: str, details: str) -> None:
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            self._add_event(
+                connection,
+                incident_id=incident_id,
+                event_type=event_type,
+                details=details,
+                timestamp=_now().isoformat(),
+            )
+
     def _transition(self, *, incident_id: int, event_type: str) -> Incident:
         init_schema(self.db_path)
         now = _now().isoformat()
