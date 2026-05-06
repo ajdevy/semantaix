@@ -22,7 +22,7 @@ def init_schema(db_path: str) -> None:
     with _connect(db_path) as connection:
         connection.execute(
             """
-            CREATE TABLE IF NOT EXISTS knowledge_candidates (
+            CREATE TABLE IF NOT EXISTS knowledge_moderation_candidates (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 candidate_text TEXT NOT NULL,
                 published_text TEXT,
@@ -55,7 +55,7 @@ class KnowledgeModerationRepository:
         with _connect(self.db_path) as connection:
             cursor = connection.execute(
                 """
-                INSERT INTO knowledge_candidates (
+                INSERT INTO knowledge_moderation_candidates (
                     candidate_text, published_text, status, created_at, updated_at
                 )
                 VALUES (?, NULL, 'pending', ?, ?)
@@ -72,7 +72,7 @@ class KnowledgeModerationRepository:
                 rows = connection.execute(
                     """
                     SELECT id, candidate_text, published_text, status, created_at, updated_at
-                    FROM knowledge_candidates
+                    FROM knowledge_moderation_candidates
                     ORDER BY id ASC
                     """
                 ).fetchall()
@@ -80,7 +80,7 @@ class KnowledgeModerationRepository:
                 rows = connection.execute(
                     """
                     SELECT id, candidate_text, published_text, status, created_at, updated_at
-                    FROM knowledge_candidates
+                    FROM knowledge_moderation_candidates
                     WHERE status = ?
                     ORDER BY id ASC
                     """,
@@ -94,7 +94,7 @@ class KnowledgeModerationRepository:
             row = connection.execute(
                 """
                 SELECT id, candidate_text, published_text, status, created_at, updated_at
-                FROM knowledge_candidates
+                FROM knowledge_moderation_candidates
                 WHERE id = ?
                 """,
                 (candidate_id,),
@@ -108,7 +108,7 @@ class KnowledgeModerationRepository:
         init_schema(self.db_path)
         with _connect(self.db_path) as connection:
             row = connection.execute(
-                "SELECT candidate_text, status FROM knowledge_candidates WHERE id = ?",
+                "SELECT candidate_text, status FROM knowledge_moderation_candidates WHERE id = ?",
                 (candidate_id,),
             ).fetchone()
             if row is None:
@@ -128,7 +128,7 @@ class KnowledgeModerationRepository:
         now = _now()
         with _connect(self.db_path) as connection:
             row = connection.execute(
-                "SELECT status FROM knowledge_candidates WHERE id = ?",
+                "SELECT status FROM knowledge_moderation_candidates WHERE id = ?",
                 (candidate_id,),
             ).fetchone()
             if row is None:
@@ -137,7 +137,7 @@ class KnowledgeModerationRepository:
                 raise ValueError("invalid_status")
             connection.execute(
                 """
-                UPDATE knowledge_candidates
+                UPDATE knowledge_moderation_candidates
                 SET status = 'approved', published_text = ?, updated_at = ?
                 WHERE id = ?
                 """,
@@ -149,7 +149,7 @@ class KnowledgeModerationRepository:
         now = _now()
         with _connect(self.db_path) as connection:
             row = connection.execute(
-                "SELECT status FROM knowledge_candidates WHERE id = ?",
+                "SELECT status FROM knowledge_moderation_candidates WHERE id = ?",
                 (candidate_id,),
             ).fetchone()
             if row is None:
@@ -158,7 +158,7 @@ class KnowledgeModerationRepository:
                 raise ValueError("invalid_status")
             connection.execute(
                 """
-                UPDATE knowledge_candidates
+                UPDATE knowledge_moderation_candidates
                 SET status = 'rejected', updated_at = ?
                 WHERE id = ?
                 """,

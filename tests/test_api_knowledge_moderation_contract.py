@@ -210,7 +210,10 @@ def test_reject_missing_candidate_returns_404(tmp_path):
 def test_reject_already_final_returns_409(tmp_path):
     knowledge_moderation_repository.db_path = str(tmp_path / "knowledge.sqlite3")
     client = TestClient(api_app)
-    created = client.post("/knowledge/candidates", json={"text": "Text for duplicate reject moderation path coverage."})
+    created = client.post(
+        "/knowledge/candidates",
+        json={"text": "Text for duplicate reject moderation path coverage."},
+    )
     candidate_id = created.json()["id"]
     client.post(f"/knowledge/candidates/{candidate_id}/reject")
     second = client.post(f"/knowledge/candidates/{candidate_id}/reject")
@@ -248,8 +251,14 @@ def test_reject_value_error_maps_to_400(tmp_path, monkeypatch):
 def test_list_candidates_without_status_param(tmp_path):
     knowledge_moderation_repository.db_path = str(tmp_path / "knowledge.sqlite3")
     client = TestClient(api_app)
-    client.post("/knowledge/candidates", json={"text": "First bulk list candidate row for moderation."})
-    client.post("/knowledge/candidates", json={"text": "Second bulk list candidate row for moderation."})
+    client.post(
+        "/knowledge/candidates",
+        json={"text": "First bulk list candidate row for moderation."},
+    )
+    client.post(
+        "/knowledge/candidates",
+        json={"text": "Second bulk list candidate row for moderation."},
+    )
     response = client.get("/knowledge/candidates")
     assert response.status_code == 200
     assert len(response.json()["items"]) == 2
