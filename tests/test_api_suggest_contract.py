@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
 from services.api.app.main import app as api_app
-from services.api.app.main import incident_repository, openrouter_client
+from services.api.app.main import hitl_ticket_repository, incident_repository, openrouter_client
 
 
 def test_suggest_returns_503_without_openrouter_key():
@@ -44,6 +44,7 @@ def test_suggest_returns_502_on_provider_failure(monkeypatch):
 
 def test_suggest_blocks_invalid_candidate_and_emits_incident(monkeypatch, tmp_path):
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
     monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
 
     client = TestClient(api_app)
