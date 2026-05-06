@@ -9,6 +9,7 @@ from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.hitl import HitlTicketRepository
 from services.api.app.incidents import IncidentRepository
 from services.api.app.openrouter_client import OpenRouterClient
+from services.api.app.rag import RagRepository
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
 
@@ -25,6 +26,7 @@ telegram_notifier = TelegramIncidentNotifier(
     alert_username=settings.telegram_alert_username,
 )
 hitl_ticket_repository = HitlTicketRepository(settings.hitl_ticket_db_path)
+rag_repository = RagRepository(settings.rag_db_path)
 telegram_bot_sender = TelegramBotSender(bot_token=settings.telegram_bot_token)
 
 
@@ -53,6 +55,16 @@ class HitlReplyRequest(BaseModel):
     reply_text: str
 
 
+class RagIngestRequest(BaseModel):
+    source_id: str
+    text: str
+
+
+class RagRetrieveRequest(BaseModel):
+    query: str
+    limit: int = 3
+
+
 def _effective_hitl_operator_username() -> str:
     return (
         hitl_ticket_repository.get_runtime_config("hitl_primary_operator_username")
@@ -62,8 +74,20 @@ def _effective_hitl_operator_username() -> str:
 
 @app.post("/suggest")
 async def suggest(request: SuggestRequest) -> dict[str, object]:
+    retrieved_chunks = rag_repository.retrieve(query=request.text, limit=3)
+    retrieval_context: list[dict[str, str]] = []
+    if retrieved_chunks:
+        retrieval_context.append(
+            {
+                "role": "system",
+                "content": "Relevant knowledge:\n"
+                + "\n".join(
+                    f"- [{chunk.source_id}] {chunk.chunk_text}" for chunk in retrieved_chunks
+                ),
+            }
+        )
     try:
-        suggestion = await openrouter_client.suggest(request.text)
+        suggestion = await openrouter_client.suggest(request.text, context=retrieval_context)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - external provider failure path
@@ -116,6 +140,50 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
             "score": decision.score,
         },
         "delivery_blocked": False,
+        "retrieval": [
+            {
+                "source_id": chunk.source_id,
+                "chunk_text": chunk.chunk_text,
+                "score": chunk.score,
+            }
+            for chunk in retrieved_chunks
+        ],
+    }
+
+
+@app.post("/rag/ingest")
+def ingest_rag(request: RagIngestRequest) -> dict[str, object]:
+    try:
+        inserted = rag_repository.ingest(source_id=request.source_id, text=request.text)
+    except Exception as exc:
+        incident = incident_repository.ingest(
+            fingerprint="rag_ingest_failures",
+            severity="critical",
+            summary=f"RAG ingest failed: {exc}",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="rag_ingest_failed",
+            details=f"source_id={request.source_id}",
+        )
+        raise HTTPException(status_code=500, detail="rag_ingest_failed") from exc
+
+    return {"source_id": request.source_id, "inserted_chunks": inserted}
+
+
+@app.post("/rag/retrieve")
+def retrieve_rag(request: RagRetrieveRequest) -> dict[str, object]:
+    chunks = rag_repository.retrieve(query=request.query, limit=request.limit)
+    return {
+        "items": [
+            {
+                "id": chunk.id,
+                "source_id": chunk.source_id,
+                "chunk_text": chunk.chunk_text,
+                "score": chunk.score,
+            }
+            for chunk in chunks
+        ]
     }
 
 
