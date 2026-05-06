@@ -18,6 +18,7 @@ This directory contains the BMAD feature-based sequential epic layout.
 5. `epic-05-rag-foundation.md`
 6. `epic-06-knowledge-moderation.md`
 7. `epic-07-backup-restore-hardening.md`
+8. `epic-08-tenant-knowledge-ops-and-answer-traces.md`
 
 ## Carry-forward Constraint
 From Epic 03 onward, every epic must integrate with the incident/alerts solution from Epic 02.
