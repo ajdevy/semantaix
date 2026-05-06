@@ -71,12 +71,83 @@ def get_incidents_by_fingerprint(fingerprint: str) -> dict[str, object]:
             {
                 "id": incident.id,
                 "status": incident.status,
+                "is_read": incident.is_read,
                 "severity": incident.severity,
                 "summary": incident.summary,
                 "occurrence_count": incident.occurrence_count,
                 "first_seen_at": incident.first_seen_at,
                 "last_seen_at": incident.last_seen_at,
+                "acknowledged_at": incident.acknowledged_at,
+                "resolved_at": incident.resolved_at,
             }
             for incident in incidents
+        ],
+    }
+
+
+@app.get("/incidents")
+def list_incidents() -> dict[str, object]:
+    incidents = incident_repository.list_incidents()
+    return {
+        "items": [
+            {
+                "id": incident.id,
+                "fingerprint": incident.fingerprint,
+                "status": incident.status,
+                "is_read": incident.is_read,
+                "severity": incident.severity,
+                "summary": incident.summary,
+                "occurrence_count": incident.occurrence_count,
+                "first_seen_at": incident.first_seen_at,
+                "last_seen_at": incident.last_seen_at,
+                "acknowledged_at": incident.acknowledged_at,
+                "resolved_at": incident.resolved_at,
+            }
+            for incident in incidents
+        ]
+    }
+
+
+@app.post("/incidents/{incident_id}/read")
+def mark_incident_read(incident_id: int) -> dict[str, object]:
+    incident = incident_repository.mark_read(incident_id)
+    return {"id": incident.id, "status": incident.status, "is_read": incident.is_read}
+
+
+@app.post("/incidents/{incident_id}/ack")
+def acknowledge_incident(incident_id: int) -> dict[str, object]:
+    incident = incident_repository.acknowledge(incident_id)
+    return {
+        "id": incident.id,
+        "status": incident.status,
+        "is_read": incident.is_read,
+        "acknowledged_at": incident.acknowledged_at,
+    }
+
+
+@app.post("/incidents/{incident_id}/resolve")
+def resolve_incident(incident_id: int) -> dict[str, object]:
+    incident = incident_repository.resolve(incident_id)
+    return {
+        "id": incident.id,
+        "status": incident.status,
+        "is_read": incident.is_read,
+        "resolved_at": incident.resolved_at,
+    }
+
+
+@app.get("/incidents/{incident_id}/timeline")
+def get_incident_timeline(incident_id: int) -> dict[str, object]:
+    timeline = incident_repository.get_timeline(incident_id)
+    return {
+        "incident_id": incident_id,
+        "events": [
+            {
+                "id": event.id,
+                "event_type": event.event_type,
+                "details": event.details,
+                "created_at": event.created_at,
+            }
+            for event in timeline
         ],
     }

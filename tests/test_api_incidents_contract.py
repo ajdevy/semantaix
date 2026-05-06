@@ -53,3 +53,41 @@ def test_get_incidents_by_fingerprint_returns_lifecycle_items(tmp_path):
     assert len(payload["items"]) == 1
     assert payload["items"][0]["status"] == "open"
     assert payload["items"][0]["severity"] == "warning"
+    assert payload["items"][0]["is_read"] is False
+
+
+def test_incident_read_ack_resolve_and_timeline(tmp_path):
+    incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
+    incident_repository.dedup_window_seconds = 300
+    client = TestClient(api_app)
+
+    created = client.post(
+        "/incidents/events",
+        json={
+            "fingerprint": "vectordb_down",
+            "severity": "critical",
+            "summary": "Vector DB unavailable",
+        },
+    ).json()
+    incident_id = created["id"]
+
+    read = client.post(f"/incidents/{incident_id}/read")
+    ack = client.post(f"/incidents/{incident_id}/ack")
+    resolve = client.post(f"/incidents/{incident_id}/resolve")
+    listing = client.get("/incidents")
+    timeline = client.get(f"/incidents/{incident_id}/timeline")
+
+    assert read.status_code == 200
+    assert ack.status_code == 200
+    assert resolve.status_code == 200
+    assert resolve.json()["status"] == "resolved"
+    assert resolve.json()["resolved_at"] is not None
+
+    assert listing.status_code == 200
+    assert len(listing.json()["items"]) == 1
+    assert listing.json()["items"][0]["is_read"] is True
+    assert listing.json()["items"][0]["acknowledged_at"] is not None
+
+    assert timeline.status_code == 200
+    event_types = [event["event_type"] for event in timeline.json()["events"]]
+    assert event_types == ["created", "read", "acknowledged", "resolved"]

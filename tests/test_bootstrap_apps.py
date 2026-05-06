@@ -27,6 +27,13 @@ def test_web_ui_shell_smoke():
     assert "Semantaix Admin" in response.text
 
 
+def test_web_ui_alerts_shell_smoke():
+    client = TestClient(web_app)
+    response = client.get("/alerts")
+    assert response.status_code == 200
+    assert "Semantaix Alerts" in response.text
+
+
 def test_ingest_worker_bootstrap_health_ready():
     client = TestClient(ingest_app)
     response = client.get("/health/ready")
