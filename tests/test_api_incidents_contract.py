@@ -1,12 +1,14 @@
 from fastapi.testclient import TestClient
 
 from services.api.app.main import app as api_app
-from services.api.app.main import incident_repository
+from services.api.app.main import incident_repository, telegram_notifier
 
 
 def test_incident_event_endpoint_deduplicates_within_window(tmp_path):
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     incident_repository.dedup_window_seconds = 300
+    telegram_notifier.bot_token = "replace-me"
+    telegram_notifier.alert_chat_id = None
     client = TestClient(api_app)
 
     first = client.post(
@@ -30,11 +32,14 @@ def test_incident_event_endpoint_deduplicates_within_window(tmp_path):
     assert second.status_code == 200
     assert first.json()["id"] == second.json()["id"]
     assert second.json()["occurrence_count"] == 2
+    assert second.json()["telegram_delivery_status"] == "missing_bot_token"
 
 
 def test_get_incidents_by_fingerprint_returns_lifecycle_items(tmp_path):
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     incident_repository.dedup_window_seconds = 300
+    telegram_notifier.bot_token = "replace-me"
+    telegram_notifier.alert_chat_id = None
     client = TestClient(api_app)
 
     client.post(
@@ -59,6 +64,8 @@ def test_get_incidents_by_fingerprint_returns_lifecycle_items(tmp_path):
 def test_incident_read_ack_resolve_and_timeline(tmp_path):
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     incident_repository.dedup_window_seconds = 300
+    telegram_notifier.bot_token = "replace-me"
+    telegram_notifier.alert_chat_id = None
     client = TestClient(api_app)
 
     created = client.post(
@@ -90,4 +97,10 @@ def test_incident_read_ack_resolve_and_timeline(tmp_path):
 
     assert timeline.status_code == 200
     event_types = [event["event_type"] for event in timeline.json()["events"]]
-    assert event_types == ["created", "read", "acknowledged", "resolved"]
+    assert event_types == [
+        "created",
+        "telegram_notify",
+        "read",
+        "acknowledged",
+        "resolved",
+    ]

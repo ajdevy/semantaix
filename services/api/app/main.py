@@ -6,6 +6,7 @@ from platform_common.settings import get_settings
 from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.incidents import IncidentRepository
 from services.api.app.openrouter_client import OpenRouterClient
+from services.api.app.telegram_notifier import TelegramIncidentNotifier
 
 app = create_service_app("api")
 openrouter_client = OpenRouterClient()
@@ -13,6 +14,11 @@ settings = get_settings()
 incident_repository = IncidentRepository(
     db_path=settings.incident_db_path,
     dedup_window_seconds=settings.incident_dedup_window_seconds,
+)
+telegram_notifier = TelegramIncidentNotifier(
+    bot_token=settings.telegram_bot_token,
+    alert_chat_id=settings.telegram_alert_chat_id,
+    alert_username=settings.telegram_alert_username,
 )
 
 
@@ -80,17 +86,31 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
 
 
 @app.post("/incidents/events")
-def ingest_incident_event(request: IncidentEventRequest) -> dict[str, object]:
+async def ingest_incident_event(request: IncidentEventRequest) -> dict[str, object]:
     incident = incident_repository.ingest(
         fingerprint=request.fingerprint,
         severity=request.severity,
         summary=request.summary,
+    )
+    sent, delivery_status = await telegram_notifier.notify_if_critical(
+        incident_id=incident.id,
+        fingerprint=incident.fingerprint,
+        severity=incident.severity,
+        summary=incident.summary,
+        occurrence_count=incident.occurrence_count,
+    )
+    incident_repository.append_event(
+        incident_id=incident.id,
+        event_type="telegram_notify",
+        details=f"status={delivery_status}",
     )
     return {
         "id": incident.id,
         "fingerprint": incident.fingerprint,
         "status": incident.status,
         "occurrence_count": incident.occurrence_count,
+        "telegram_notification_sent": sent,
+        "telegram_delivery_status": delivery_status,
     }
 
 
