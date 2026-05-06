@@ -54,6 +54,20 @@ def test_extract_candidate_lines_removes_noise():
     assert extract_candidate_lines(text) == ["Reset password via account settings."]
 
 
+def test_extract_from_transcripts_new_ids_match_repository_rows(tmp_path):
+    transcript_path = str(tmp_path / "transcripts.sqlite3")
+    knowledge_path = str(tmp_path / "knowledge.sqlite3")
+    _init_transcript_db(transcript_path)
+
+    repository = KnowledgeCandidateRepository(
+        db_path=knowledge_path,
+        transcript_db_path=transcript_path,
+    )
+    result = repository.extract_from_transcripts()
+    items = repository.list_candidates()
+    assert {c.id for c in result.new_candidates} == {item.id for item in items}
+
+
 def test_extract_from_transcripts_is_idempotent(tmp_path):
     transcript_path = str(tmp_path / "transcripts.sqlite3")
     knowledge_path = str(tmp_path / "knowledge.sqlite3")
@@ -66,8 +80,9 @@ def test_extract_from_transcripts_is_idempotent(tmp_path):
     first = repository.extract_from_transcripts()
     second = repository.extract_from_transcripts()
     items = repository.list_candidates()
-    assert first == 2
-    assert second == 0
+    assert first.inserted == 2
+    assert len(first.new_candidates) == 2
+    assert second.inserted == 0
     assert len(items) == 2
     assert {item.conversation_id for item in items} == {1, 2}
 
@@ -81,7 +96,8 @@ def test_extract_and_list_for_specific_conversation(tmp_path):
         transcript_db_path=transcript_path,
     )
 
-    inserted = repository.extract_from_transcripts(conversation_id=1)
+    result = repository.extract_from_transcripts(conversation_id=1)
+    inserted = result.inserted
     items = repository.list_candidates(conversation_id=1)
     assert inserted == 1
     assert len(items) == 1

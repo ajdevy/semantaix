@@ -57,13 +57,27 @@ class KnowledgeCandidate:
     candidate_text: str
 
 
+@dataclass(frozen=True)
+class ExtractedCandidate:
+    id: int
+    candidate_text: str
+
+
+@dataclass(frozen=True)
+class ExtractFromTranscriptsResult:
+    inserted: int
+    new_candidates: list[ExtractedCandidate]
+
+
 class KnowledgeCandidateRepository:
     def __init__(self, db_path: str, transcript_db_path: str) -> None:
         self.db_path = db_path
         self.transcript_db_path = transcript_db_path
         init_schema(db_path)
 
-    def extract_from_transcripts(self, conversation_id: int | None = None) -> int:
+    def extract_from_transcripts(
+        self, conversation_id: int | None = None
+    ) -> ExtractFromTranscriptsResult:
         init_schema(self.db_path)
         with _connect(self.transcript_db_path) as source_connection:
             if conversation_id is None:
@@ -86,6 +100,7 @@ class KnowledgeCandidateRepository:
                 ).fetchall()
 
         inserted = 0
+        new_candidates: list[ExtractedCandidate] = []
         with _connect(self.db_path) as target_connection:
             for row in rows:
                 message_text = str(row["text"])
@@ -107,7 +122,14 @@ class KnowledgeCandidateRepository:
                     )
                     if cursor.rowcount > 0:
                         inserted += 1
-        return inserted
+                        row_id = int(cursor.lastrowid)
+                        new_candidates.append(
+                            ExtractedCandidate(id=row_id, candidate_text=line)
+                        )
+        return ExtractFromTranscriptsResult(
+            inserted=inserted,
+            new_candidates=new_candidates,
+        )
 
     def list_candidates(self, conversation_id: int | None = None) -> list[KnowledgeCandidate]:
         init_schema(self.db_path)
