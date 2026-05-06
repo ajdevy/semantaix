@@ -2,8 +2,23 @@
 
 ## Automated verification
 
-- [ ] `pytest tests/test_bot_gateway_webhook.py tests/test_persistence_repository.py tests/test_epic01_e2e.py`
+Use **Python 3.11** and a local venv (same as CI); `python3` on macOS Homebrew may be 3.14+ without project deps:
+
+```bash
+python3.11 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+```
+
+Single entry point (recommended): **lint + full test suite + live demo**:
+
+```bash
+bash scripts/run_all_epic_feature_signoffs.sh
+```
+
+Or run CI steps separately:
+
 - [ ] `ruff check .`
+- [ ] `pytest tests/test_bot_gateway_webhook.py tests/test_persistence_repository.py tests/test_epic01_e2e.py`
+- [ ] CI parity is `pytest --cov --cov-config=.coveragerc --cov-report=term-missing` (runs all tests).
 
 ## Manual scripted flow
 
@@ -23,7 +38,7 @@ bash scripts/epic01_signoff_demo.sh
 6. Verify suggestion-only contract fields:
    - `response_mode = suggestion_only`
    - `is_suggestion_only = true`
-   - `guardrails_applied = false`
+   - `guardrails_applied = true`
 
 ## Acceptance evidence
 

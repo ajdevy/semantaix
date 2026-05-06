@@ -26,9 +26,11 @@ Initial Docker-first skeleton for the Semantaix Option B architecture.
 
 ## Run Tests
 
-- `python3 -m venv .venv && source .venv/bin/activate`
+- `python3.11 -m venv .venv && source .venv/bin/activate`
 - `pip install -r requirements-dev.txt`
 - `pytest`
+
+Gate signoffs (matches CI lint + pytest coverage + Epic 01 live demo): `bash scripts/run_all_epic_feature_signoffs.sh`
 
 ## HITL Contact Configuration
 
