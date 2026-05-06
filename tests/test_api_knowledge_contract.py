@@ -8,6 +8,7 @@ from services.api.app.main import (
 from services.api.app.main import (
     incident_repository,
     knowledge_candidate_repository,
+    knowledge_moderation_repository,
 )
 
 
@@ -52,6 +53,7 @@ def test_knowledge_extract_mixed_transcript(tmp_path):
 
     knowledge_candidate_repository.transcript_db_path = transcript_path
     knowledge_candidate_repository.db_path = knowledge_path
+    knowledge_moderation_repository.db_path = knowledge_path
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     client = TestClient(api_app)
 
@@ -66,6 +68,7 @@ def test_knowledge_extract_mixed_transcript(tmp_path):
 def test_knowledge_extract_failure_emits_incident(tmp_path):
     knowledge_candidate_repository.db_path = str(tmp_path / "knowledge.sqlite3")
     knowledge_candidate_repository.transcript_db_path = str(tmp_path / "missing.sqlite3")
+    knowledge_moderation_repository.db_path = str(tmp_path / "knowledge.sqlite3")
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     client = TestClient(api_app)
 

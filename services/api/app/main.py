@@ -9,6 +9,7 @@ from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.hitl import HitlTicketRepository
 from services.api.app.incidents import IncidentRepository
 from services.api.app.knowledge import KnowledgeCandidateRepository
+from services.api.app.knowledge_moderation import KnowledgeModerationRepository
 from services.api.app.openrouter_client import OpenRouterClient
 from services.api.app.rag import RagRepository
 from services.api.app.telegram_bot_sender import TelegramBotSender
@@ -32,6 +33,7 @@ knowledge_candidate_repository = KnowledgeCandidateRepository(
     transcript_db_path=settings.persistence_db_path,
 )
 rag_repository = RagRepository(settings.rag_db_path)
+knowledge_moderation_repository = KnowledgeModerationRepository(settings.knowledge_db_path)
 telegram_bot_sender = TelegramBotSender(bot_token=settings.telegram_bot_token)
 
 
@@ -72,6 +74,14 @@ class RagIngestRequest(BaseModel):
 class RagRetrieveRequest(BaseModel):
     query: str
     limit: int = 3
+
+
+class KnowledgeCandidateCreateRequest(BaseModel):
+    text: str
+
+
+class KnowledgeCandidateApproveRequest(BaseModel):
+    edited_text: str | None = None
 
 
 def _effective_hitl_operator_username() -> str:
@@ -484,3 +494,99 @@ def extract_knowledge_candidates(request: KnowledgeExtractRequest) -> dict[str, 
             for item in candidates
         ],
     }
+
+
+@app.post("/knowledge/candidates")
+def create_knowledge_candidate(request: KnowledgeCandidateCreateRequest) -> dict[str, object]:
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="empty_candidate_text")
+    row = knowledge_moderation_repository.create_pending(text=request.text)
+    return {
+        "id": row.id,
+        "status": row.status,
+        "candidate_text": row.candidate_text,
+    }
+
+
+@app.get("/knowledge/candidates")
+def list_knowledge_candidates(status: str | None = None) -> dict[str, object]:
+    rows = knowledge_moderation_repository.list_by_status(status)
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "candidate_text": row.candidate_text,
+                "published_text": row.published_text,
+                "status": row.status,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/knowledge/candidates/{candidate_id}/approve")
+def approve_knowledge_candidate(
+    candidate_id: int, request: KnowledgeCandidateApproveRequest
+) -> dict[str, object]:
+    try:
+        publish_text = knowledge_moderation_repository.prepare_publish_text(
+            candidate_id=candidate_id,
+            edited_text=request.edited_text,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="candidate_not_found") from exc
+    except ValueError as exc:
+        if str(exc) == "invalid_status":
+            raise HTTPException(status_code=409, detail="candidate_not_pending") from exc
+        if str(exc) == "empty_publish_text":
+            raise HTTPException(status_code=400, detail="empty_publish_text") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    source_id = f"knowledge_candidate:{candidate_id}"
+    try:
+        inserted_chunks = rag_repository.ingest(source_id=source_id, text=publish_text)
+    except Exception as exc:
+        incident = incident_repository.ingest(
+            fingerprint="knowledge_reindex_failures",
+            severity="critical",
+            summary=f"Knowledge moderation reindex failed: {exc}",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="knowledge_reindex_failed",
+            details=f"candidate_id={candidate_id};source_id={source_id}",
+        )
+        raise HTTPException(status_code=500, detail="knowledge_reindex_failed") from exc
+
+    try:
+        knowledge_moderation_repository.mark_approved(
+            candidate_id=candidate_id,
+            published_text=publish_text,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="candidate_not_found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="candidate_not_pending") from exc
+
+    return {
+        "id": candidate_id,
+        "status": "approved",
+        "published_text": publish_text,
+        "source_id": source_id,
+        "inserted_chunks": inserted_chunks,
+    }
+
+
+@app.post("/knowledge/candidates/{candidate_id}/reject")
+def reject_knowledge_candidate(candidate_id: int) -> dict[str, object]:
+    try:
+        knowledge_moderation_repository.reject(candidate_id=candidate_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="candidate_not_found") from exc
+    except ValueError as exc:
+        if str(exc) == "invalid_status":
+            raise HTTPException(status_code=409, detail="candidate_not_pending") from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"id": candidate_id, "status": "rejected"}
