@@ -25,6 +25,8 @@ class AppSettings(BaseSettings):
     telegram_alert_debounce_seconds: int = 300
     hitl_ticket_db_path: str = ".data/semantaix_hitl.db"
     hitl_primary_operator_username: str = "@ajdevy"
+    rag_db_path: str = ".data/semantaix_rag.db"
+    knowledge_db_path: str = ".data/semantaix_knowledge.db"
     hitl_config_admin_username: str = "@ajdevy"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
