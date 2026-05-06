@@ -13,7 +13,10 @@ class AppSettings(BaseSettings):
     scheduler_port: int = 8004
     qdrant_url: str = "http://qdrant:6333"
     database_url: str = "postgresql://postgres:postgres@postgres:5432/semantaix"
+    persistence_db_path: str = ".data/semantaix_story1.db"
     telegram_bot_token: str = "replace-me"
+    telegram_alert_username: str = "@ajdevy"
+    telegram_alert_chat_id: str | None = None
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "openai/gpt-4o-mini"
