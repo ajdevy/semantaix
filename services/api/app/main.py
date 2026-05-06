@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
 from services.api.app.guardrails import evaluate_suggestion
+from services.api.app.hitl import HitlTicketRepository
 from services.api.app.incidents import IncidentRepository
 from services.api.app.openrouter_client import OpenRouterClient
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
@@ -22,6 +23,7 @@ telegram_notifier = TelegramIncidentNotifier(
     alert_chat_id=settings.telegram_alert_chat_id,
     alert_username=settings.telegram_alert_username,
 )
+hitl_ticket_repository = HitlTicketRepository(settings.hitl_ticket_db_path)
 
 
 @app.get("/")
@@ -39,6 +41,10 @@ class IncidentEventRequest(BaseModel):
     summary: str
 
 
+class HitlRouteRequest(BaseModel):
+    operator_username: str | None = None
+
+
 @app.post("/suggest")
 async def suggest(request: SuggestRequest) -> dict[str, object]:
     try:
@@ -50,6 +56,14 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
 
     decision = evaluate_suggestion(suggestion)
     if not decision.valid:
+        ticket = hitl_ticket_repository.create(
+            conversation_ref=request.text[:120],
+            reason=",".join(decision.reasons),
+        )
+        hitl_ticket_repository.assign(
+            ticket_id=ticket.id,
+            operator_username=settings.hitl_primary_operator_username,
+        )
         incident = incident_repository.ingest(
             fingerprint="guardrail_invalid_suggestion",
             severity="warning",
@@ -71,6 +85,8 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
                 "score": decision.score,
             },
             "delivery_blocked": True,
+            "hitl_ticket_id": ticket.id,
+            "hitl_operator_username": settings.hitl_primary_operator_username,
         }
 
     return {
@@ -224,4 +240,58 @@ def get_incident_timeline(incident_id: int) -> dict[str, object]:
             }
             for event in timeline
         ],
+    }
+
+
+@app.get("/hitl/tickets")
+def list_hitl_tickets() -> dict[str, object]:
+    tickets = hitl_ticket_repository.list_all()
+    return {
+        "items": [
+            {
+                "id": ticket.id,
+                "conversation_ref": ticket.conversation_ref,
+                "reason": ticket.reason,
+                "status": ticket.status,
+                "operator_username": ticket.operator_username,
+                "created_at": ticket.created_at,
+                "updated_at": ticket.updated_at,
+                "resolved_at": ticket.resolved_at,
+            }
+            for ticket in tickets
+        ]
+    }
+
+
+@app.post("/hitl/tickets/{ticket_id}/route")
+def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[str, object]:
+    operator = request.operator_username or settings.hitl_primary_operator_username
+    if not operator:
+        incident = incident_repository.ingest(
+            fingerprint="hitl_delivery_failures",
+            severity="critical",
+            summary="HITL ticket routing failed: missing operator username",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="hitl_route_failed",
+            details=f"ticket_id={ticket_id}",
+        )
+        raise HTTPException(status_code=503, detail="hitl_operator_missing")
+
+    ticket = hitl_ticket_repository.assign(ticket_id=ticket_id, operator_username=operator)
+    return {
+        "id": ticket.id,
+        "status": ticket.status,
+        "operator_username": ticket.operator_username,
+    }
+
+
+@app.post("/hitl/tickets/{ticket_id}/resolve")
+def resolve_hitl_ticket(ticket_id: int) -> dict[str, object]:
+    ticket = hitl_ticket_repository.resolve(ticket_id=ticket_id)
+    return {
+        "id": ticket.id,
+        "status": ticket.status,
+        "resolved_at": ticket.resolved_at,
     }
