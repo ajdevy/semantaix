@@ -1,8 +1,10 @@
 from platform_common.settings import AppSettings
 
 
-def test_settings_defaults():
-    settings = AppSettings()
+def test_settings_defaults(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_ALERT_CHAT_ID", raising=False)
+    monkeypatch.delenv("TELEGRAM_ALERT_USERNAME", raising=False)
+    settings = AppSettings(_env_file=None)
     assert settings.app_env == "development"
     assert settings.log_level == "INFO"
     assert settings.api_port == 8000
@@ -10,6 +12,8 @@ def test_settings_defaults():
     assert settings.openrouter_base_url == "https://openrouter.ai/api/v1"
     assert settings.incident_db_path == ".data/semantaix_incidents.db"
     assert settings.incident_dedup_window_seconds == 300
+    assert settings.telegram_alert_username == "@ajdevy"
+    assert settings.telegram_alert_chat_id is None
 
 
 def test_settings_env_override(monkeypatch):
@@ -20,7 +24,9 @@ def test_settings_env_override(monkeypatch):
     monkeypatch.setenv("PERSISTENCE_DB_PATH", ".tmp/test.sqlite3")
     monkeypatch.setenv("INCIDENT_DB_PATH", ".tmp/incidents.sqlite3")
     monkeypatch.setenv("INCIDENT_DEDUP_WINDOW_SECONDS", "60")
-    settings = AppSettings()
+    monkeypatch.setenv("TELEGRAM_ALERT_USERNAME", "@ops")
+    monkeypatch.setenv("TELEGRAM_ALERT_CHAT_ID", "-1001234")
+    settings = AppSettings(_env_file=None)
     assert settings.app_env == "test"
     assert settings.log_level == "DEBUG"
     assert settings.api_port == 9000
@@ -28,3 +34,5 @@ def test_settings_env_override(monkeypatch):
     assert settings.openrouter_model == "anthropic/claude-3.5-sonnet"
     assert settings.incident_db_path == ".tmp/incidents.sqlite3"
     assert settings.incident_dedup_window_seconds == 60
+    assert settings.telegram_alert_username == "@ops"
+    assert settings.telegram_alert_chat_id == "-1001234"

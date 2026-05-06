@@ -56,7 +56,7 @@ def test_epic01_e2e_webhook_persist_suggest(monkeypatch, tmp_path):
     data = suggest_response.json()
     assert data["response_mode"] == "suggestion_only"
     assert data["is_suggestion_only"] is True
-    assert data["guardrails_applied"] is False
+    assert data["guardrails_applied"] is True
     assert data["suggestion"].startswith("[Suggestion mode]")
 
     get_settings.cache_clear()

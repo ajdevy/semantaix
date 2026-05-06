@@ -110,3 +110,24 @@ def test_init_schema_migrates_legacy_incidents_table(tmp_path):
         assert "is_read" in columns
         assert "acknowledged_at" in columns
         assert "resolved_at" in columns
+
+
+def test_append_event_adds_timeline_entry(tmp_path):
+    repository = IncidentRepository(
+        db_path=str(tmp_path / "incidents.sqlite3"),
+        dedup_window_seconds=300,
+    )
+    created = repository.ingest(
+        fingerprint="queue_dlq_growth",
+        severity="critical",
+        summary="DLQ growth detected",
+    )
+
+    repository.append_event(
+        incident_id=created.id,
+        event_type="manual_note",
+        details="Operator added investigation note",
+    )
+    timeline = repository.get_timeline(created.id)
+    assert timeline[-1].event_type == "manual_note"
+    assert timeline[-1].details == "Operator added investigation note"
