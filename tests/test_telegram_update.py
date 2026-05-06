@@ -23,8 +23,24 @@ def test_normalize_update_accepts_valid_text_message():
         source_message_id=22,
         chat_id=33,
         user_id=44,
+        username=None,
         text="hello",
     )
+
+
+def test_normalize_update_extracts_username():
+    payload = {
+        "update_id": 11,
+        "message": {
+            "message_id": 23,
+            "chat": {"id": 34},
+            "from": {"id": 45, "username": "ajdevy"},
+            "text": "set config",
+        },
+    }
+    normalized = normalize_update(payload)
+    assert normalized is not None
+    assert normalized.username == "@ajdevy"
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,7 @@ def test_settings_defaults(monkeypatch):
     assert settings.telegram_alert_debounce_seconds == 300
     assert settings.hitl_ticket_db_path == ".data/semantaix_hitl.db"
     assert settings.hitl_primary_operator_username == "@ajdevy"
+    assert settings.hitl_config_admin_username == "@ajdevy"
 
 
 def test_settings_env_override(monkeypatch):
@@ -32,6 +33,7 @@ def test_settings_env_override(monkeypatch):
     monkeypatch.setenv("TELEGRAM_ALERT_DEBOUNCE_SECONDS", "120")
     monkeypatch.setenv("HITL_TICKET_DB_PATH", ".tmp/hitl.sqlite3")
     monkeypatch.setenv("HITL_PRIMARY_OPERATOR_USERNAME", "@ops")
+    monkeypatch.setenv("HITL_CONFIG_ADMIN_USERNAME", "@admin")
     settings = AppSettings(_env_file=None)
     assert settings.app_env == "test"
     assert settings.log_level == "DEBUG"
@@ -45,3 +47,4 @@ def test_settings_env_override(monkeypatch):
     assert settings.telegram_alert_debounce_seconds == 120
     assert settings.hitl_ticket_db_path == ".tmp/hitl.sqlite3"
     assert settings.hitl_primary_operator_username == "@ops"
+    assert settings.hitl_config_admin_username == "@admin"

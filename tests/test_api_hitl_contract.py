@@ -163,3 +163,20 @@ def test_hitl_reply_missing_bot_token_emits_incident(tmp_path, monkeypatch):
     assert response.json()["detail"] == "x"
     incidents = client.get("/incidents/hitl_delivery_failures").json()["items"]
     assert len(incidents) == 1
+
+
+def test_suggest_uses_runtime_configured_hitl_operator(tmp_path, monkeypatch):
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
+    settings.hitl_primary_operator_username = "@default"
+    hitl_ticket_repository.set_runtime_config(
+        key="hitl_primary_operator_username",
+        value="@flexsentlabs",
+        updated_by="@ajdevy",
+    )
+    monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
+    client = TestClient(api_app)
+
+    response = client.post("/suggest", json={"text": "Need escalation"})
+    assert response.status_code == 200
+    assert response.json()["hitl_operator_username"] == "@flexsentlabs"

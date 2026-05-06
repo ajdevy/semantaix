@@ -41,6 +41,16 @@ def init_schema(db_path: str) -> None:
         ]
         if "target_chat_id" not in columns:
             connection.execute("ALTER TABLE hitl_tickets ADD COLUMN target_chat_id INTEGER")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hitl_runtime_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by TEXT NOT NULL
+            )
+            """
+        )
 
 
 @dataclass(frozen=True)
@@ -167,6 +177,32 @@ class HitlTicketRepository:
             ).fetchone()
             assert row is not None
             return self._row_to_ticket(row)
+
+    def set_runtime_config(self, *, key: str, value: str, updated_by: str) -> None:
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO hitl_runtime_config (key, value, updated_at, updated_by)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at,
+                    updated_by = excluded.updated_by
+                """,
+                (key, value, _now(), updated_by),
+            )
+
+    def get_runtime_config(self, key: str) -> str | None:
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT value FROM hitl_runtime_config WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                return None
+            return str(row["value"])
 
     @staticmethod
     def _row_to_ticket(row: sqlite3.Row) -> HitlTicket:

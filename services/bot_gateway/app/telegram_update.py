@@ -14,6 +14,7 @@ class NormalizedTelegramMessage:
     source_message_id: int
     chat_id: int
     user_id: int
+    username: str | None
     text: str
 
 
@@ -55,6 +56,8 @@ def normalize_update(payload: dict[str, Any]) -> NormalizedTelegramMessage | Non
     user_id = from_user.get("id")
     if not isinstance(user_id, int):
         raise TelegramUpdateValidationError("missing_or_invalid_user_id")
+    username = from_user.get("username")
+    normalized_username = f"@{username}" if isinstance(username, str) and username else None
 
     text = message.get("text")
     if not isinstance(text, str):
@@ -70,5 +73,6 @@ def normalize_update(payload: dict[str, Any]) -> NormalizedTelegramMessage | Non
         source_message_id=message_id,
         chat_id=chat_id,
         user_id=user_id,
+        username=normalized_username,
         text=normalized_text,
     )

@@ -53,6 +53,13 @@ class HitlReplyRequest(BaseModel):
     reply_text: str
 
 
+def _effective_hitl_operator_username() -> str:
+    return (
+        hitl_ticket_repository.get_runtime_config("hitl_primary_operator_username")
+        or settings.hitl_primary_operator_username
+    )
+
+
 @app.post("/suggest")
 async def suggest(request: SuggestRequest) -> dict[str, object]:
     try:
@@ -71,7 +78,7 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
         )
         hitl_ticket_repository.assign(
             ticket_id=ticket.id,
-            operator_username=settings.hitl_primary_operator_username,
+            operator_username=_effective_hitl_operator_username(),
         )
         incident = incident_repository.ingest(
             fingerprint="guardrail_invalid_suggestion",
@@ -95,7 +102,7 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
             },
             "delivery_blocked": True,
             "hitl_ticket_id": ticket.id,
-            "hitl_operator_username": settings.hitl_primary_operator_username,
+            "hitl_operator_username": _effective_hitl_operator_username(),
         }
 
     return {
@@ -275,7 +282,7 @@ def list_hitl_tickets() -> dict[str, object]:
 
 @app.post("/hitl/tickets/{ticket_id}/route")
 def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[str, object]:
-    operator = request.operator_username or settings.hitl_primary_operator_username
+    operator = request.operator_username or _effective_hitl_operator_username()
     if not operator:
         incident = incident_repository.ingest(
             fingerprint="hitl_delivery_failures",
