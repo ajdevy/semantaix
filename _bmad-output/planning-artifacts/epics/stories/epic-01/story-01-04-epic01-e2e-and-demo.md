@@ -23,6 +23,12 @@ Provide reproducible proof that Epic 01 works end-to-end and is ready for gate s
 ### UI
 - basic admin shell smoke remains green
 
+## Automated E2E verification
+
+Primary gate: **`tests/test_epic01_e2e.py::test_epic01_e2e_webhook_persist_suggest`** — `@pytest.mark.e2e`; bot_gateway webhook → SQLite persistence → `/suggest` with mocked LLM.
+
+CI also runs **`pytest -m e2e`**, which includes this test and sibling story markers listed in `_bmad-output/implementation-artifacts/e2e-coverage.md`.
+
 ## Manual Verification
 1. Run automated test suite for Epic 01.
 2. Execute scripted Telegram flow in staging/local.

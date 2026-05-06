@@ -36,6 +36,13 @@ Persist incoming normalized Telegram messages into conversation/message model re
 ### UI
 - N/A for this story
 
+## Automated E2E verification
+
+- **`tests/test_bot_gateway_webhook.py::test_webhook_persists_message_rows`** — `@pytest.mark.e2e`; webhook persists `conversations` / `messages`.
+- Duplicate delivery: **`tests/test_bot_gateway_webhook.py::test_duplicate_webhook_does_not_create_duplicate_message_row`** (contract test, not `@e2e`).
+
+See `_bmad-output/implementation-artifacts/e2e-coverage.md`.
+
 ## Manual Verification
 1. Send two messages from same user.
 2. Verify one conversation and two messages persisted.

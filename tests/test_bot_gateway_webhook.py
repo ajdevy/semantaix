@@ -25,6 +25,9 @@ def persistence_db(tmp_path, monkeypatch) -> Path:
     get_settings.cache_clear()
 
 
+@pytest.mark.e2e
+@pytest.mark.epic("01")
+@pytest.mark.story("01-01")
 def test_webhook_accepts_text_message_and_returns_trace():
     client = TestClient(bot_app)
     response = client.post(
@@ -103,6 +106,9 @@ def test_webhook_rejects_non_object_payload():
     assert response.json()["detail"] == "invalid_payload_type"
 
 
+@pytest.mark.e2e
+@pytest.mark.epic("01")
+@pytest.mark.story("01-02")
 def test_webhook_persists_message_rows(persistence_db):
     client = TestClient(bot_app)
     response = client.post(
@@ -131,6 +137,9 @@ def test_duplicate_webhook_does_not_create_duplicate_message_row(persistence_db)
     assert messages == 1
 
 
+@pytest.mark.e2e
+@pytest.mark.epic("04")
+@pytest.mark.story("04-runtime-config")
 def test_admin_can_configure_hitl_contact_via_command(tmp_path):
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
     client = TestClient(bot_app)

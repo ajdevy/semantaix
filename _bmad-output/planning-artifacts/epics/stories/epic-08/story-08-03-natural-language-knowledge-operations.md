@@ -34,6 +34,10 @@ Let the **tenant** add, update, or retire knowledge by **talking with the bot** 
 ### UI
 - optional: minimal Web UI mirror not required in MVP if bot path is complete
 
+## Automated E2E verification
+
+**Deferred** — NL ops pipeline (`preview → confirm → version → reindex`) is out of scope for current services. Existing Epic 06 E2E covers **moderated knowledge** via API (`tests/e2e/test_e2e_epic06_knowledge_pipeline.py`), not tenant NL conversational ops.
+
 ## Manual Verification
 1. As tenant admin, issue NL “add FAQ about returns.”
 2. Confirm preview; verify version row and audit log.

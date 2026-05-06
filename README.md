@@ -28,7 +28,11 @@ Initial Docker-first skeleton for the Semantaix Option B architecture.
 
 - `python3 -m venv .venv && source .venv/bin/activate`
 - `pip install -r requirements-dev.txt`
-- `pytest`
+- `pytest` — full suite (unit, API contract, story E2E)
+- `pytest -m e2e` — story-aligned E2E subset only
+- `pytest --cov --cov-config=.coveragerc --cov-report=term-missing` — same coverage gate as CI
+
+See [_bmad-output/implementation-artifacts/e2e-coverage.md](_bmad-output/implementation-artifacts/e2e-coverage.md) for the story ↔ test matrix.
 
 ## HITL Contact Configuration
 

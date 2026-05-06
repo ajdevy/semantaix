@@ -37,6 +37,15 @@ Generate answer suggestions from latest conversation context and return through 
 ### UI
 - smoke check admin shell availability (existing baseline test)
 
+## Automated E2E verification
+
+- **`tests/test_api_suggest_contract.py::test_suggest_returns_suggestion_payload_on_success`** — `@pytest.mark.e2e`; `/suggest` returns suggestion-only contract with mocked OpenRouter.
+- Full stack with webhook persistence: **`tests/test_epic01_e2e.py::test_epic01_e2e_webhook_persist_suggest`**.
+
+Implementation today includes guardrails evaluation on `/suggest` (Epic 03); automated tests cover both passing and blocked model outputs.
+
+See `_bmad-output/implementation-artifacts/e2e-coverage.md`.
+
 ## Manual Verification
 1. Send Telegram message with test content.
 2. Confirm suggestion is generated and returned.

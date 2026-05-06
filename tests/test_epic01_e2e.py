@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from platform_common.settings import get_settings
@@ -17,6 +18,9 @@ def load_fixture(name: str) -> dict:
     return json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
+@pytest.mark.e2e
+@pytest.mark.epic("01")
+@pytest.mark.story("01-04")
 def test_epic01_e2e_webhook_persist_suggest(monkeypatch, tmp_path):
     db_path = tmp_path / "epic01_e2e.sqlite3"
     monkeypatch.setenv("PERSISTENCE_DB_PATH", str(db_path))
