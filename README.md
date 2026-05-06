@@ -29,3 +29,15 @@ Initial Docker-first skeleton for the Semantaix Option B architecture.
 - `python3 -m venv .venv && source .venv/bin/activate`
 - `pip install -r requirements-dev.txt`
 - `pytest`
+
+## HITL Contact Configuration
+
+- Default env configuration:
+  - `HITL_PRIMARY_OPERATOR_USERNAME`
+  - `TELEGRAM_ALERT_CHAT_ID`
+  - `HITL_CONFIG_ADMIN_USERNAME`
+- Runtime bot command (admin-only) to update operator + chat id:
+  - `/hitl_config @flexsentlabs 650934815`
+- Access control:
+  - only the Telegram username in `HITL_CONFIG_ADMIN_USERNAME` can apply this command.
+  - current target admin is `@ajdevy`.

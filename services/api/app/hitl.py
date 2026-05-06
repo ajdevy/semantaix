@@ -28,9 +28,26 @@ def init_schema(db_path: str) -> None:
                 reason TEXT NOT NULL,
                 status TEXT NOT NULL,
                 operator_username TEXT,
+                target_chat_id INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 resolved_at TEXT
+            )
+            """
+        )
+        columns = [
+            row[1]
+            for row in connection.execute("PRAGMA table_info(hitl_tickets)").fetchall()
+        ]
+        if "target_chat_id" not in columns:
+            connection.execute("ALTER TABLE hitl_tickets ADD COLUMN target_chat_id INTEGER")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS hitl_runtime_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by TEXT NOT NULL
             )
             """
         )
@@ -43,6 +60,7 @@ class HitlTicket:
     reason: str
     status: str
     operator_username: str | None
+    target_chat_id: int | None
     created_at: str
     updated_at: str
     resolved_at: str | None
@@ -53,7 +71,13 @@ class HitlTicketRepository:
         self.db_path = db_path
         init_schema(db_path)
 
-    def create(self, *, conversation_ref: str, reason: str) -> HitlTicket:
+    def create(
+        self,
+        *,
+        conversation_ref: str,
+        reason: str,
+        target_chat_id: int | None = None,
+    ) -> HitlTicket:
         init_schema(self.db_path)
         now = _now()
         with _connect(self.db_path) as connection:
@@ -61,15 +85,15 @@ class HitlTicketRepository:
                 """
                 INSERT INTO hitl_tickets (
                     conversation_ref, reason, status, operator_username,
-                    created_at, updated_at, resolved_at
+                    target_chat_id, created_at, updated_at, resolved_at
                 )
-                VALUES (?, ?, 'open', NULL, ?, ?, NULL)
+                VALUES (?, ?, 'open', NULL, ?, ?, ?, NULL)
                 """,
-                (conversation_ref, reason, now, now),
+                (conversation_ref, reason, target_chat_id, now, now),
             )
             row = connection.execute(
                 """
-                SELECT id, conversation_ref, reason, status, operator_username,
+                SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
                        created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 WHERE id = ?
@@ -92,7 +116,7 @@ class HitlTicketRepository:
             )
             row = connection.execute(
                 """
-                SELECT id, conversation_ref, reason, status, operator_username,
+                SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
                        created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 WHERE id = ?
@@ -116,7 +140,7 @@ class HitlTicketRepository:
             )
             row = connection.execute(
                 """
-                SELECT id, conversation_ref, reason, status, operator_username,
+                SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
                        created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 WHERE id = ?
@@ -131,7 +155,7 @@ class HitlTicketRepository:
         with _connect(self.db_path) as connection:
             rows = connection.execute(
                 """
-                SELECT id, conversation_ref, reason, status, operator_username,
+                SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
                        created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 ORDER BY id DESC
@@ -144,7 +168,7 @@ class HitlTicketRepository:
         with _connect(self.db_path) as connection:
             row = connection.execute(
                 """
-                SELECT id, conversation_ref, reason, status, operator_username,
+                SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
                        created_at, updated_at, resolved_at
                 FROM hitl_tickets
                 WHERE id = ?
@@ -154,6 +178,32 @@ class HitlTicketRepository:
             assert row is not None
             return self._row_to_ticket(row)
 
+    def set_runtime_config(self, *, key: str, value: str, updated_by: str) -> None:
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO hitl_runtime_config (key, value, updated_at, updated_by)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at,
+                    updated_by = excluded.updated_by
+                """,
+                (key, value, _now(), updated_by),
+            )
+
+    def get_runtime_config(self, key: str) -> str | None:
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            row = connection.execute(
+                "SELECT value FROM hitl_runtime_config WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                return None
+            return str(row["value"])
+
     @staticmethod
     def _row_to_ticket(row: sqlite3.Row) -> HitlTicket:
         return HitlTicket(
@@ -162,6 +212,9 @@ class HitlTicketRepository:
             reason=str(row["reason"]),
             status=str(row["status"]),
             operator_username=str(row["operator_username"]) if row["operator_username"] else None,
+            target_chat_id=(
+                int(row["target_chat_id"]) if row["target_chat_id"] is not None else None
+            ),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
             resolved_at=str(row["resolved_at"]) if row["resolved_at"] else None,

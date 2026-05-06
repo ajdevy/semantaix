@@ -9,6 +9,7 @@ from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.hitl import HitlTicketRepository
 from services.api.app.incidents import IncidentRepository
 from services.api.app.openrouter_client import OpenRouterClient
+from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
 
 app = create_service_app("api")
@@ -24,6 +25,7 @@ telegram_notifier = TelegramIncidentNotifier(
     alert_username=settings.telegram_alert_username,
 )
 hitl_ticket_repository = HitlTicketRepository(settings.hitl_ticket_db_path)
+telegram_bot_sender = TelegramBotSender(bot_token=settings.telegram_bot_token)
 
 
 @app.get("/")
@@ -33,6 +35,7 @@ def root() -> dict[str, str]:
 
 class SuggestRequest(BaseModel):
     text: str
+    chat_id: int | None = None
 
 
 class IncidentEventRequest(BaseModel):
@@ -43,6 +46,18 @@ class IncidentEventRequest(BaseModel):
 
 class HitlRouteRequest(BaseModel):
     operator_username: str | None = None
+
+
+class HitlReplyRequest(BaseModel):
+    operator_username: str
+    reply_text: str
+
+
+def _effective_hitl_operator_username() -> str:
+    return (
+        hitl_ticket_repository.get_runtime_config("hitl_primary_operator_username")
+        or settings.hitl_primary_operator_username
+    )
 
 
 @app.post("/suggest")
@@ -59,10 +74,11 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
         ticket = hitl_ticket_repository.create(
             conversation_ref=request.text[:120],
             reason=",".join(decision.reasons),
+            target_chat_id=request.chat_id,
         )
         hitl_ticket_repository.assign(
             ticket_id=ticket.id,
-            operator_username=settings.hitl_primary_operator_username,
+            operator_username=_effective_hitl_operator_username(),
         )
         incident = incident_repository.ingest(
             fingerprint="guardrail_invalid_suggestion",
@@ -86,7 +102,7 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
             },
             "delivery_blocked": True,
             "hitl_ticket_id": ticket.id,
-            "hitl_operator_username": settings.hitl_primary_operator_username,
+            "hitl_operator_username": _effective_hitl_operator_username(),
         }
 
     return {
@@ -254,6 +270,7 @@ def list_hitl_tickets() -> dict[str, object]:
                 "reason": ticket.reason,
                 "status": ticket.status,
                 "operator_username": ticket.operator_username,
+                "target_chat_id": ticket.target_chat_id,
                 "created_at": ticket.created_at,
                 "updated_at": ticket.updated_at,
                 "resolved_at": ticket.resolved_at,
@@ -265,7 +282,7 @@ def list_hitl_tickets() -> dict[str, object]:
 
 @app.post("/hitl/tickets/{ticket_id}/route")
 def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[str, object]:
-    operator = request.operator_username or settings.hitl_primary_operator_username
+    operator = request.operator_username or _effective_hitl_operator_username()
     if not operator:
         incident = incident_repository.ingest(
             fingerprint="hitl_delivery_failures",
@@ -294,4 +311,63 @@ def resolve_hitl_ticket(ticket_id: int) -> dict[str, object]:
         "id": ticket.id,
         "status": ticket.status,
         "resolved_at": ticket.resolved_at,
+    }
+
+
+@app.post("/hitl/tickets/{ticket_id}/reply")
+async def deliver_hitl_ticket_reply(ticket_id: int, request: HitlReplyRequest) -> dict[str, object]:
+    ticket = hitl_ticket_repository.get(ticket_id)
+    if ticket.operator_username != request.operator_username:
+        raise HTTPException(status_code=403, detail="operator_not_assigned")
+    if not request.reply_text.strip():
+        raise HTTPException(status_code=400, detail="empty_reply")
+    if ticket.target_chat_id is None:
+        incident = incident_repository.ingest(
+            fingerprint="hitl_delivery_failures",
+            severity="critical",
+            summary="HITL reply delivery failed: missing target chat id",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="hitl_delivery_failed",
+            details=f"ticket_id={ticket_id};reason=missing_chat_id",
+        )
+        raise HTTPException(status_code=503, detail="missing_target_chat_id")
+
+    try:
+        # Delivers only the operator-authored body as bot text.
+        message_id = await telegram_bot_sender.send_message(
+            chat_id=ticket.target_chat_id,
+            text=request.reply_text.strip(),
+        )
+    except RuntimeError as exc:
+        incident = incident_repository.ingest(
+            fingerprint="hitl_delivery_failures",
+            severity="critical",
+            summary=f"HITL reply delivery failed: {exc}",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="hitl_delivery_failed",
+            details=f"ticket_id={ticket_id};reason=missing_bot_token",
+        )
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - provider failure path
+        incident = incident_repository.ingest(
+            fingerprint="hitl_delivery_failures",
+            severity="critical",
+            summary=f"HITL reply delivery failed: {exc}",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="hitl_delivery_failed",
+            details=f"ticket_id={ticket_id};reason=provider_error",
+        )
+        raise HTTPException(status_code=502, detail="hitl_delivery_failed") from exc
+
+    return {
+        "ticket_id": ticket_id,
+        "delivered": True,
+        "chat_id": ticket.target_chat_id,
+        "message_id": message_id,
     }
