@@ -463,7 +463,7 @@ async def deliver_hitl_ticket_reply(ticket_id: int, request: HitlReplyRequest) -
 @app.post("/knowledge/extract")
 def extract_knowledge_candidates(request: KnowledgeExtractRequest) -> dict[str, object]:
     try:
-        inserted = knowledge_candidate_repository.extract_from_transcripts(
+        extract_result = knowledge_candidate_repository.extract_from_transcripts(
             conversation_id=request.conversation_id
         )
     except Exception as exc:
@@ -479,11 +479,21 @@ def extract_knowledge_candidates(request: KnowledgeExtractRequest) -> dict[str, 
         )
         raise HTTPException(status_code=500, detail="knowledge_extraction_failed") from exc
 
+    moderation_ids: list[int] = []
+    for extracted in extract_result.new_candidates:
+        moderation_row = knowledge_moderation_repository.create_pending(
+            text=extracted.candidate_text,
+            source_extraction_candidate_id=extracted.id,
+        )
+        moderation_ids.append(moderation_row.id)
+
     candidates = knowledge_candidate_repository.list_candidates(
         conversation_id=request.conversation_id
     )
     return {
-        "inserted_candidates": inserted,
+        "inserted_candidates": extract_result.inserted,
+        "enqueued_for_moderation": len(moderation_ids),
+        "moderation_queue_ids": moderation_ids,
         "items": [
             {
                 "id": item.id,
@@ -505,6 +515,7 @@ def create_knowledge_candidate(request: KnowledgeCandidateCreateRequest) -> dict
         "id": row.id,
         "status": row.status,
         "candidate_text": row.candidate_text,
+        "source_extraction_candidate_id": row.source_extraction_candidate_id,
     }
 
 
@@ -520,6 +531,7 @@ def list_knowledge_candidates(status: str | None = None) -> dict[str, object]:
                 "status": row.status,
                 "created_at": row.created_at,
                 "updated_at": row.updated_at,
+                "source_extraction_candidate_id": row.source_extraction_candidate_id,
             }
             for row in rows
         ]

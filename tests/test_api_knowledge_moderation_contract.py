@@ -21,10 +21,13 @@ def test_create_list_approve_reindexes_and_retrievable(tmp_path):
         json={"text": "Reset passwords from account settings using the email link."},
     )
     assert created.status_code == 200
-    candidate_id = created.json()["id"]
+    create_body = created.json()
+    candidate_id = create_body["id"]
+    assert create_body["source_extraction_candidate_id"] is None
 
     listed = client.get("/knowledge/candidates", params={"status": "pending"})
     assert len(listed.json()["items"]) == 1
+    assert listed.json()["items"][0]["source_extraction_candidate_id"] is None
 
     approve = client.post(
         f"/knowledge/candidates/{candidate_id}/approve",

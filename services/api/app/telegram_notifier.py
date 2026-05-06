@@ -9,6 +9,7 @@ CRITICAL_FINGERPRINTS = {
     "db_down",
     "queue_dlq_growth",
     "hitl_delivery_failures",
+    "knowledge_extraction_failures",
     "knowledge_reindex_failures",
 }
 

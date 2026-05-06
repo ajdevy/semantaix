@@ -1,12 +1,49 @@
+import sqlite3
+
 import pytest
 
 from services.api.app.knowledge_moderation import KnowledgeModerationRepository
+
+
+def test_migration_adds_source_extraction_column_legacy_db(tmp_path):
+    path = str(tmp_path / "premigrate.sqlite")
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE knowledge_moderation_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                candidate_text TEXT NOT NULL,
+                published_text TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+    KnowledgeModerationRepository(path)
+    with sqlite3.connect(path) as connection:
+        pragma = connection.execute(
+            "PRAGMA table_info(knowledge_moderation_candidates)"
+        ).fetchall()
+        names = {row[1] for row in pragma}
+    assert "source_extraction_candidate_id" in names
+
+
+def test_create_pending_links_source_extraction_id(tmp_path):
+    repository = KnowledgeModerationRepository(str(tmp_path / "know.sqlite3"))
+    created = repository.create_pending(
+        text="Linked candidate text long enough for moderation flow.",
+        source_extraction_candidate_id=42,
+    )
+    assert created.source_extraction_candidate_id == 42
+    assert repository.get(created.id).source_extraction_candidate_id == 42
 
 
 def test_create_list_and_get(tmp_path):
     repository = KnowledgeModerationRepository(str(tmp_path / "know.sqlite3"))
     created = repository.create_pending(text="  Long enough candidate text for moderation.  ")
     assert created.status == "pending"
+    assert created.source_extraction_candidate_id is None
     listed = repository.list_by_status("pending")
     assert len(listed) == 1
     fetched = repository.get(created.id)

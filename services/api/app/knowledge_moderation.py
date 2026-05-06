@@ -18,6 +18,11 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _moderation_column_names(connection: sqlite3.Connection) -> set[str]:
+    rows = connection.execute("PRAGMA table_info(knowledge_moderation_candidates)").fetchall()
+    return {str(r["name"]) for r in rows}
+
+
 def init_schema(db_path: str) -> None:
     with _connect(db_path) as connection:
         connection.execute(
@@ -28,10 +33,23 @@ def init_schema(db_path: str) -> None:
                 published_text TEXT,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                source_extraction_candidate_id INTEGER
             )
             """
         )
+        if connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'knowledge_moderation_candidates'
+            """
+        ).fetchone():
+            columns = _moderation_column_names(connection)
+            if "source_extraction_candidate_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE knowledge_moderation_candidates "
+                    "ADD COLUMN source_extraction_candidate_id INTEGER"
+                )
 
 
 @dataclass(frozen=True)
@@ -42,6 +60,7 @@ class KnowledgeCandidateRow:
     status: str
     created_at: str
     updated_at: str
+    source_extraction_candidate_id: int | None
 
 
 class KnowledgeModerationRepository:
@@ -49,18 +68,28 @@ class KnowledgeModerationRepository:
         self.db_path = db_path
         init_schema(db_path)
 
-    def create_pending(self, *, text: str) -> KnowledgeCandidateRow:
+    def create_pending(
+        self,
+        *,
+        text: str,
+        source_extraction_candidate_id: int | None = None,
+    ) -> KnowledgeCandidateRow:
         init_schema(self.db_path)
         now = _now()
         with _connect(self.db_path) as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO knowledge_moderation_candidates (
-                    candidate_text, published_text, status, created_at, updated_at
+                    candidate_text,
+                    published_text,
+                    status,
+                    created_at,
+                    updated_at,
+                    source_extraction_candidate_id
                 )
-                VALUES (?, NULL, 'pending', ?, ?)
+                VALUES (?, NULL, 'pending', ?, ?, ?)
                 """,
-                (text.strip(), now, now),
+                (text.strip(), now, now, source_extraction_candidate_id),
             )
             row_id = int(cursor.lastrowid)
         return self.get(row_id)
@@ -71,7 +100,8 @@ class KnowledgeModerationRepository:
             if status is None:
                 rows = connection.execute(
                     """
-                    SELECT id, candidate_text, published_text, status, created_at, updated_at
+                    SELECT id, candidate_text, published_text, status, created_at, updated_at,
+                           source_extraction_candidate_id
                     FROM knowledge_moderation_candidates
                     ORDER BY id ASC
                     """
@@ -79,7 +109,8 @@ class KnowledgeModerationRepository:
             else:
                 rows = connection.execute(
                     """
-                    SELECT id, candidate_text, published_text, status, created_at, updated_at
+                    SELECT id, candidate_text, published_text, status, created_at, updated_at,
+                           source_extraction_candidate_id
                     FROM knowledge_moderation_candidates
                     WHERE status = ?
                     ORDER BY id ASC
@@ -93,7 +124,8 @@ class KnowledgeModerationRepository:
         with _connect(self.db_path) as connection:
             row = connection.execute(
                 """
-                SELECT id, candidate_text, published_text, status, created_at, updated_at
+                SELECT id, candidate_text, published_text, status, created_at, updated_at,
+                       source_extraction_candidate_id
                 FROM knowledge_moderation_candidates
                 WHERE id = ?
                 """,
@@ -167,6 +199,7 @@ class KnowledgeModerationRepository:
 
     @staticmethod
     def _row_to_candidate(row: sqlite3.Row) -> KnowledgeCandidateRow:
+        extraction_id = row["source_extraction_candidate_id"]
         return KnowledgeCandidateRow(
             id=int(row["id"]),
             candidate_text=str(row["candidate_text"]),
@@ -174,4 +207,7 @@ class KnowledgeModerationRepository:
             status=str(row["status"]),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
+            source_extraction_candidate_id=int(extraction_id)
+            if extraction_id is not None
+            else None,
         )
