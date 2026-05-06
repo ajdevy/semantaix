@@ -7,6 +7,9 @@ from services.api.app.main import openrouter_client
 
 
 def test_suggest_returns_503_without_openrouter_key():
+    openrouter_client.suggest = AsyncMock(
+        side_effect=RuntimeError("OPENROUTER_API_KEY is not configured")
+    )
     client = TestClient(api_app)
     response = client.post("/suggest", json={"text": "Hello"})
     assert response.status_code == 503
