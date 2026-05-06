@@ -4,6 +4,7 @@ import uuid
 from fastapi import HTTPException, Request
 
 from platform_common.app_factory import create_service_app
+from services.bot_gateway.app.persistence import persist_normalized_message
 from services.bot_gateway.app.telegram_update import (
     TelegramUpdateValidationError,
     normalize_update,
@@ -48,6 +49,20 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
             "source_message_id": normalized.source_message_id,
             "chat_id": normalized.chat_id,
             "user_id": normalized.user_id,
+        },
+    )
+    persisted = persist_normalized_message(
+        telegram_user_id=normalized.user_id,
+        source_message_id=normalized.source_message_id,
+        text=normalized.text,
+        trace_id=trace_id,
+    )
+    logger.info(
+        "telegram_message_persisted",
+        extra={
+            "trace_id": trace_id,
+            "source_message_id": normalized.source_message_id,
+            "persisted": persisted,
         },
     )
     return {"status": "accepted", "trace_id": trace_id}
