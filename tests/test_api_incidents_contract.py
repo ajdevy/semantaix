@@ -1,12 +1,15 @@
+from unittest.mock import AsyncMock
+
 from fastapi.testclient import TestClient
 
 from services.api.app.main import app as api_app
-from services.api.app.main import incident_repository, telegram_notifier
+from services.api.app.main import incident_repository, settings, telegram_notifier
 
 
 def test_incident_event_endpoint_deduplicates_within_window(tmp_path):
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     incident_repository.dedup_window_seconds = 300
+    settings.telegram_alert_debounce_seconds = 300
     telegram_notifier.bot_token = "replace-me"
     telegram_notifier.alert_chat_id = None
     client = TestClient(api_app)
@@ -33,6 +36,95 @@ def test_incident_event_endpoint_deduplicates_within_window(tmp_path):
     assert first.json()["id"] == second.json()["id"]
     assert second.json()["occurrence_count"] == 2
     assert second.json()["telegram_delivery_status"] == "missing_bot_token"
+
+
+def test_incident_notifications_are_debounced(tmp_path, monkeypatch):
+    incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
+    incident_repository.dedup_window_seconds = 300
+    settings.telegram_alert_debounce_seconds = 300
+    monkeypatch.setattr(
+        telegram_notifier,
+        "notify_if_critical",
+        AsyncMock(return_value=(True, "sent")),
+    )
+    client = TestClient(api_app)
+
+    first = client.post(
+        "/incidents/events",
+        json={
+            "fingerprint": "provider5xx_spike",
+            "severity": "critical",
+            "summary": "Provider 5xx burst",
+        },
+    )
+    second = client.post(
+        "/incidents/events",
+        json={
+            "fingerprint": "provider5xx_spike",
+            "severity": "critical",
+            "summary": "Provider 5xx burst",
+        },
+    )
+
+    assert first.json()["telegram_delivery_status"] == "sent"
+    assert second.json()["telegram_delivery_status"] == "debounced"
+
+
+def test_warning_event_does_not_send_even_on_existing_critical_incident(tmp_path, monkeypatch):
+    incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
+    incident_repository.dedup_window_seconds = 300
+    settings.telegram_alert_debounce_seconds = 300
+    mock_notify = AsyncMock(return_value=(True, "sent"))
+    monkeypatch.setattr(telegram_notifier, "notify_if_critical", mock_notify)
+    client = TestClient(api_app)
+
+    critical = client.post(
+        "/incidents/events",
+        json={
+            "fingerprint": "provider429_spike",
+            "severity": "critical",
+            "summary": "critical first",
+        },
+    )
+    warning = client.post(
+        "/incidents/events",
+        json={
+            "fingerprint": "provider429_spike",
+            "severity": "warning",
+            "summary": "warning follow-up",
+        },
+    )
+    assert critical.json()["telegram_delivery_status"] == "sent"
+    assert warning.json()["telegram_delivery_status"] == "not_critical"
+
+
+def test_second_critical_event_sends_again_after_debounce_window(tmp_path, monkeypatch):
+    incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
+    incident_repository.dedup_window_seconds = 300
+    settings.telegram_alert_debounce_seconds = 0
+    mock_notify = AsyncMock(return_value=(True, "sent"))
+    monkeypatch.setattr(telegram_notifier, "notify_if_critical", mock_notify)
+    client = TestClient(api_app)
+
+    first = client.post(
+        "/incidents/events",
+        json={
+            "fingerprint": "db_down",
+            "severity": "critical",
+            "summary": "db critical first",
+        },
+    )
+    second = client.post(
+        "/incidents/events",
+        json={
+            "fingerprint": "db_down",
+            "severity": "critical",
+            "summary": "db critical second",
+        },
+    )
+
+    assert first.json()["telegram_delivery_status"] == "sent"
+    assert second.json()["telegram_delivery_status"] == "sent"
 
 
 def test_get_incidents_by_fingerprint_returns_lifecycle_items(tmp_path):

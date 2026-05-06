@@ -256,6 +256,23 @@ class IncidentRepository:
                 timestamp=_now().isoformat(),
             )
 
+    def get_last_telegram_sent_at(self, incident_id: int) -> datetime | None:
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT created_at
+                FROM incident_events
+                WHERE incident_id = ? AND event_type = 'telegram_notify' AND details = 'status=sent'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (incident_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return datetime.fromisoformat(str(row["created_at"]))
+
     def _transition(self, *, incident_id: int, event_type: str) -> Incident:
         init_schema(self.db_path)
         now = _now().isoformat()

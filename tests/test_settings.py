@@ -14,6 +14,7 @@ def test_settings_defaults(monkeypatch):
     assert settings.incident_dedup_window_seconds == 300
     assert settings.telegram_alert_username == "@ajdevy"
     assert settings.telegram_alert_chat_id is None
+    assert settings.telegram_alert_debounce_seconds == 300
 
 
 def test_settings_env_override(monkeypatch):
@@ -26,6 +27,7 @@ def test_settings_env_override(monkeypatch):
     monkeypatch.setenv("INCIDENT_DEDUP_WINDOW_SECONDS", "60")
     monkeypatch.setenv("TELEGRAM_ALERT_USERNAME", "@ops")
     monkeypatch.setenv("TELEGRAM_ALERT_CHAT_ID", "-1001234")
+    monkeypatch.setenv("TELEGRAM_ALERT_DEBOUNCE_SECONDS", "120")
     settings = AppSettings(_env_file=None)
     assert settings.app_env == "test"
     assert settings.log_level == "DEBUG"
@@ -36,3 +38,4 @@ def test_settings_env_override(monkeypatch):
     assert settings.incident_dedup_window_seconds == 60
     assert settings.telegram_alert_username == "@ops"
     assert settings.telegram_alert_chat_id == "-1001234"
+    assert settings.telegram_alert_debounce_seconds == 120
