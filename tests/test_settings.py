@@ -20,6 +20,15 @@ def test_settings_defaults(monkeypatch):
     assert settings.rag_db_path == ".data/semantaix_rag.db"
     assert settings.knowledge_db_path == ".data/semantaix_knowledge.db"
     assert settings.hitl_config_admin_username == "@ajdevy"
+    assert settings.backup_db_path == ".data/semantaix_backups.db"
+    assert settings.backup_archive_dir == ".data/backups"
+    assert settings.backup_source_path_list() == [
+        ".data/semantaix_story1.db",
+        ".data/semantaix_incidents.db",
+        ".data/semantaix_hitl.db",
+        ".data/semantaix_rag.db",
+        ".data/semantaix_knowledge.db",
+    ]
 
 
 def test_settings_env_override(monkeypatch):
@@ -38,6 +47,9 @@ def test_settings_env_override(monkeypatch):
     monkeypatch.setenv("RAG_DB_PATH", ".tmp/rag.sqlite3")
     monkeypatch.setenv("KNOWLEDGE_DB_PATH", ".tmp/knowledge.sqlite3")
     monkeypatch.setenv("HITL_CONFIG_ADMIN_USERNAME", "@admin")
+    monkeypatch.setenv("BACKUP_DB_PATH", ".tmp/backups.sqlite3")
+    monkeypatch.setenv("BACKUP_ARCHIVE_DIR", ".tmp/backups")
+    monkeypatch.setenv("BACKUP_SOURCE_PATHS", " .tmp/a.db , .tmp/b.db , ")
     settings = AppSettings(_env_file=None)
     assert settings.app_env == "test"
     assert settings.log_level == "DEBUG"
@@ -54,3 +66,6 @@ def test_settings_env_override(monkeypatch):
     assert settings.rag_db_path == ".tmp/rag.sqlite3"
     assert settings.knowledge_db_path == ".tmp/knowledge.sqlite3"
     assert settings.hitl_config_admin_username == "@admin"
+    assert settings.backup_db_path == ".tmp/backups.sqlite3"
+    assert settings.backup_archive_dir == ".tmp/backups"
+    assert settings.backup_source_path_list() == [".tmp/a.db", ".tmp/b.db"]

@@ -36,6 +36,15 @@ See [_bmad-output/implementation-artifacts/e2e-coverage.md](_bmad-output/impleme
 
 Gate signoffs (matches CI lint + pytest coverage + Epic 01 live demo): `bash scripts/run_all_epic_feature_signoffs.sh`
 
+## Backup / Restore (Epic 07)
+
+- API: `POST /api/backups/run`, `GET /api/backups`, `GET /api/backups/last-successful`,
+  `POST /api/backups/{id}/restore` (body `{"confirm_token":"restore-<id>","target_root":"<dir>"}`).
+- Web UI: `/admin/backups` shows the latest successful backup's id, completion
+  time, archive path, and size.
+- Settings: `BACKUP_DB_PATH`, `BACKUP_ARCHIVE_DIR`, `BACKUP_SOURCE_PATHS` (csv).
+- Runbook: see `_bmad-output/implementation-artifacts/epic-07-backup-restore-runbook.md`.
+
 ## HITL Contact Configuration
 
 - Default env configuration:
