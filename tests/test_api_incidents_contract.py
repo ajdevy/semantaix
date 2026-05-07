@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from services.api.app.main import app as api_app
@@ -153,6 +154,9 @@ def test_get_incidents_by_fingerprint_returns_lifecycle_items(tmp_path):
     assert payload["items"][0]["is_read"] is False
 
 
+@pytest.mark.e2e
+@pytest.mark.epic("02")
+@pytest.mark.story("02-02")
 def test_incident_read_ack_resolve_and_timeline(tmp_path):
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     incident_repository.dedup_window_seconds = 300

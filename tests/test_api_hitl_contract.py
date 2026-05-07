@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from services.api.app.main import app as api_app
@@ -12,6 +13,10 @@ from services.api.app.main import (
 )
 
 
+@pytest.mark.e2e
+@pytest.mark.epic("03")
+@pytest.mark.epic("04")
+@pytest.mark.story("04-02")
 def test_invalid_suggest_creates_and_assigns_hitl_ticket(tmp_path, monkeypatch):
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
@@ -62,6 +67,9 @@ def test_hitl_route_and_resolve_endpoints(tmp_path):
     assert resolved.json()["status"] == "resolved"
 
 
+@pytest.mark.e2e
+@pytest.mark.epic("04")
+@pytest.mark.story("04-02-reply")
 def test_hitl_reply_delivered_as_bot_authored(tmp_path, monkeypatch):
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")

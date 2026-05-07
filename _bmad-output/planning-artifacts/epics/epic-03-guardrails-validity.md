@@ -18,3 +18,9 @@ Add deterministic validity checks so only acceptable suggestions are eligible fo
 - Every suggestion has validity decision attached
 - Invalid suggestions are blocked from direct delivery path
 - Guardrail failures appear in Alerts flow
+
+## Automated E2E verification
+
+- Guardrail block with HITL escalation: **`tests/test_api_hitl_contract.py::test_invalid_suggest_creates_and_assigns_hitl_ticket`** (`@pytest.mark.e2e`; also tagged Epic 04).
+- RAG-grounded **passing** suggestion path (retrieval + valid model text): **`tests/e2e/test_e2e_epic05_rag_suggest.py::test_epic05_rag_ingest_then_suggest_includes_retrieval`**.
+- Matrix: `_bmad-output/implementation-artifacts/e2e-coverage.md`.

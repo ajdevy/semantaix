@@ -36,6 +36,10 @@ Define and persist immutable **answer trace** records for each suggestion or del
 ### UI
 - not required for this story
 
+## Automated E2E verification
+
+**Deferred** — `answer_traces` persistence and writer hooks are not in the codebase yet. Track future pytest node IDs in `_bmad-output/implementation-artifacts/e2e-coverage.md` once implemented.
+
 ## Manual Verification
 1. Trigger a test answer through dev stack.
 2. Confirm row exists with expected lineage keys and retrieval/guardrail sections populated from fixtures.

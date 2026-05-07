@@ -32,6 +32,14 @@ Expose answer traces in the Web UI so tenant staff can inspect **why** an end-cu
 ### UI
 - Playwright or existing UI smoke pattern: open conversation → panel visible
 
+## Automated E2E verification
+
+Minimal **HTTP smoke only** until trace APIs and panels exist:
+
+- **`tests/e2e/test_e2e_epic08_web_ui_smoke.py::test_epic08_admin_shell_reachable`** (`@pytest.mark.e2e`) — static admin landing page responds 200.
+
+Full transparency panel coverage remains **TODO** alongside Story 08.01 API work.
+
 ## Manual Verification
 1. Seed a message with trace fixture.
 2. Open Web UI conversation; verify all sections match fixture.

@@ -33,6 +33,10 @@ Close the loop: from a **specific answer trace**, let the tenant **correct** und
 ### UI
 - click-through from Story 08.02 panel to correction flow
 
+## Automated E2E verification
+
+**Deferred** — trace-linked correction flows require Story 08.01/08.02 implementation. Moderation-aligned **approve path** coverage exists at Epic 06 level (`tests/e2e/test_e2e_epic06_knowledge_pipeline.py` + contracts), not wired from traces yet.
+
 ## Manual Verification
 1. Open trace for a wrong answer; submit correction.
 2. With moderation on, verify candidate appears in Epic 06 queue.

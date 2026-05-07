@@ -19,3 +19,8 @@ Establish the operational safety net early so all later epics attach their failu
 - Critical incident classes alert correctly
 - Alerts UI lifecycle works and persists
 - Epic 01 failure modes are represented in incident pipeline
+
+## Automated E2E verification
+
+- Alerts API lifecycle (create → timeline → read → acknowledge → resolve): **`tests/test_api_incidents_contract.py::test_incident_read_ack_resolve_and_timeline`** (`@pytest.mark.e2e`).
+- Full matrix: `_bmad-output/implementation-artifacts/e2e-coverage.md`.

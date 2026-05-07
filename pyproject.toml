@@ -8,3 +8,12 @@ exclude = [
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "e2e: story-aligned multi-step integration flows (FastAPI TestClient)",
+    "epic(id): BMad epic reference for documentation and selective runs",
+    "story(id): BMad story reference for documentation and selective runs",
+]

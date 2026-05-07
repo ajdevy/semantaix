@@ -26,3 +26,7 @@ This directory contains the BMAD feature-based sequential epic layout.
 
 ## Carry-forward Constraint
 From Epic 03 onward, every epic must integrate with the incident/alerts solution from Epic 02.
+
+## Automated E2E
+
+Story-aligned pytest identifiers and Epic 07/08 honest gaps live in **`_bmad-output/implementation-artifacts/e2e-coverage.md`**. CI runs **`pytest`** with coverage plus **`pytest -m e2e`**.

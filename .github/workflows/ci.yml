@@ -28,5 +28,9 @@ jobs:
       - name: Lint with Ruff
         run: ruff check .
 
-      - name: Run unit tests with coverage
+      - name: Run full test suite (unit, contract, story e2e) with coverage
         run: pytest --cov --cov-config=.coveragerc --cov-report=term-missing
+
+      - name: Verify E2E marker subset
+        run: pytest -m e2e -q --tb=short
+

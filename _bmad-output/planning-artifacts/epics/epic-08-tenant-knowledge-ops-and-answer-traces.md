@@ -28,3 +28,9 @@ Enable the paying **client** (tenant) to maintain knowledge through natural-lang
 - From the Web UI, a moderator can open **why this answer** for a message and see sources + policy + routing fields defined in the story pack.
 - Corrections initiated from a trace write **audit_logs** and respect Epic 06 moderation when the flag is on.
 - Trace/NL-op/reindex failures surface in **Alerts**.
+
+## Automated E2E verification
+
+Trace persistence, NL knowledge ops, and moderation-linked correction workflows are **not implemented** in codebase yet relative to this epic’s full scope.
+
+Until those APIs ship, CI only covers a **minimal HTTP smoke** for the static admin shell: **`tests/e2e/test_e2e_epic08_web_ui_smoke.py::test_epic08_admin_shell_reachable`**. Detailed behavior per story is tracked in `_bmad-output/implementation-artifacts/e2e-coverage.md`.

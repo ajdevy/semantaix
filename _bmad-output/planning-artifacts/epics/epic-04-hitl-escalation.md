@@ -21,3 +21,11 @@ Route invalid/uncertain cases to human operators and send operator responses bac
 - User never sees operator identity metadata
 - HITL delivery failures appear in Alerts flow
 - Only configured admin username can update runtime HITL recipient/chat routing
+
+## Automated E2E verification
+
+- Journey (**blocked suggest → route → resolve**): **`tests/e2e/test_e2e_epic04_hitl_journey.py::test_epic04_guardrail_blocked_suggest_then_route_and_resolve`** (`@pytest.mark.e2e`).
+- Ticket creation from guardrails: **`tests/test_api_hitl_contract.py::test_invalid_suggest_creates_and_assigns_hitl_ticket`**.
+- Operator reply (mock Telegram): **`tests/test_api_hitl_contract.py::test_hitl_reply_delivered_as_bot_authored`**.
+- Runtime `/hitl_config`: **`tests/test_bot_gateway_webhook.py::test_admin_can_configure_hitl_contact_via_command`**.
+- Matrix: `_bmad-output/implementation-artifacts/e2e-coverage.md`.

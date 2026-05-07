@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from services.api.app.main import app as api_app
@@ -21,6 +22,9 @@ def test_suggest_returns_503_without_openrouter_key():
     assert "OPENROUTER_API_KEY" in response.json()["detail"]
 
 
+@pytest.mark.e2e
+@pytest.mark.epic("01")
+@pytest.mark.story("01-03")
 def test_suggest_returns_suggestion_payload_on_success(monkeypatch, tmp_path):
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
     monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="Use reset flow."))
