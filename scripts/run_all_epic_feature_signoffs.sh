@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Epic feature signoffs for this repo: CI parity + Epic 01 live demo (see checklist).
+# Epic feature signoffs for this repo: CI parity + per-epic live demos.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -20,7 +20,9 @@ echo "== ruff (CI parity) =="
 echo "== pytest + coverage (CI parity) =="
 "${VENV_PYTEST}" --cov --cov-config=.coveragerc --cov-report=term-missing
 
-echo "== Epic 01 live demo =="
-bash "${ROOT_DIR}/scripts/epic01_signoff_demo.sh"
+for epic in 01 02 03 04 05 06 07 08; do
+  echo "== Epic ${epic} live demo =="
+  bash "${ROOT_DIR}/scripts/epic${epic}_signoff_demo.sh"
+done
 
 echo "All epic feature signoffs completed OK."
