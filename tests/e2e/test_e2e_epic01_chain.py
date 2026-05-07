@@ -6,13 +6,13 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from platform_common.settings import get_settings
 from services.api.app.main import app as api_app
 from services.api.app.main import (
     incident_repository,
     openrouter_client,
     rag_repository,
 )
+from services.api.app.main import settings as api_settings
 from services.bot_gateway.app.main import app as bot_app
 from tests.e2e.db_seed import load_telegram_fixture
 
@@ -22,8 +22,11 @@ pytestmark = [pytest.mark.e2e, pytest.mark.epic("01")]
 @pytest.mark.story("01-04")
 def test_epic01_e2e_webhook_persist_then_suggest_with_retrieval(monkeypatch, tmp_path):
     persistence_path = tmp_path / "persistence.sqlite3"
-    monkeypatch.setenv("PERSISTENCE_DB_PATH", str(persistence_path))
-    get_settings.cache_clear()
+    # Patch in place on the cached settings instance so the bot_gateway's lazy
+    # get_settings() call inside the webhook handler picks up the override
+    # without disturbing the lru_cache (which would mismatch module-level
+    # `settings` references in api/main.py and break later contract tests).
+    monkeypatch.setattr(api_settings, "persistence_db_path", str(persistence_path))
 
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
@@ -67,8 +70,6 @@ def test_epic01_e2e_webhook_persist_then_suggest_with_retrieval(monkeypatch, tmp
     assert body["delivery_blocked"] is False
     sources = [item["source_id"] for item in body["retrieval"]]
     assert "faq-billing" in sources
-
-    get_settings.cache_clear()
 
 
 @pytest.mark.story("01-04")

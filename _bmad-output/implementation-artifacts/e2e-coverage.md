@@ -57,7 +57,9 @@ Each row marks whether a happy path (`H`) and/or an error/incident path (`E`) is
 | 08 | 08-01 | `/suggest` writes a queryable `answer_trace` row with retrieval, routing, guardrail, grounding | H | `tests/e2e/test_e2e_epic08_answer_trace.py::test_epic08_suggest_writes_queryable_trace` |
 | 08 | 08-02 (partial) | Static admin shell HTTP 200 | H | `tests/e2e/test_e2e_epic08_web_ui_smoke.py::test_epic08_admin_shell_reachable` |
 | 08 | 08-02 (partial) | Static alerts shell HTTP 200 | H | `tests/e2e/test_e2e_epic08_web_ui_smoke.py::test_epic08_alerts_shell_reachable` |
-| 08 | 08-03 / 08-04 | NL knowledge ops, correction loop | — | **Deferred** until APIs and UI beyond static shell exist |
+| 08 | 08-02 | `/suggest` persists trace; admin trace list + detail render sources/policy/routing/confidence | H | `tests/e2e/test_e2e_epic08_trace_ui.py::test_epic08_trace_visible_in_web_ui` |
+| 08 | 08-03 | NL knowledge op: preview → confirm → reindexed; audit log captured | H | `tests/e2e/test_e2e_epic08_nl_ops.py::test_epic08_nl_op_preview_confirm_reindex` |
+| 08 | 08-04 | Trace → correction (moderation branch) → approve → retrievable; audit captured | H | `tests/e2e/test_e2e_epic08_correction_loop.py::test_epic08_trace_correction_to_moderation_then_approved_retrievable` |
 
 ## CI
 

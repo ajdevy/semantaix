@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from platform_common.settings import get_settings
 from services.api.app.main import (
     app as api_app,
 )
@@ -27,19 +26,19 @@ from services.bot_gateway.app.main import (
 pytestmark = [pytest.mark.e2e, pytest.mark.epic("04")]
 
 
-def _wire(tmp_path):
+def _wire(tmp_path, monkeypatch, *, primary_operator: str = "@ajdevy"):
     hitl_path = str(tmp_path / "hitl.sqlite3")
     hitl_ticket_repository.db_path = hitl_path
     bot_hitl_repo.db_path = hitl_path
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     incident_repository.dedup_window_seconds = 300
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
-    settings.hitl_primary_operator_username = "@ajdevy"
+    monkeypatch.setattr(settings, "hitl_primary_operator_username", primary_operator)
 
 
 @pytest.mark.story("04-01")
 def test_epic04_guardrail_blocked_suggest_then_route_and_resolve(tmp_path, monkeypatch):
-    _wire(tmp_path)
+    _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
     client = TestClient(api_app)
 
@@ -63,7 +62,7 @@ def test_epic04_guardrail_blocked_suggest_then_route_and_resolve(tmp_path, monke
 
 @pytest.mark.story("04-02")
 def test_epic04_full_bot_authored_reply_chain(tmp_path, monkeypatch):
-    _wire(tmp_path)
+    _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
     send_mock = AsyncMock(return_value=12345)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
@@ -96,8 +95,7 @@ def test_epic04_full_bot_authored_reply_chain(tmp_path, monkeypatch):
 
 @pytest.mark.story("04-01")
 def test_epic04_route_without_operator_emits_incident(tmp_path, monkeypatch):
-    _wire(tmp_path)
-    settings.hitl_primary_operator_username = ""
+    _wire(tmp_path, monkeypatch, primary_operator="")
     monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
     client = TestClient(api_app)
 
@@ -115,7 +113,7 @@ def test_epic04_route_without_operator_emits_incident(tmp_path, monkeypatch):
 
 @pytest.mark.story("04-02")
 def test_epic04_reply_missing_target_chat_id_emits_incident(tmp_path, monkeypatch):
-    _wire(tmp_path)
+    _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
@@ -143,7 +141,7 @@ def test_epic04_reply_missing_target_chat_id_emits_incident(tmp_path, monkeypatc
 
 @pytest.mark.story("04-02")
 def test_epic04_reply_rejects_non_assigned_operator(tmp_path, monkeypatch):
-    _wire(tmp_path)
+    _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
@@ -170,9 +168,7 @@ def test_epic04_reply_rejects_non_assigned_operator(tmp_path, monkeypatch):
 
 @pytest.mark.story("04-runtime-config")
 def test_epic04_runtime_config_overrides_default_operator(tmp_path, monkeypatch):
-    _wire(tmp_path)
-    monkeypatch.setenv("HITL_TICKET_DB_PATH", hitl_ticket_repository.db_path)
-    get_settings.cache_clear()
+    _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
 
     bot_client = TestClient(bot_app)
@@ -196,5 +192,3 @@ def test_epic04_runtime_config_overrides_default_operator(tmp_path, monkeypatch)
 
     tickets = api_client.get("/hitl/tickets").json()["items"]
     assert tickets[0]["operator_username"] == "@runtime_op"
-
-    get_settings.cache_clear()
