@@ -28,6 +28,8 @@ class AppSettings(BaseSettings):
     rag_db_path: str = ".data/semantaix_rag.db"
     knowledge_db_path: str = ".data/semantaix_knowledge.db"
     hitl_config_admin_username: str = "@ajdevy"
+    answer_trace_db_path: str = ".data/semantaix_answer_traces.db"
+    answer_trace_snippet_max_chars: int = 240
     backup_db_path: str = ".data/semantaix_backups.db"
     backup_archive_dir: str = ".data/backups"
     backup_source_paths: str = (

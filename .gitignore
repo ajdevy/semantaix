@@ -56,3 +56,6 @@ node_modules/
 
 # Keep BMAD project artifacts tracked by default
 # (_bmad and _bmad-output are intentionally NOT ignored)
+
+# Claude harness local config
+.claude/

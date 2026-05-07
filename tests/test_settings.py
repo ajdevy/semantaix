@@ -20,6 +20,8 @@ def test_settings_defaults(monkeypatch):
     assert settings.rag_db_path == ".data/semantaix_rag.db"
     assert settings.knowledge_db_path == ".data/semantaix_knowledge.db"
     assert settings.hitl_config_admin_username == "@ajdevy"
+    assert settings.answer_trace_db_path == ".data/semantaix_answer_traces.db"
+    assert settings.answer_trace_snippet_max_chars == 240
     assert settings.backup_db_path == ".data/semantaix_backups.db"
     assert settings.backup_archive_dir == ".data/backups"
     assert settings.backup_source_path_list() == [
@@ -47,6 +49,8 @@ def test_settings_env_override(monkeypatch):
     monkeypatch.setenv("RAG_DB_PATH", ".tmp/rag.sqlite3")
     monkeypatch.setenv("KNOWLEDGE_DB_PATH", ".tmp/knowledge.sqlite3")
     monkeypatch.setenv("HITL_CONFIG_ADMIN_USERNAME", "@admin")
+    monkeypatch.setenv("ANSWER_TRACE_DB_PATH", ".tmp/answer_traces.sqlite3")
+    monkeypatch.setenv("ANSWER_TRACE_SNIPPET_MAX_CHARS", "120")
     monkeypatch.setenv("BACKUP_DB_PATH", ".tmp/backups.sqlite3")
     monkeypatch.setenv("BACKUP_ARCHIVE_DIR", ".tmp/backups")
     monkeypatch.setenv("BACKUP_SOURCE_PATHS", " .tmp/a.db , .tmp/b.db , ")
@@ -66,6 +70,8 @@ def test_settings_env_override(monkeypatch):
     assert settings.rag_db_path == ".tmp/rag.sqlite3"
     assert settings.knowledge_db_path == ".tmp/knowledge.sqlite3"
     assert settings.hitl_config_admin_username == "@admin"
+    assert settings.answer_trace_db_path == ".tmp/answer_traces.sqlite3"
+    assert settings.answer_trace_snippet_max_chars == 120
     assert settings.backup_db_path == ".tmp/backups.sqlite3"
     assert settings.backup_archive_dir == ".tmp/backups"
     assert settings.backup_source_path_list() == [".tmp/a.db", ".tmp/b.db"]

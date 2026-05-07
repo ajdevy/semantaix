@@ -31,8 +31,9 @@ Markers are declared in `[tool.pytest.ini_options]` in [`pyproject.toml`](../../
 | 05 | 05-02 | RAG ingest then `/suggest` returns matching `retrieval` | `tests/e2e/test_e2e_epic05_rag_suggest.py::test_epic05_rag_ingest_then_suggest_includes_retrieval` |
 | 06 | 06-02 | `/knowledge/extract` → approve candidate → retrievable in RAG | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_extract_approve_then_retrievable` |
 | 07 | 07-01 | Backup run → list → restore round-trip via API | `tests/e2e/test_e2e_epic07_backup_restore.py::test_epic07_backup_run_then_restore` |
+| 08 | 08-01 | `/suggest` writes a queryable `answer_trace` row with retrieval, routing, guardrail, grounding | `tests/e2e/test_e2e_epic08_answer_trace.py::test_epic08_suggest_writes_queryable_trace` |
 | 08 | 08-02 (partial) | Static admin shell HTTP 200 | `tests/e2e/test_e2e_epic08_web_ui_smoke.py::test_epic08_admin_shell_reachable` |
-| 08 | 08-01, 08-03, 08-04 | Trace schema, NL knowledge ops, correction loop | **Deferred** until APIs and UI beyond static shell exist |
+| 08 | 08-03, 08-04 | NL knowledge ops, correction loop | **Deferred** until APIs and UI beyond static shell exist |
 
 ## CI
 
