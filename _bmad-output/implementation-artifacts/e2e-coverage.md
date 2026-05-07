@@ -16,24 +16,48 @@ Markers are declared in `[tool.pytest.ini_options]` in [`pyproject.toml`](../../
 
 ## Coverage matrix
 
-| Epic | Story / area | Scenario | Primary test ID |
-|------|----------------|----------|----------------|
-| 01 | 01-01 | Telegram webhook accepts text update and returns trace | `tests/test_bot_gateway_webhook.py::test_webhook_accepts_text_message_and_returns_trace` |
-| 01 | 01-02 | Persisted conversation + message row after webhook | `tests/test_bot_gateway_webhook.py::test_webhook_persists_message_rows` |
-| 01 | 01-03 | `/suggest` suggestion payload via mocked LLM | `tests/test_api_suggest_contract.py::test_suggest_returns_suggestion_payload_on_success` |
-| 01 | 01-04 | Webhook persistence + `/suggest` cross-service | `tests/test_epic01_e2e.py::test_epic01_e2e_webhook_persist_suggest` |
-| 02 | 02-02 | Incident ingest → timeline → read → acknowledge → resolve | `tests/test_api_incidents_contract.py::test_incident_read_ack_resolve_and_timeline` |
-| 03 | (with 04) | Guardrails block weak LLM output → escalation path | `tests/test_api_hitl_contract.py::test_invalid_suggest_creates_and_assigns_hitl_ticket` |
-| 04 | 04-01 | Blocked suggest → route → resolve | `tests/e2e/test_e2e_epic04_hitl_journey.py::test_epic04_guardrail_blocked_suggest_then_route_and_resolve` |
-| 04 | 04-02 | Invalid suggest creates HITL ticket + operator assignment | `tests/test_api_hitl_contract.py::test_invalid_suggest_creates_and_assigns_hitl_ticket` |
-| 04 | 04-02-reply | Operator reply delivered via mocked Telegram sender | `tests/test_api_hitl_contract.py::test_hitl_reply_delivered_as_bot_authored` |
-| 04 | runtime config | Admin `/hitl_config` on bot gateway updates runtime operator + chat | `tests/test_bot_gateway_webhook.py::test_admin_can_configure_hitl_contact_via_command` |
-| 05 | 05-02 | RAG ingest then `/suggest` returns matching `retrieval` | `tests/e2e/test_e2e_epic05_rag_suggest.py::test_epic05_rag_ingest_then_suggest_includes_retrieval` |
-| 06 | 06-02 | `/knowledge/extract` → approve candidate → retrievable in RAG | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_extract_approve_then_retrievable` |
-| 07 | 07-01 | Backup run → list → restore round-trip via API | `tests/e2e/test_e2e_epic07_backup_restore.py::test_epic07_backup_run_then_restore` |
-| 08 | 08-01 | `/suggest` writes a queryable `answer_trace` row with retrieval, routing, guardrail, grounding | `tests/e2e/test_e2e_epic08_answer_trace.py::test_epic08_suggest_writes_queryable_trace` |
-| 08 | 08-02 (partial) | Static admin shell HTTP 200 | `tests/e2e/test_e2e_epic08_web_ui_smoke.py::test_epic08_admin_shell_reachable` |
-| 08 | 08-03, 08-04 | NL knowledge ops, correction loop | **Deferred** until APIs and UI beyond static shell exist |
+Each row marks whether a happy path (`H`) and/or an error/incident path (`E`) is covered. Test IDs are pytest node ids; subset under `tests/e2e/` is the e2e-marked suite.
+
+| Epic | Story / area | Scenario | H / E | Primary test ID |
+|------|--------------|----------|-------|-----------------|
+| 01 | 01-01 | Webhook accepts text update + returns trace | H | `tests/test_bot_gateway_webhook.py::test_webhook_accepts_text_message_and_returns_trace` |
+| 01 | 01-02 | Webhook persists conversation + message row | H | `tests/test_bot_gateway_webhook.py::test_webhook_persists_message_rows` |
+| 01 | 01-03 | `/suggest` suggestion payload via mocked LLM | H | `tests/test_api_suggest_contract.py::test_suggest_returns_suggestion_payload_on_success` |
+| 01 | 01-04 | Webhook persist + `/suggest` cross-service | H | `tests/test_epic01_e2e.py::test_epic01_e2e_webhook_persist_suggest` |
+| 01 | 01-04 | Webhook persist + RAG retrieval grounded `/suggest` | H | `tests/e2e/test_e2e_epic01_chain.py::test_epic01_e2e_webhook_persist_then_suggest_with_retrieval` |
+| 01 | 01-04 | `/suggest` 503 when OpenRouter key missing | E | `tests/e2e/test_e2e_epic01_chain.py::test_epic01_e2e_suggest_returns_503_when_openrouter_key_missing` |
+| 01 | 01-04 | `/suggest` 502 on provider failure | E | `tests/e2e/test_e2e_epic01_chain.py::test_epic01_e2e_suggest_returns_502_on_provider_failure` |
+| 02 | 02-02 | Ingest → list → read → ack → resolve → timeline | H | `tests/e2e/test_e2e_epic02_incident_lifecycle.py::test_epic02_full_lifecycle_emit_read_ack_resolve_timeline` |
+| 02 | 02-01 | Dedup within window collapses + `deduplicated` event | H | `tests/e2e/test_e2e_epic02_incident_lifecycle.py::test_epic02_dedup_within_window_collapses` |
+| 02 | 02-01 | Dedup outside window auto-resolves prior + creates new | E | `tests/e2e/test_e2e_epic02_incident_lifecycle.py::test_epic02_dedup_outside_window_creates_new_and_auto_resolves_prior` |
+| 02 | 02-03 | Critical Telegram alert sent + debounced + sent again | H | `tests/e2e/test_e2e_epic02_incident_lifecycle.py::test_epic02_critical_telegram_debounce` |
+| 02 | 02-03 | Warning event does not page Telegram | H | `tests/e2e/test_e2e_epic02_incident_lifecycle.py::test_epic02_warning_does_not_send_telegram` |
+| 03 | 03-01 | Valid suggestion passes guardrails | H | `tests/e2e/test_e2e_epic03_guardrails.py::test_epic03_valid_suggestion_passes_no_ticket_or_incident` |
+| 03 | 03-01 | Low confidence blocks → incident + HITL ticket | E | `tests/e2e/test_e2e_epic03_guardrails.py::test_epic03_low_confidence_blocks_emits_incident_creates_ticket` |
+| 03 | 03-01 | Policy violation blocks | E | `tests/e2e/test_e2e_epic03_guardrails.py::test_epic03_policy_violation_blocks` |
+| 03 | 03-01 | Too-long response blocks | E | `tests/e2e/test_e2e_epic03_guardrails.py::test_epic03_too_long_response_blocks` |
+| 03 | 03-01 | Insufficient content blocks | E | `tests/e2e/test_e2e_epic03_guardrails.py::test_epic03_insufficient_content_blocks` |
+| 04 | 04-01 | Blocked suggest → route → resolve | H | `tests/e2e/test_e2e_epic04_hitl_journey.py::test_epic04_guardrail_blocked_suggest_then_route_and_resolve` |
+| 04 | 04-02 | Bot-authored reply delivered via mocked Telegram | H | `tests/e2e/test_e2e_epic04_hitl_journey.py::test_epic04_full_bot_authored_reply_chain` |
+| 04 | 04-01 | Route without operator → 503 + incident | E | `tests/e2e/test_e2e_epic04_hitl_journey.py::test_epic04_route_without_operator_emits_incident` |
+| 04 | 04-02 | Reply missing target chat id → 503 + incident | E | `tests/e2e/test_e2e_epic04_hitl_journey.py::test_epic04_reply_missing_target_chat_id_emits_incident` |
+| 04 | 04-02 | Reply rejects non-assigned operator → 403 | E | `tests/e2e/test_e2e_epic04_hitl_journey.py::test_epic04_reply_rejects_non_assigned_operator` |
+| 04 | runtime-config | `/hitl_config` overrides default operator on next blocked suggest | H | `tests/e2e/test_e2e_epic04_hitl_journey.py::test_epic04_runtime_config_overrides_default_operator` |
+| 05 | 05-02 | RAG ingest then `/suggest` returns matching `retrieval` | H | `tests/e2e/test_e2e_epic05_rag_suggest.py::test_epic05_rag_ingest_then_suggest_includes_retrieval` |
+| 05 | 05-01 | Repeated ingest dedup returns zero new chunks | H | `tests/e2e/test_e2e_epic05_rag_suggest.py::test_epic05_rag_ingest_dedup_returns_zero_chunks_second_call` |
+| 05 | 05-01 | Multi-source retrieve ranks higher overlap first | H | `tests/e2e/test_e2e_epic05_rag_suggest.py::test_epic05_rag_retrieve_ranks_higher_overlap_source_first` |
+| 05 | 05-01 | Ingest failure → 500 + incident | E | `tests/e2e/test_e2e_epic05_rag_suggest.py::test_epic05_rag_ingest_failure_emits_incident` |
+| 06 | 06-02 | Extract → approve → retrievable | H | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_extract_approve_then_retrievable` |
+| 06 | 06-02 | Reject not retrievable, status filter shows rejected | H | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_extract_reject_path_not_retrievable` |
+| 06 | 06-02 | Approve with edited text publishes edited version | H | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_approve_with_edited_text_publishes_edited_version` |
+| 06 | 06-01 | Second extract pass enqueues zero | H | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_extract_idempotent_second_pass_enqueues_zero` |
+| 06 | 06-02 | Double-approve returns 409 | E | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_double_approve_returns_409` |
+| 06 | 06-02 | Reindex failure → 500 + incident | E | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_reindex_failure_emits_incident` |
+| 07 | 07-01 | Backup run → list → restore round-trip via API | H | `tests/e2e/test_e2e_epic07_backup_restore.py::test_epic07_backup_run_then_restore` |
+| 08 | 08-01 | `/suggest` writes a queryable `answer_trace` row with retrieval, routing, guardrail, grounding | H | `tests/e2e/test_e2e_epic08_answer_trace.py::test_epic08_suggest_writes_queryable_trace` |
+| 08 | 08-02 (partial) | Static admin shell HTTP 200 | H | `tests/e2e/test_e2e_epic08_web_ui_smoke.py::test_epic08_admin_shell_reachable` |
+| 08 | 08-02 (partial) | Static alerts shell HTTP 200 | H | `tests/e2e/test_e2e_epic08_web_ui_smoke.py::test_epic08_alerts_shell_reachable` |
+| 08 | 08-03 / 08-04 | NL knowledge ops, correction loop | — | **Deferred** until APIs and UI beyond static shell exist |
 
 ## CI
 

@@ -1,46 +1,48 @@
-import sqlite3
-
 from services.api.app.knowledge import (
     KnowledgeCandidateRepository,
     extract_candidate_lines,
     is_noise_text,
 )
+from tests.e2e.db_seed import seed_transcripts
+
+REPOSITORY_TRANSCRIPT_MESSAGES: list[dict[str, object]] = [
+    {
+        "conversation_id": 1,
+        "source_message_id": 10,
+        "role": "user",
+        "text": "hi",
+        "trace_id": "t1",
+        "created_at": "2026-01-01T00:00:00Z",
+    },
+    {
+        "conversation_id": 1,
+        "source_message_id": 11,
+        "role": "user",
+        "text": "To reset password, use the email link in settings.",
+        "trace_id": "t2",
+        "created_at": "2026-01-01T00:00:01Z",
+    },
+    {
+        "conversation_id": 1,
+        "source_message_id": 12,
+        "role": "user",
+        "text": "Thanks",
+        "trace_id": "t3",
+        "created_at": "2026-01-01T00:00:02Z",
+    },
+    {
+        "conversation_id": 2,
+        "source_message_id": 20,
+        "role": "user",
+        "text": "Billing cycle is monthly and invoice is generated on day one.",
+        "trace_id": "t4",
+        "created_at": "2026-01-01T00:00:03Z",
+    },
+]
 
 
 def _init_transcript_db(path: str) -> None:
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER NOT NULL,
-                source_message_id INTEGER NOT NULL UNIQUE,
-                role TEXT NOT NULL,
-                text TEXT NOT NULL,
-                trace_id TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO messages (
-                conversation_id, source_message_id, role, text, trace_id, created_at
-            )
-            VALUES
-                (1, 10, 'user', 'hi', 't1', '2026-01-01T00:00:00Z'),
-                (
-                    1, 11, 'user', 'To reset password, use the email link in settings.',
-                    't2', '2026-01-01T00:00:01Z'
-                ),
-                (1, 12, 'user', 'Thanks', 't3', '2026-01-01T00:00:02Z'),
-                (
-                    2, 20, 'user',
-                    'Billing cycle is monthly and invoice is generated on day one.',
-                    't4', '2026-01-01T00:00:03Z'
-                )
-            """
-        )
+    seed_transcripts(path, REPOSITORY_TRANSCRIPT_MESSAGES)
 
 
 def test_noise_filter_rules():

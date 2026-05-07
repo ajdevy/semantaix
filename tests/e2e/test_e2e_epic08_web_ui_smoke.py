@@ -13,3 +13,10 @@ def test_epic08_admin_shell_reachable():
     response = client.get("/")
     assert response.status_code == 200
     assert "Semantaix Admin" in response.text
+
+
+def test_epic08_alerts_shell_reachable():
+    client = TestClient(web_app)
+    response = client.get("/alerts")
+    assert response.status_code == 200
+    assert "Semantaix Alerts" in response.text

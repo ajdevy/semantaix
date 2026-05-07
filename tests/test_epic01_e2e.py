@@ -1,6 +1,4 @@
-import json
 import sqlite3
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -10,12 +8,7 @@ from platform_common.settings import get_settings
 from services.api.app.main import app as api_app
 from services.api.app.main import openrouter_client
 from services.bot_gateway.app.main import app as bot_app
-
-FIXTURE_DIR = Path(__file__).parent / "fixtures" / "telegram"
-
-
-def load_fixture(name: str) -> dict:
-    return json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
+from tests.e2e.db_seed import load_telegram_fixture as load_fixture
 
 
 @pytest.mark.e2e
