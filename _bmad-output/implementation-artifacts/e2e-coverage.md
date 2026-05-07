@@ -30,7 +30,7 @@ Markers are declared in `[tool.pytest.ini_options]` in [`pyproject.toml`](../../
 | 04 | runtime config | Admin `/hitl_config` on bot gateway updates runtime operator + chat | `tests/test_bot_gateway_webhook.py::test_admin_can_configure_hitl_contact_via_command` |
 | 05 | 05-02 | RAG ingest then `/suggest` returns matching `retrieval` | `tests/e2e/test_e2e_epic05_rag_suggest.py::test_epic05_rag_ingest_then_suggest_includes_retrieval` |
 | 06 | 06-02 | `/knowledge/extract` → approve candidate → retrievable in RAG | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_extract_approve_then_retrievable` |
-| 07 | — | **Not implemented** in services (no automated E2E) | — |
+| 07 | 07-01 | Backup run → list → restore round-trip via API | `tests/e2e/test_e2e_epic07_backup_restore.py::test_epic07_backup_run_then_restore` |
 | 08 | 08-02 (partial) | Static admin shell HTTP 200 | `tests/e2e/test_e2e_epic08_web_ui_smoke.py::test_epic08_admin_shell_reachable` |
 | 08 | 08-01, 08-03, 08-04 | Trace schema, NL knowledge ops, correction loop | **Deferred** until APIs and UI beyond static shell exist |
 
