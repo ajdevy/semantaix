@@ -1,3 +1,5 @@
+import time
+import uuid
 from datetime import UTC, datetime
 
 from fastapi import HTTPException
@@ -5,6 +7,7 @@ from pydantic import BaseModel
 
 from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
+from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.backups import BackupError, BackupRepository
 from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.hitl import HitlTicketRepository
@@ -41,6 +44,10 @@ backup_repository = BackupRepository(
     archive_dir=settings.backup_archive_dir,
     source_paths=settings.backup_source_path_list(),
 )
+answer_trace_repository = AnswerTraceRepository(
+    db_path=settings.answer_trace_db_path,
+    snippet_max_chars=settings.answer_trace_snippet_max_chars,
+)
 
 
 @app.get("/")
@@ -51,6 +58,7 @@ def root() -> dict[str, str]:
 class SuggestRequest(BaseModel):
     text: str
     chat_id: int | None = None
+    trace_id: str | None = None
 
 
 class IncidentEventRequest(BaseModel):
@@ -102,9 +110,63 @@ def _effective_hitl_operator_username() -> str:
     )
 
 
+def _persist_answer_trace(
+    *,
+    trace_id: str,
+    request_text: str,
+    response_mode: str,
+    guardrail_outcome: str,
+    guardrail_reasons: list[str],
+    guardrail_score: float | None,
+    retrieval: list[dict[str, object]],
+    latency_ms: int,
+    limitations: list[str],
+) -> str | None:
+    try:
+        trace = answer_trace_repository.write(
+            trace_id=trace_id,
+            request_text=request_text,
+            model_id=settings.openrouter_model,
+            model_provider="openrouter",
+            latency_ms=latency_ms,
+            response_mode=response_mode,
+            guardrails_applied=True,
+            guardrail_outcome=guardrail_outcome,
+            guardrail_reasons=guardrail_reasons,
+            guardrail_score=guardrail_score,
+            retrieval=retrieval,
+            confidence=guardrail_score,
+            limitations=limitations,
+        )
+    except Exception as exc:
+        incident = incident_repository.ingest(
+            fingerprint="answer_trace_persistence_failures",
+            severity="critical",
+            summary=f"Answer trace persistence failed: {exc}",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="answer_trace_failed",
+            details=f"trace_id={trace_id};error={exc}",
+        )
+        return None
+    return trace.trace_id
+
+
 @app.post("/suggest")
 async def suggest(request: SuggestRequest) -> dict[str, object]:
+    started_at = time.perf_counter()
+    trace_id = request.trace_id or str(uuid.uuid4())
     retrieved_chunks = rag_repository.retrieve(query=request.text, limit=3)
+    retrieval_payload = [
+        {
+            "chunk_id": str(chunk.id),
+            "source_ref": chunk.source_id,
+            "score": chunk.score,
+            "text_snippet": chunk.chunk_text,
+        }
+        for chunk in retrieved_chunks
+    ]
     retrieval_context: list[dict[str, str]] = []
     if retrieved_chunks:
         retrieval_context.append(
@@ -124,6 +186,7 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
         raise HTTPException(status_code=502, detail=f"OpenRouter call failed: {exc}") from exc
 
     decision = evaluate_suggestion(suggestion)
+    latency_ms = int((time.perf_counter() - started_at) * 1000)
     if not decision.valid:
         ticket = hitl_ticket_repository.create(
             conversation_ref=request.text[:120],
@@ -144,6 +207,17 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
             event_type="guardrail_blocked",
             details=f"reasons={','.join(decision.reasons)}",
         )
+        persisted_trace_id = _persist_answer_trace(
+            trace_id=trace_id,
+            request_text=request.text,
+            response_mode="blocked_invalid",
+            guardrail_outcome="invalid",
+            guardrail_reasons=decision.reasons,
+            guardrail_score=decision.score,
+            retrieval=retrieval_payload,
+            latency_ms=latency_ms,
+            limitations=["policy_blocked"],
+        )
         return {
             "suggestion": None,
             "is_suggestion_only": True,
@@ -157,8 +231,20 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
             "delivery_blocked": True,
             "hitl_ticket_id": ticket.id,
             "hitl_operator_username": _effective_hitl_operator_username(),
+            "trace_id": persisted_trace_id,
         }
 
+    persisted_trace_id = _persist_answer_trace(
+        trace_id=trace_id,
+        request_text=request.text,
+        response_mode="suggestion_only",
+        guardrail_outcome="valid",
+        guardrail_reasons=decision.reasons,
+        guardrail_score=decision.score,
+        retrieval=retrieval_payload,
+        latency_ms=latency_ms,
+        limitations=[] if retrieved_chunks else ["partial_context"],
+    )
     return {
         "suggestion": f"[Suggestion mode] {suggestion}",
         "is_suggestion_only": True,
@@ -178,6 +264,7 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
             }
             for chunk in retrieved_chunks
         ],
+        "trace_id": persisted_trace_id,
     }
 
 
@@ -613,6 +700,45 @@ def reject_knowledge_candidate(candidate_id: int) -> dict[str, object]:
             raise HTTPException(status_code=409, detail="candidate_not_pending") from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"id": candidate_id, "status": "rejected"}
+
+
+def _serialize_trace(trace: object) -> dict[str, object]:
+    return {
+        "trace_id": trace.trace_id,
+        "created_at": trace.created_at,
+        "request_text": trace.request_text,
+        "model_id": trace.model_id,
+        "model_provider": trace.model_provider,
+        "latency_ms": trace.latency_ms,
+        "response_mode": trace.response_mode,
+        "guardrails_applied": trace.guardrails_applied,
+        "guardrail_outcome": trace.guardrail_outcome,
+        "guardrail_reasons": trace.guardrail_reasons,
+        "guardrail_score": trace.guardrail_score,
+        "grounded": trace.grounded,
+        "no_retrieval_hit": trace.no_retrieval_hit,
+        "confidence": trace.confidence,
+        "retrieval": trace.retrieval,
+        "limitations": trace.limitations,
+    }
+
+
+@app.get("/answer-traces")
+def list_answer_traces(limit: int = 50) -> dict[str, object]:
+    return {
+        "items": [_serialize_trace(trace) for trace in answer_trace_repository.list_traces(
+            limit=limit
+        )]
+    }
+
+
+@app.get("/answer-traces/{trace_id}")
+def get_answer_trace(trace_id: str) -> dict[str, object]:
+    try:
+        trace = answer_trace_repository.get_by_trace_id(trace_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="answer_trace_not_found") from exc
+    return _serialize_trace(trace)
 
 
 def _serialize_backup(backup: object) -> dict[str, object]:
