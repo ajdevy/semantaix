@@ -14,6 +14,10 @@ from services.api.app.hitl import HitlTicketRepository
 from services.api.app.incidents import IncidentRepository
 from services.api.app.knowledge import KnowledgeCandidateRepository
 from services.api.app.knowledge_moderation import KnowledgeModerationRepository
+from services.api.app.nl_knowledge_ops import (
+    NlKnowledgeOpsError,
+    NlKnowledgeOpsRepository,
+)
 from services.api.app.openrouter_client import OpenRouterClient
 from services.api.app.rag import RagRepository
 from services.api.app.telegram_bot_sender import TelegramBotSender
@@ -48,6 +52,7 @@ answer_trace_repository = AnswerTraceRepository(
     db_path=settings.answer_trace_db_path,
     snippet_max_chars=settings.answer_trace_snippet_max_chars,
 )
+nl_knowledge_ops_repository = NlKnowledgeOpsRepository(db_path=settings.nl_ops_db_path)
 
 
 @app.get("/")
@@ -101,6 +106,16 @@ class KnowledgeCandidateApproveRequest(BaseModel):
 class BackupRestoreRequest(BaseModel):
     confirm_token: str
     target_root: str
+
+
+class NlOpProposeRequest(BaseModel):
+    user_id: str
+    utterance: str
+    tenant_id: str | None = None
+
+
+class NlOpConfirmRequest(BaseModel):
+    confirm_token: str
 
 
 def _effective_hitl_operator_username() -> str:
@@ -700,6 +715,175 @@ def reject_knowledge_candidate(candidate_id: int) -> dict[str, object]:
             raise HTTPException(status_code=409, detail="candidate_not_pending") from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"id": candidate_id, "status": "rejected"}
+
+
+def _serialize_nl_session(session: object) -> dict[str, object]:
+    return {
+        "id": session.id,
+        "tenant_id": session.tenant_id,
+        "user_id": session.user_id,
+        "utterance": session.utterance,
+        "intent": session.intent,
+        "draft_text": session.draft_text,
+        "status": session.status,
+        "confirm_token": session.confirm_token,
+        "knowledge_version_id": session.knowledge_version_id,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+    }
+
+
+def _serialize_nl_version(version: object) -> dict[str, object]:
+    return {
+        "id": version.id,
+        "tenant_id": version.tenant_id,
+        "version_number": version.version_number,
+        "source_text": version.source_text,
+        "status": version.status,
+        "nl_session_id": version.nl_session_id,
+        "source_id": version.source_id,
+        "created_at": version.created_at,
+    }
+
+
+def _check_nl_ops_enabled() -> None:
+    if not settings.nl_ops_enabled:
+        raise HTTPException(status_code=503, detail="nl_ops_disabled")
+
+
+def _check_nl_ops_admin(user_id: str) -> None:
+    allow = settings.nl_ops_admin_user_id_list()
+    if allow and user_id not in allow:
+        raise HTTPException(status_code=403, detail="nl_ops_user_not_authorized")
+
+
+@app.post("/knowledge/nl-ops")
+def propose_nl_op(request: NlOpProposeRequest) -> dict[str, object]:
+    _check_nl_ops_enabled()
+    _check_nl_ops_admin(request.user_id)
+    tenant_id = request.tenant_id or settings.nl_ops_default_tenant_id
+    try:
+        session = nl_knowledge_ops_repository.propose(
+            tenant_id=tenant_id,
+            user_id=request.user_id,
+            utterance=request.utterance,
+        )
+    except NlKnowledgeOpsError as exc:
+        message = str(exc)
+        if message in {"tenant_id_required", "user_id_required", "utterance_required"}:
+            raise HTTPException(status_code=400, detail=message) from exc
+        incident = incident_repository.ingest(  # pragma: no cover - defensive guard
+            fingerprint="nl_ops_propose_failures",
+            severity="critical",
+            summary=f"NL ops propose failed: {message}",
+        )
+        incident_repository.append_event(  # pragma: no cover
+            incident_id=incident.id,
+            event_type="nl_ops_propose_failed",
+            details=message,
+        )
+        raise HTTPException(  # pragma: no cover
+            status_code=500, detail="nl_ops_propose_failed"
+        ) from exc
+    return _serialize_nl_session(session)
+
+
+@app.post("/knowledge/nl-ops/{session_id}/confirm")
+def confirm_nl_op(session_id: int, request: NlOpConfirmRequest) -> dict[str, object]:
+    _check_nl_ops_enabled()
+    try:
+        session, version = nl_knowledge_ops_repository.confirm(
+            session_id=session_id,
+            confirm_token=request.confirm_token,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="nl_op_session_not_found") from exc
+    except NlKnowledgeOpsError as exc:
+        message = str(exc)
+        if message == "invalid_confirm_token":
+            raise HTTPException(status_code=400, detail=message) from exc
+        if message.startswith("invalid_status") or message == "already_confirmed":
+            raise HTTPException(status_code=409, detail=message) from exc
+        raise HTTPException(  # pragma: no cover - defensive guard
+            status_code=400, detail=message
+        ) from exc
+
+    if session.intent != "deprecate":
+        try:
+            rag_repository.ingest(source_id=version.source_id, text=version.source_text)
+        except Exception as exc:
+            incident = incident_repository.ingest(
+                fingerprint="nl_knowledge_reindex_failures",
+                severity="critical",
+                summary=f"NL ops reindex failed: {exc}",
+            )
+            incident_repository.append_event(
+                incident_id=incident.id,
+                event_type="nl_knowledge_reindex_failed",
+                details=f"version_id={version.id};source_id={version.source_id}",
+            )
+            raise HTTPException(status_code=500, detail="nl_knowledge_reindex_failed") from exc
+    return {
+        "session": _serialize_nl_session(session),
+        "version": _serialize_nl_version(version),
+    }
+
+
+@app.post("/knowledge/nl-ops/{session_id}/cancel")
+def cancel_nl_op(session_id: int) -> dict[str, object]:
+    _check_nl_ops_enabled()
+    try:
+        session = nl_knowledge_ops_repository.cancel(session_id=session_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="nl_op_session_not_found") from exc
+    except NlKnowledgeOpsError as exc:
+        message = str(exc)
+        if message.startswith("invalid_status"):
+            raise HTTPException(status_code=409, detail=message) from exc
+        raise HTTPException(  # pragma: no cover - defensive guard
+            status_code=400, detail=message
+        ) from exc
+    return _serialize_nl_session(session)
+
+
+@app.get("/knowledge/nl-ops/{session_id}")
+def get_nl_op(session_id: int) -> dict[str, object]:
+    try:
+        session = nl_knowledge_ops_repository.get_session(session_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="nl_op_session_not_found") from exc
+    return _serialize_nl_session(session)
+
+
+@app.get("/knowledge/nl-ops")
+def list_nl_ops(tenant_id: str | None = None) -> dict[str, object]:
+    sessions = nl_knowledge_ops_repository.list_sessions(tenant_id=tenant_id)
+    return {"items": [_serialize_nl_session(item) for item in sessions]}
+
+
+@app.get("/knowledge/versions")
+def list_knowledge_versions(tenant_id: str | None = None) -> dict[str, object]:
+    versions = nl_knowledge_ops_repository.list_versions(tenant_id=tenant_id)
+    return {"items": [_serialize_nl_version(version) for version in versions]}
+
+
+@app.get("/knowledge/nl-ops-audit")
+def list_nl_ops_audit(tenant_id: str | None = None) -> dict[str, object]:
+    logs = nl_knowledge_ops_repository.list_audit_logs(tenant_id=tenant_id)
+    return {
+        "items": [
+            {
+                "id": log.id,
+                "tenant_id": log.tenant_id,
+                "user_id": log.user_id,
+                "session_id": log.session_id,
+                "op_type": log.op_type,
+                "details": log.details,
+                "created_at": log.created_at,
+            }
+            for log in logs
+        ]
+    }
 
 
 def _serialize_trace(trace: object) -> dict[str, object]:
