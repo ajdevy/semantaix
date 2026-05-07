@@ -34,7 +34,8 @@ Markers are declared in `[tool.pytest.ini_options]` in [`pyproject.toml`](../../
 | 08 | 08-01 | `/suggest` writes a queryable `answer_trace` row with retrieval, routing, guardrail, grounding | `tests/e2e/test_e2e_epic08_answer_trace.py::test_epic08_suggest_writes_queryable_trace` |
 | 08 | 08-02 (smoke) | Static admin shell HTTP 200 | `tests/e2e/test_e2e_epic08_web_ui_smoke.py::test_epic08_admin_shell_reachable` |
 | 08 | 08-02 | `/suggest` persists trace; admin trace list + detail render sources/policy/routing/confidence | `tests/e2e/test_e2e_epic08_trace_ui.py::test_epic08_trace_visible_in_web_ui` |
-| 08 | 08-03, 08-04 | NL knowledge ops, correction loop | **Deferred** until APIs and UI beyond static shell exist |
+| 08 | 08-03 | NL knowledge op: preview → confirm → reindexed; audit log captured | `tests/e2e/test_e2e_epic08_nl_ops.py::test_epic08_nl_op_preview_confirm_reindex` |
+| 08 | 08-04 | Trace-linked correction loop | **Deferred** until Story 08-04 lands |
 
 ## CI
 

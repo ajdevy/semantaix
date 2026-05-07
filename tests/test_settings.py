@@ -22,6 +22,10 @@ def test_settings_defaults(monkeypatch):
     assert settings.hitl_config_admin_username == "@ajdevy"
     assert settings.answer_trace_db_path == ".data/semantaix_answer_traces.db"
     assert settings.answer_trace_snippet_max_chars == 240
+    assert settings.nl_ops_enabled is True
+    assert settings.nl_ops_db_path == ".data/semantaix_nl_ops.db"
+    assert settings.nl_ops_admin_user_id_list() == []
+    assert settings.nl_ops_default_tenant_id == "default"
     assert settings.backup_db_path == ".data/semantaix_backups.db"
     assert settings.backup_archive_dir == ".data/backups"
     assert settings.backup_source_path_list() == [
@@ -51,6 +55,10 @@ def test_settings_env_override(monkeypatch):
     monkeypatch.setenv("HITL_CONFIG_ADMIN_USERNAME", "@admin")
     monkeypatch.setenv("ANSWER_TRACE_DB_PATH", ".tmp/answer_traces.sqlite3")
     monkeypatch.setenv("ANSWER_TRACE_SNIPPET_MAX_CHARS", "120")
+    monkeypatch.setenv("NL_OPS_ENABLED", "false")
+    monkeypatch.setenv("NL_OPS_DB_PATH", ".tmp/nl_ops.sqlite3")
+    monkeypatch.setenv("NL_OPS_ADMIN_USER_IDS", " 111 , 222 , ")
+    monkeypatch.setenv("NL_OPS_DEFAULT_TENANT_ID", "tenant-x")
     monkeypatch.setenv("BACKUP_DB_PATH", ".tmp/backups.sqlite3")
     monkeypatch.setenv("BACKUP_ARCHIVE_DIR", ".tmp/backups")
     monkeypatch.setenv("BACKUP_SOURCE_PATHS", " .tmp/a.db , .tmp/b.db , ")
@@ -72,6 +80,10 @@ def test_settings_env_override(monkeypatch):
     assert settings.hitl_config_admin_username == "@admin"
     assert settings.answer_trace_db_path == ".tmp/answer_traces.sqlite3"
     assert settings.answer_trace_snippet_max_chars == 120
+    assert settings.nl_ops_enabled is False
+    assert settings.nl_ops_db_path == ".tmp/nl_ops.sqlite3"
+    assert settings.nl_ops_admin_user_id_list() == ["111", "222"]
+    assert settings.nl_ops_default_tenant_id == "tenant-x"
     assert settings.backup_db_path == ".tmp/backups.sqlite3"
     assert settings.backup_archive_dir == ".tmp/backups"
     assert settings.backup_source_path_list() == [".tmp/a.db", ".tmp/b.db"]
