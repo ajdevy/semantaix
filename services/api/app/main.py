@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
+from services.api.app.backups import BackupError, BackupRepository
 from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.hitl import HitlTicketRepository
 from services.api.app.incidents import IncidentRepository
@@ -35,6 +36,11 @@ knowledge_candidate_repository = KnowledgeCandidateRepository(
 rag_repository = RagRepository(settings.rag_db_path)
 knowledge_moderation_repository = KnowledgeModerationRepository(settings.knowledge_db_path)
 telegram_bot_sender = TelegramBotSender(bot_token=settings.telegram_bot_token)
+backup_repository = BackupRepository(
+    db_path=settings.backup_db_path,
+    archive_dir=settings.backup_archive_dir,
+    source_paths=settings.backup_source_path_list(),
+)
 
 
 @app.get("/")
@@ -82,6 +88,11 @@ class KnowledgeCandidateCreateRequest(BaseModel):
 
 class KnowledgeCandidateApproveRequest(BaseModel):
     edited_text: str | None = None
+
+
+class BackupRestoreRequest(BaseModel):
+    confirm_token: str
+    target_root: str
 
 
 def _effective_hitl_operator_username() -> str:
@@ -602,3 +613,89 @@ def reject_knowledge_candidate(candidate_id: int) -> dict[str, object]:
             raise HTTPException(status_code=409, detail="candidate_not_pending") from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"id": candidate_id, "status": "rejected"}
+
+
+def _serialize_backup(backup: object) -> dict[str, object]:
+    return {
+        "id": backup.id,
+        "started_at": backup.started_at,
+        "completed_at": backup.completed_at,
+        "status": backup.status,
+        "archive_path": backup.archive_path,
+        "size_bytes": backup.size_bytes,
+        "source_paths": backup.source_paths,
+        "included_paths": backup.included_paths,
+        "error_message": backup.error_message,
+    }
+
+
+@app.post("/backups/run")
+def run_backup() -> dict[str, object]:
+    try:
+        backup = backup_repository.run_backup()
+    except BackupError as exc:
+        incident = incident_repository.ingest(
+            fingerprint="backup_failures",
+            severity="critical",
+            summary=f"Backup run failed: {exc}",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="backup_failed",
+            details=str(exc),
+        )
+        raise HTTPException(status_code=500, detail="backup_failed") from exc
+    return _serialize_backup(backup)
+
+
+@app.get("/backups")
+def list_backups() -> dict[str, object]:
+    return {"items": [_serialize_backup(backup) for backup in backup_repository.list_backups()]}
+
+
+@app.get("/backups/last-successful")
+def get_last_successful_backup() -> dict[str, object]:
+    backup = backup_repository.latest_successful()
+    if backup is None:
+        return {"backup": None}
+    return {"backup": _serialize_backup(backup)}
+
+
+@app.get("/backups/{backup_id}")
+def get_backup(backup_id: int) -> dict[str, object]:
+    try:
+        backup = backup_repository.get(backup_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="backup_not_found") from exc
+    return _serialize_backup(backup)
+
+
+@app.post("/backups/{backup_id}/restore")
+def restore_backup(backup_id: int, request: BackupRestoreRequest) -> dict[str, object]:
+    try:
+        result = backup_repository.restore(
+            backup_id=backup_id,
+            confirm_token=request.confirm_token,
+            target_root=request.target_root,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="backup_not_found") from exc
+    except BackupError as exc:
+        message = str(exc)
+        if message == "invalid_confirm_token":
+            raise HTTPException(status_code=400, detail="invalid_confirm_token") from exc
+        incident = incident_repository.ingest(
+            fingerprint="backup_restore_failures",
+            severity="critical",
+            summary=f"Backup restore failed: {message}",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="backup_restore_failed",
+            details=f"backup_id={backup_id};error={message}",
+        )
+        raise HTTPException(status_code=500, detail="backup_restore_failed") from exc
+    return {
+        "backup_id": result.backup_id,
+        "restored_paths": result.restored_paths,
+    }

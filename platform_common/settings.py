@@ -28,8 +28,20 @@ class AppSettings(BaseSettings):
     rag_db_path: str = ".data/semantaix_rag.db"
     knowledge_db_path: str = ".data/semantaix_knowledge.db"
     hitl_config_admin_username: str = "@ajdevy"
+    backup_db_path: str = ".data/semantaix_backups.db"
+    backup_archive_dir: str = ".data/backups"
+    backup_source_paths: str = (
+        ".data/semantaix_story1.db,"
+        ".data/semantaix_incidents.db,"
+        ".data/semantaix_hitl.db,"
+        ".data/semantaix_rag.db,"
+        ".data/semantaix_knowledge.db"
+    )
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    def backup_source_path_list(self) -> list[str]:
+        return [path.strip() for path in self.backup_source_paths.split(",") if path.strip()]
 
 
 @lru_cache(maxsize=1)
