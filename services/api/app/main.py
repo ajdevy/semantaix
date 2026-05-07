@@ -22,6 +22,12 @@ from services.api.app.openrouter_client import OpenRouterClient
 from services.api.app.rag import RagRepository
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
+from services.api.app.trace_corrections import (
+    BRANCH_MODERATION,
+    BRANCH_PUBLISH,
+    TraceCorrectionError,
+    TraceCorrectionRepository,
+)
 
 app = create_service_app("api")
 openrouter_client = OpenRouterClient()
@@ -53,6 +59,7 @@ answer_trace_repository = AnswerTraceRepository(
     snippet_max_chars=settings.answer_trace_snippet_max_chars,
 )
 nl_knowledge_ops_repository = NlKnowledgeOpsRepository(db_path=settings.nl_ops_db_path)
+trace_correction_repository = TraceCorrectionRepository(db_path=settings.nl_ops_db_path)
 
 
 @app.get("/")
@@ -116,6 +123,18 @@ class NlOpProposeRequest(BaseModel):
 
 class NlOpConfirmRequest(BaseModel):
     confirm_token: str
+
+
+class TraceOpenRequest(BaseModel):
+    tenant_id: str
+    user_id: str
+
+
+class TraceCorrectionRequest(BaseModel):
+    tenant_id: str
+    user_id: str
+    edited_text: str
+    branch: str
 
 
 def _effective_hitl_operator_username() -> str:
@@ -884,6 +903,112 @@ def list_nl_ops_audit(tenant_id: str | None = None) -> dict[str, object]:
             for log in logs
         ]
     }
+
+
+def _serialize_correction(correction: object) -> dict[str, object]:
+    return {
+        "id": correction.id,
+        "trace_id": correction.trace_id,
+        "tenant_id": correction.tenant_id,
+        "user_id": correction.user_id,
+        "branch": correction.branch,
+        "status": correction.status,
+        "draft_text": correction.draft_text,
+        "source_id": correction.source_id,
+        "candidate_id": correction.candidate_id,
+        "created_at": correction.created_at,
+        "updated_at": correction.updated_at,
+    }
+
+
+def _ensure_trace_exists(trace_id: str) -> None:
+    try:
+        answer_trace_repository.get_by_trace_id(trace_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="answer_trace_not_found") from exc
+
+
+@app.post("/answer-traces/{trace_id}/open")
+def record_trace_open(trace_id: str, request: TraceOpenRequest) -> dict[str, object]:
+    _ensure_trace_exists(trace_id)
+    try:
+        trace_correction_repository.record_open(
+            trace_id=trace_id,
+            tenant_id=request.tenant_id,
+            user_id=request.user_id,
+        )
+    except TraceCorrectionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"trace_id": trace_id, "status": "logged"}
+
+
+@app.post("/answer-traces/{trace_id}/corrections")
+def submit_trace_correction(
+    trace_id: str, request: TraceCorrectionRequest
+) -> dict[str, object]:
+    _ensure_trace_exists(trace_id)
+    if request.branch not in {BRANCH_PUBLISH, BRANCH_MODERATION}:
+        raise HTTPException(status_code=400, detail="invalid_branch")
+    if request.branch == BRANCH_PUBLISH:
+        try:
+            correction = trace_correction_repository.submit_publish(
+                trace_id=trace_id,
+                tenant_id=request.tenant_id,
+                user_id=request.user_id,
+                edited_text=request.edited_text,
+            )
+        except TraceCorrectionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            rag_repository.ingest(
+                source_id=correction.source_id,
+                text=correction.draft_text,
+            )
+        except Exception as exc:
+            incident = incident_repository.ingest(
+                fingerprint="trace_correction_reindex_failures",
+                severity="critical",
+                summary=f"Trace correction reindex failed: {exc}",
+            )
+            incident_repository.append_event(
+                incident_id=incident.id,
+                event_type="trace_correction_reindex_failed",
+                details=f"correction_id={correction.id};trace_id={trace_id}",
+            )
+            raise HTTPException(
+                status_code=500, detail="trace_correction_reindex_failed"
+            ) from exc
+        return _serialize_correction(correction)
+
+    candidate = knowledge_moderation_repository.create_pending(text=request.edited_text)
+    try:
+        correction = trace_correction_repository.submit_moderation(
+            trace_id=trace_id,
+            tenant_id=request.tenant_id,
+            user_id=request.user_id,
+            edited_text=request.edited_text,
+            candidate_id=candidate.id,
+        )
+    except TraceCorrectionError as exc:  # pragma: no cover - defensive guard
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _serialize_correction(correction)
+
+
+@app.get("/answer-traces/{trace_id}/corrections")
+def list_trace_corrections(trace_id: str) -> dict[str, object]:
+    _ensure_trace_exists(trace_id)
+    return {
+        "items": [
+            _serialize_correction(correction)
+            for correction in trace_correction_repository.list_for_trace(trace_id)
+        ],
+    }
+
+
+@app.get("/answer-traces/{trace_id}/audit")
+def list_trace_audit(trace_id: str) -> dict[str, object]:
+    _ensure_trace_exists(trace_id)
+    return {"items": trace_correction_repository.list_audit(trace_id=trace_id)}
 
 
 def _serialize_trace(trace: object) -> dict[str, object]:
