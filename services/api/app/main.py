@@ -8,8 +8,13 @@ from pydantic import BaseModel
 from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
 from services.api.app.answer_trace import AnswerTraceRepository
+from services.api.app.answerers import AnswerContext, AnswerPipeline
+from services.api.app.answerers.datetime_answerer import DateTimeAnswerer
+from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
+from services.api.app.answerers.holiday_answerer import HolidayAnswerer
+from services.api.app.answerers.weather_answerer import WeatherAnswerer
+from services.api.app.answerers.weather_client import WeatherClient
 from services.api.app.backups import BackupError, BackupRepository
-from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.hitl import HitlTicketRepository
 from services.api.app.incidents import IncidentRepository
 from services.api.app.knowledge import KnowledgeCandidateRepository
@@ -60,6 +65,18 @@ answer_trace_repository = AnswerTraceRepository(
 )
 nl_knowledge_ops_repository = NlKnowledgeOpsRepository(db_path=settings.nl_ops_db_path)
 trace_correction_repository = TraceCorrectionRepository(db_path=settings.nl_ops_db_path)
+weather_client = WeatherClient(base_url=settings.weather_provider_base_url)
+answer_pipeline = AnswerPipeline(
+    [
+        DateTimeAnswerer(),
+        HolidayAnswerer(),
+        WeatherAnswerer(client=weather_client),
+        GroundedRagAnswerer(
+            rag_repository=rag_repository,
+            openrouter_client=openrouter_client,
+        ),
+    ]
+)
 
 
 @app.get("/")
@@ -67,10 +84,11 @@ def root() -> dict[str, str]:
     return {"service": "api", "message": "Semantaix API"}
 
 
-class SuggestRequest(BaseModel):
+class InboundMessageRequest(BaseModel):
     text: str
     chat_id: int | None = None
     trace_id: str | None = None
+    customer_username: str | None = None
 
 
 class IncidentEventRequest(BaseModel):
@@ -151,7 +169,93 @@ def _effective_hitl_operator_chat_id() -> str | None:
     )
 
 
-async def _notify_hitl_operator(*, ticket_id: int, summary: str) -> bool:
+def _effective_inbound_ack_message() -> str:
+    return (
+        hitl_ticket_repository.get_runtime_config("inbound_ack_message")
+        or settings.inbound_ack_message
+    )
+
+
+def _effective_default_country() -> str:
+    return (
+        hitl_ticket_repository.get_runtime_config("default_country_code")
+        or settings.default_country_code
+    )
+
+
+def _effective_default_timezone() -> str:
+    return (
+        hitl_ticket_repository.get_runtime_config("default_timezone")
+        or settings.default_timezone
+    )
+
+
+def _effective_default_location() -> str:
+    return (
+        hitl_ticket_repository.get_runtime_config("default_location")
+        or settings.default_location
+    )
+
+
+def _effective_default_language() -> str:
+    return (
+        hitl_ticket_repository.get_runtime_config("default_language")
+        or settings.default_language
+    )
+
+
+def _effective_grounding_threshold() -> float:
+    raw = hitl_ticket_repository.get_runtime_config("rag_grounding_score_threshold")
+    if raw is None:
+        return settings.rag_grounding_score_threshold
+    try:
+        return float(raw)
+    except ValueError:
+        return settings.rag_grounding_score_threshold
+
+
+def _build_answer_context(
+    *,
+    chat_id: int | None,
+    customer_username: str | None,
+    trace_id: str,
+    now: datetime,
+) -> AnswerContext:
+    return AnswerContext(
+        chat_id=chat_id,
+        customer_username=customer_username,
+        trace_id=trace_id,
+        now=now,
+        language=_effective_default_language(),
+        country_code=_effective_default_country(),
+        timezone=_effective_default_timezone(),
+        location=_effective_default_location(),
+        grounding_threshold=_effective_grounding_threshold(),
+    )
+
+
+async def _safe_send_message(
+    *, chat_id: int, text: str, failure_summary: str, failure_kind: str
+) -> bool:
+    try:
+        await telegram_bot_sender.send_message(chat_id=chat_id, text=text)
+        return True
+    except Exception as exc:  # broad: ack/notify are best-effort
+        incident = incident_repository.ingest(
+            fingerprint="hitl_delivery_failures",
+            severity="critical",
+            summary=f"{failure_summary}: {exc}",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type=failure_kind,
+            details=f"chat_id={chat_id};error={exc}",
+        )
+        return False
+
+
+async def _notify_hitl_operator_summary(*, ticket_id: int, summary: str) -> bool:
+    """Short-form operator DM, used for status changes like route/assign."""
     chat_id_raw = _effective_hitl_operator_chat_id()
     if not chat_id_raw:
         return False
@@ -164,11 +268,32 @@ async def _notify_hitl_operator(*, ticket_id: int, summary: str) -> bool:
             chat_id=chat_id,
             text=f"HITL ticket #{ticket_id}: {summary}",
         )
-    except RuntimeError:
-        return False
-    except Exception:  # pragma: no cover - provider failure path
+    except Exception:  # broad: best-effort notification
         return False
     return True
+
+
+async def _notify_hitl_operator_with_question(
+    *,
+    ticket_id: int,
+    question: str,
+    customer_username: str | None,
+) -> bool:
+    chat_id_raw = _effective_hitl_operator_chat_id()
+    if not chat_id_raw:
+        return False
+    try:
+        chat_id = int(chat_id_raw)
+    except ValueError:
+        return False
+    customer_label = customer_username or "unknown"
+    text = f"HITL ticket #{ticket_id} | from {customer_label} | {question}"
+    return await _safe_send_message(
+        chat_id=chat_id,
+        text=text,
+        failure_summary="HITL operator notification failed",
+        failure_kind="hitl_operator_notify_failed",
+    )
 
 
 def _persist_answer_trace(
@@ -214,121 +339,99 @@ def _persist_answer_trace(
     return trace.trace_id
 
 
-@app.post("/suggest")
-async def suggest(request: SuggestRequest) -> dict[str, object]:
+@app.post("/conversations/inbound")
+async def conversations_inbound(request: InboundMessageRequest) -> dict[str, object]:
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="empty_text")
+
     started_at = time.perf_counter()
     trace_id = request.trace_id or str(uuid.uuid4())
-    retrieved_chunks = rag_repository.retrieve(query=request.text, limit=3)
-    retrieval_payload = [
-        {
-            "chunk_id": str(chunk.id),
-            "source_ref": chunk.source_id,
-            "score": chunk.score,
-            "text_snippet": chunk.chunk_text,
-        }
-        for chunk in retrieved_chunks
-    ]
-    retrieval_context: list[dict[str, str]] = []
-    if retrieved_chunks:
-        retrieval_context.append(
-            {
-                "role": "system",
-                "content": "Relevant knowledge:\n"
-                + "\n".join(
-                    f"- [{chunk.source_id}] {chunk.chunk_text}" for chunk in retrieved_chunks
-                ),
-            }
-        )
-    try:
-        suggestion = await openrouter_client.suggest(request.text, context=retrieval_context)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:  # pragma: no cover - external provider failure path
-        raise HTTPException(status_code=502, detail=f"OpenRouter call failed: {exc}") from exc
+    now = datetime.now(UTC)
+    ctx = _build_answer_context(
+        chat_id=request.chat_id,
+        customer_username=request.customer_username,
+        trace_id=trace_id,
+        now=now,
+    )
 
-    decision = evaluate_suggestion(suggestion)
+    pipeline_result = await answer_pipeline.run(question=request.text, ctx=ctx)
     latency_ms = int((time.perf_counter() - started_at) * 1000)
-    if not decision.valid:
-        ticket = hitl_ticket_repository.create(
-            conversation_ref=request.text[:120],
-            reason=",".join(decision.reasons),
-            target_chat_id=request.chat_id,
-        )
-        hitl_ticket_repository.assign(
-            ticket_id=ticket.id,
-            operator_username=_effective_hitl_operator_username(),
-        )
-        await _notify_hitl_operator(
-            ticket_id=ticket.id,
-            summary=f"created — {','.join(decision.reasons) or 'blocked'}",
-        )
-        incident = incident_repository.ingest(
-            fingerprint="guardrail_invalid_suggestion",
-            severity="warning",
-            summary=f"Suggestion blocked by guardrails: {','.join(decision.reasons)}",
-        )
-        incident_repository.append_event(
-            incident_id=incident.id,
-            event_type="guardrail_blocked",
-            details=f"reasons={','.join(decision.reasons)}",
-        )
+
+    if pipeline_result.handled:
+        retrieval = pipeline_result.metadata.get("retrieval") or []
+        guardrail_score = pipeline_result.metadata.get("guardrail_score")
+        delivered = True
+        if request.chat_id is not None:
+            delivered = await _safe_send_message(
+                chat_id=request.chat_id,
+                text=pipeline_result.text or "",
+                failure_summary="Inbound answer delivery failed",
+                failure_kind="inbound_delivery_failed",
+            )
+        limitations: list[str] = [] if retrieval else ["no_retrieval"]
         persisted_trace_id = _persist_answer_trace(
             trace_id=trace_id,
             request_text=request.text,
-            response_mode="blocked_invalid",
-            guardrail_outcome="invalid",
-            guardrail_reasons=decision.reasons,
-            guardrail_score=decision.score,
-            retrieval=retrieval_payload,
+            response_mode=pipeline_result.response_mode or "unknown",
+            guardrail_outcome="valid",
+            guardrail_reasons=[],
+            guardrail_score=(
+                float(guardrail_score) if guardrail_score is not None else None
+            ),
+            retrieval=list(retrieval),
             latency_ms=latency_ms,
-            limitations=["policy_blocked"],
+            limitations=limitations,
         )
         return {
-            "suggestion": None,
-            "is_suggestion_only": True,
-            "response_mode": "blocked_invalid",
-            "guardrails_applied": True,
-            "guardrail_decision": {
-                "valid": decision.valid,
-                "reasons": decision.reasons,
-                "score": decision.score,
-            },
-            "delivery_blocked": True,
-            "hitl_ticket_id": ticket.id,
-            "hitl_operator_username": _effective_hitl_operator_username(),
+            "delivered": delivered,
+            "escalated": False,
+            "response_mode": pipeline_result.response_mode,
+            "answer_text": pipeline_result.text,
+            "answerer": pipeline_result.metadata.get("answerer"),
             "trace_id": persisted_trace_id,
         }
+
+    ack_message = _effective_inbound_ack_message()
+    if request.chat_id is not None:
+        await _safe_send_message(
+            chat_id=request.chat_id,
+            text=ack_message,
+            failure_summary="Inbound ack delivery failed",
+            failure_kind="inbound_ack_failed",
+        )
+
+    ticket = hitl_ticket_repository.create(
+        conversation_ref=request.text[:120],
+        reason="awaiting_human_response",
+        target_chat_id=request.chat_id,
+    )
+    hitl_ticket_repository.assign(
+        ticket_id=ticket.id,
+        operator_username=_effective_hitl_operator_username(),
+    )
+    await _notify_hitl_operator_with_question(
+        ticket_id=ticket.id,
+        question=request.text,
+        customer_username=request.customer_username,
+    )
 
     persisted_trace_id = _persist_answer_trace(
         trace_id=trace_id,
         request_text=request.text,
-        response_mode="suggestion_only",
-        guardrail_outcome="valid",
-        guardrail_reasons=decision.reasons,
-        guardrail_score=decision.score,
-        retrieval=retrieval_payload,
+        response_mode="human_only",
+        guardrail_outcome="escalated",
+        guardrail_reasons=[],
+        guardrail_score=None,
+        retrieval=[],
         latency_ms=latency_ms,
-        limitations=[] if retrieved_chunks else ["partial_context"],
+        limitations=["awaiting_human_response"],
     )
     return {
-        "suggestion": f"[Suggestion mode] {suggestion}",
-        "is_suggestion_only": True,
-        "response_mode": "suggestion_only",
-        "guardrails_applied": True,
-        "guardrail_decision": {
-            "valid": decision.valid,
-            "reasons": decision.reasons,
-            "score": decision.score,
-        },
-        "delivery_blocked": False,
-        "retrieval": [
-            {
-                "source_id": chunk.source_id,
-                "chunk_text": chunk.chunk_text,
-                "score": chunk.score,
-            }
-            for chunk in retrieved_chunks
-        ],
+        "delivered": False,
+        "escalated": True,
+        "response_mode": "human_only",
+        "hitl_ticket_id": ticket.id,
+        "hitl_operator_username": _effective_hitl_operator_username(),
         "trace_id": persisted_trace_id,
     }
 
@@ -547,7 +650,9 @@ async def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[s
         raise HTTPException(status_code=503, detail="hitl_operator_missing")
 
     ticket = hitl_ticket_repository.assign(ticket_id=ticket_id, operator_username=operator)
-    await _notify_hitl_operator(ticket_id=ticket.id, summary=f"assigned to {operator}")
+    await _notify_hitl_operator_summary(
+        ticket_id=ticket.id, summary=f"assigned to {operator}"
+    )
     return {
         "id": ticket.id,
         "status": ticket.status,
@@ -616,11 +721,15 @@ async def deliver_hitl_ticket_reply(ticket_id: int, request: HitlReplyRequest) -
         )
         raise HTTPException(status_code=502, detail="hitl_delivery_failed") from exc
 
+    resolved = hitl_ticket_repository.resolve(ticket_id=ticket_id)
     return {
         "ticket_id": ticket_id,
         "delivered": True,
         "chat_id": ticket.target_chat_id,
         "message_id": message_id,
+        "resolved": True,
+        "status": resolved.status,
+        "resolved_at": resolved.resolved_at,
     }
 
 

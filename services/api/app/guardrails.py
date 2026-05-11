@@ -1,6 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+from services.api.app.russian_text import get_russian_normalizer
+
+DEFAULT_HEDGES_PATH = (
+    Path(__file__).resolve().parents[3] / "data" / "russian_hedges.txt"
+)
+DEFAULT_POLICY_PATH = (
+    Path(__file__).resolve().parents[3] / "data" / "russian_policy_phrases.txt"
+)
 
 
 @dataclass(frozen=True)
@@ -10,10 +21,26 @@ class GuardrailDecision:
     score: float
 
 
+@lru_cache(maxsize=4)
+def _load_phrase_list(path: str) -> tuple[str, ...]:
+    """Load phrase entries and run each through the same normalization
+    that the candidate goes through, so substring matches align even when
+    razdel splits contractions / punctuation.
+    """
+    resolved = Path(path)
+    normalizer = get_russian_normalizer()
+    entries: list[str] = []
+    for line in resolved.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        entries.append(normalizer.normalize(stripped))
+    return tuple(entries)
+
+
 def evaluate_suggestion(candidate: str) -> GuardrailDecision:
     reasons: list[str] = []
     text = candidate.strip()
-    lowered = text.lower()
 
     if not text:
         reasons.append("empty_response")
@@ -22,14 +49,13 @@ def evaluate_suggestion(candidate: str) -> GuardrailDecision:
     if len(text.split()) < 3:
         reasons.append("insufficient_content")
 
-    blocked_phrases = [
-        "ignore previous instructions",
-        "bypass policy",
-        "credit card number",
-    ]
-    if any(phrase in lowered for phrase in blocked_phrases):
+    normalized = get_russian_normalizer().normalize(text) if text else ""
+    policy_phrases = _load_phrase_list(str(DEFAULT_POLICY_PATH))
+    hedge_phrases = _load_phrase_list(str(DEFAULT_HEDGES_PATH))
+
+    if any(phrase and phrase in normalized for phrase in policy_phrases):
         reasons.append("policy_violation")
-    if "i don't know" in lowered or "i am not sure" in lowered:
+    if any(phrase and phrase in normalized for phrase in hedge_phrases):
         reasons.append("low_confidence")
 
     if reasons:

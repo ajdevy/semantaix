@@ -1,4 +1,4 @@
-"""Epic 01: Telegram webhook -> persistence -> /suggest with retrieval, plus failure paths."""
+"""Epic 01: Telegram webhook -> persistence -> /conversations/inbound pipeline."""
 
 import sqlite3
 from unittest.mock import AsyncMock
@@ -6,12 +6,16 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from services.api.app.main import app as api_app
+from services.api.app.answerers import AnswerResult
 from services.api.app.main import (
+    answer_pipeline,
+    answer_trace_repository,
+    hitl_ticket_repository,
     incident_repository,
-    openrouter_client,
     rag_repository,
+    telegram_bot_sender,
 )
+from services.api.app.main import app as api_app
 from services.api.app.main import settings as api_settings
 from services.bot_gateway.app.main import app as bot_app
 from tests.e2e.db_seed import load_telegram_fixture
@@ -19,22 +23,43 @@ from tests.e2e.db_seed import load_telegram_fixture
 pytestmark = [pytest.mark.e2e, pytest.mark.epic("01")]
 
 
-@pytest.mark.story("01-04")
-def test_epic01_e2e_webhook_persist_then_suggest_with_retrieval(monkeypatch, tmp_path):
-    persistence_path = tmp_path / "persistence.sqlite3"
-    # Patch in place on the cached settings instance so the bot_gateway's lazy
-    # get_settings() call inside the webhook handler picks up the override
-    # without disturbing the lru_cache (which would mismatch module-level
-    # `settings` references in api/main.py and break later contract tests).
-    monkeypatch.setattr(api_settings, "persistence_db_path", str(persistence_path))
-
+def _wire(tmp_path) -> None:
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    answer_trace_repository.db_path = str(tmp_path / "answer_traces.sqlite3")
+
+
+@pytest.mark.story("01-04")
+def test_epic01_e2e_webhook_persist_then_inbound_grounded_rag(monkeypatch, tmp_path):
+    _wire(tmp_path)
+    persistence_path = tmp_path / "persistence.sqlite3"
+    monkeypatch.setattr(api_settings, "persistence_db_path", str(persistence_path))
+
     monkeypatch.setattr(
-        openrouter_client,
-        "suggest",
-        AsyncMock(return_value="Substantial answer drawing on retrieved billing context."),
+        answer_pipeline,
+        "run",
+        AsyncMock(
+            return_value=AnswerResult(
+                handled=True,
+                text="Счёт-фактуры формируются в первый день каждого месяца.",
+                response_mode="grounded_rag",
+                metadata={
+                    "retrieval": [
+                        {
+                            "chunk_id": "1",
+                            "source_ref": "faq-billing",
+                            "score": 0.9,
+                            "text_snippet": "billing day 1",
+                        }
+                    ],
+                    "answerer": "grounded_rag",
+                    "guardrail_score": 0.95,
+                },
+            )
+        ),
     )
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
 
     bot_client = TestClient(bot_app)
     webhook = bot_client.post(
@@ -60,45 +85,31 @@ def test_epic01_e2e_webhook_persist_then_suggest_with_retrieval(monkeypatch, tmp
     )
     assert ingest.status_code == 200
 
-    suggest = api_client.post(
-        "/suggest",
-        json={"text": "When are invoices generated each month?"},
+    inbound = api_client.post(
+        "/conversations/inbound",
+        json={
+            "text": "Когда формируются счёт-фактуры?",
+            "chat_id": 12345,
+            "trace_id": "trace-epic01",
+        },
     )
-    assert suggest.status_code == 200
-    body = suggest.json()
-    assert body["response_mode"] == "suggestion_only"
-    assert body["delivery_blocked"] is False
-    sources = [item["source_id"] for item in body["retrieval"]]
-    assert "faq-billing" in sources
+    assert inbound.status_code == 200
+    body = inbound.json()
+    assert body["response_mode"] == "grounded_rag"
+    assert body["delivered"] is True
+    assert body["escalated"] is False
 
 
 @pytest.mark.story("01-04")
-def test_epic01_e2e_suggest_returns_503_when_openrouter_key_missing(monkeypatch, tmp_path):
-    rag_repository.db_path = str(tmp_path / "rag.sqlite3")
-    incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
+def test_epic01_e2e_inbound_escalates_on_pipeline_failure(monkeypatch, tmp_path):
+    _wire(tmp_path)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
     monkeypatch.setattr(
-        openrouter_client,
-        "suggest",
-        AsyncMock(side_effect=RuntimeError("OPENROUTER_API_KEY is not configured")),
+        answer_pipeline, "run", AsyncMock(return_value=AnswerResult(handled=False))
     )
-
-    client = TestClient(api_app)
-    response = client.post("/suggest", json={"text": "Any question"})
-    assert response.status_code == 503
-    assert "OPENROUTER_API_KEY" in response.json()["detail"]
-
-
-@pytest.mark.story("01-04")
-def test_epic01_e2e_suggest_returns_502_on_provider_failure(monkeypatch, tmp_path):
-    rag_repository.db_path = str(tmp_path / "rag.sqlite3")
-    incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
-    monkeypatch.setattr(
-        openrouter_client,
-        "suggest",
-        AsyncMock(side_effect=Exception("provider timeout")),
+    api_client = TestClient(api_app)
+    response = api_client.post(
+        "/conversations/inbound", json={"text": "Любой вопрос", "chat_id": 1}
     )
-
-    client = TestClient(api_app)
-    response = client.post("/suggest", json={"text": "Any question"})
-    assert response.status_code == 502
-    assert "provider timeout" in response.json()["detail"]
+    assert response.status_code == 200
+    assert response.json()["escalated"] is True

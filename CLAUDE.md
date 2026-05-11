@@ -60,12 +60,12 @@ Each concern has its own DB file in `.data/`:
 
 ### Core API Flows (`services/api/`)
 
-- **`/suggest`** — Builds RAG context from `rag.py`, calls OpenRouter (`openrouter_client.py`), runs guardrails (`guardrails.py`), creates HITL ticket if blocked
+- **`/conversations/inbound`** — single entry point for every customer message. Builds an `AnswerContext`, runs an `AnswerPipeline` of answerers in order: `DateTimeAnswerer` → `HolidayAnswerer` (RU calendar by default via `holidays`) → `WeatherAnswerer` (Open-Meteo, with Cyrillic→Latin city map) → `GroundedRagAnswerer` (RAG retrieve → strict-grounding LLM with `ESCALATE_TO_HUMAN` sentinel → LLM verifier → regex guardrails → profanity check). If no answerer handles the question, it escalates to HITL: ack to customer + create+assign ticket + DM operator with the verbatim question. The LLM is never in the user-visible answer unless it passes all four grounding layers. Pipeline lives in `services/api/app/answerers/`.
 - **`/incidents/*`** — Dedup window (300 s default), status lifecycle, event timeline in `incidents.py`
-- **`/hitl/tickets/*`** — Route/assign/reply workflow in `hitl.py`; runtime config (operator mappings) also stored here
+- **`/hitl/tickets/*`** — Route/assign/reply workflow in `hitl.py`; reply auto-resolves the ticket. Runtime config (operator mapping, ack message, country/timezone/location, grounding threshold) stored in `hitl_runtime_config`.
 - **`/knowledge/extract`** — Pulls transcript lines → moderation candidates (`knowledge_moderation.py`)
 - **`/knowledge/candidates/*`** — Approve (triggers RAG reindex) or reject via `knowledge_moderation.py`
-- **`/rag/ingest`** + **`/rag/retrieve`** — Line-split ingest with dedup; token-overlap retrieval in `rag.py`
+- **`/rag/ingest`** + **`/rag/retrieve`** — Line-split ingest with dedup; lemma-overlap retrieval in `rag.py` (via `RussianNormalizer.lemmas`).
 
 ### Shared Foundation (`platform_common/`)
 
@@ -74,11 +74,18 @@ Each concern has its own DB file in `.data/`:
 
 ### Bot Gateway (`services/bot_gateway/`)
 
-Validates Telegram webhook payload, normalizes + persists messages to transcript DB, handles admin `/hitl_config @user chat_id` command to update runtime config via the api service.
+Validates Telegram webhook payload, normalizes + persists messages, then branches by sender:
+- **Customer message** → `ApiClient.forward_inbound` to api `/conversations/inbound`.
+- **Operator message** (sender matches `hitl_primary_operator_username`) → extract ticket id from `reply_to_message` text or fall back to "single open assigned ticket"; route via `ApiClient.deliver_operator_reply` to `/hitl/tickets/{id}/reply` (which auto-resolves).
+- **`/hitl_config @user chat_id`** admin command → upserts runtime config keys for operator routing.
+
+### Russian-first text handling (`services/api/app/russian_text/`)
+
+`RussianNormalizer` wraps razdel tokenization + a static slang dictionary (`data/russian_slang.json`) + `pymorphy3` lemmatization. Used by `rag.py` `_tokenize` (so retrieval matches across inflection and common slang), by `guardrails.py` (hedge / policy phrase lists in `data/russian_hedges.txt` and `data/russian_policy_phrases.txt` run against normalized text), and by `GroundedRagAnswerer` for output profanity filtering (`data/russian_profanity.txt`). Add new slang pairs to the JSON file — the seam covers retrieval, intent, and guardrails together.
 
 ### Guardrails (`services/api/app/guardrails.py`)
 
-Scores suggestions: 0.2 (blocked — empty, too long, low confidence, policy violation) or 0.95 (valid). Blocked suggestions route to HITL.
+Final regex check on LLM output inside `GroundedRagAnswerer`: 0.2 (blocked — empty, too long, hedging/uncertainty, policy violation) or 0.95 (valid). Lists are loaded from `data/russian_hedges.txt` and `data/russian_policy_phrases.txt` (Russian + English entries; tunable without code changes).
 
 ## Code Conventions
 

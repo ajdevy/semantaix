@@ -1,0 +1,17 @@
+# Russian mat root lemmas. Match is performed against lemmatized tokens
+# (via RussianNormalizer.lemmas), so this list contains canonical lemma forms
+# only - pymorphy3 normalizes inflected forms back to these.
+#
+# Source: well-documented Russian mat roots (linguistic literature).
+# Intent: filter LLM-generated bot output only (never user input).
+# License: linguistic facts, no copyright claim on individual lemmas.
+блядь
+блять
+хуй
+пизда
+ебать
+ебло
+ебаный
+мудак
+мудила
+пиздец

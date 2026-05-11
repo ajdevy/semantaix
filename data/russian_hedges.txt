@@ -1,0 +1,33 @@
+# Hedge / uncertainty phrases. Match is substring-against normalized text
+# (lowercased, slang-substituted). All entries should be in formal Russian
+# because slang forms get rewritten by the slang dictionary before this
+# list is consulted (e.g. "хз" -> "не знаю", "идк" -> "не знаю").
+не знаю
+не уверен
+не уверена
+затрудняюсь ответить
+сложно сказать
+хрен знает
+чёрт знает
+черт его знает
+бог знает
+кто знает
+возможно
+наверное
+вроде бы
+вроде как
+кажется
+мне кажется
+как-то так
+ну такое
+типа того
+что-то типа
+не в курсе
+без понятия
+понятия не имею
+сомневаюсь
+я не специалист
+как ии
+как языковая модель
+i don't know
+i am not sure

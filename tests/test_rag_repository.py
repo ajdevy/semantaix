@@ -29,3 +29,27 @@ def test_retrieve_scores_and_limits(tmp_path):
     assert len(items) == 1
     assert items[0].source_id in {"kb-1", "kb-2"}
     assert items[0].score > 0
+
+
+def test_retrieve_matches_russian_inflection_via_lemma(tmp_path):
+    repository = RagRepository(str(tmp_path / "rag.sqlite3"))
+    repository.ingest(
+        source_id="kb-ru",
+        text="Возврат денег занимает пять рабочих дней",
+    )
+    items = repository.retrieve(query="когда придут деньги", limit=1)
+    assert len(items) == 1
+    assert items[0].source_id == "kb-ru"
+    assert items[0].score > 0
+
+
+def test_retrieve_matches_russian_slang_via_normalization(tmp_path):
+    repository = RagRepository(str(tmp_path / "rag.sqlite3"))
+    repository.ingest(
+        source_id="kb-money",
+        text="Возврат денег занимает пять рабочих дней",
+    )
+    # "бабло" should be slang-substituted to "деньги", then lemma-matched.
+    items = repository.retrieve(query="когда придёт бабло", limit=1)
+    assert len(items) == 1
+    assert items[0].source_id == "kb-money"

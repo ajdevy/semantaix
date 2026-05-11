@@ -4,17 +4,17 @@ from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
+from services.api.app.answerers import AnswerResult
 from services.api.app.main import (
+    answer_pipeline,
     answer_trace_repository,
     incident_repository,
     knowledge_moderation_repository,
-    openrouter_client,
     rag_repository,
+    telegram_bot_sender,
     trace_correction_repository,
 )
-from services.api.app.main import (
-    app as api_app,
-)
+from services.api.app.main import app as api_app
 
 
 def _wire(tmp_path) -> None:
@@ -26,9 +26,23 @@ def _wire(tmp_path) -> None:
 
 
 def _seed_trace(client: TestClient, monkeypatch, trace_id: str) -> None:
-    monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="Use reset flow."))
+    monkeypatch.setattr(
+        telegram_bot_sender, "send_message", AsyncMock(return_value=1)
+    )
+    monkeypatch.setattr(
+        answer_pipeline,
+        "run",
+        AsyncMock(
+            return_value=AnswerResult(
+                handled=True,
+                text="Use reset flow.",
+                response_mode="grounded_rag",
+                metadata={"answerer": "grounded_rag", "guardrail_score": 0.95},
+            )
+        ),
+    )
     response = client.post(
-        "/suggest",
+        "/conversations/inbound",
         json={"text": "reset password help", "trace_id": trace_id},
     )
     assert response.status_code == 200

@@ -5,6 +5,8 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from services.api.app.russian_text import get_russian_normalizer
+
 
 def _connect(db_path: str) -> sqlite3.Connection:
     path = Path(db_path)
@@ -30,7 +32,7 @@ def init_schema(db_path: str) -> None:
 
 
 def _tokenize(text: str) -> set[str]:
-    return {token.strip(".,!?;:()[]{}\"'").lower() for token in text.split() if token.strip()}
+    return set(get_russian_normalizer().lemmas(text))
 
 
 def split_into_chunks(text: str) -> list[str]:
