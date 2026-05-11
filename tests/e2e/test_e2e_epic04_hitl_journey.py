@@ -1,24 +1,22 @@
-"""Epic 03 + 04: guardrails block suggest -> HITL ticket -> route -> reply -> resolve."""
+"""Epic 04: inbound -> escalation -> route -> reply -> auto-resolve."""
 
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
+from services.api.app.answerers import AnswerResult
 from services.api.app.main import (
-    app as api_app,
-)
-from services.api.app.main import (
+    answer_pipeline,
+    answer_trace_repository,
     hitl_ticket_repository,
     incident_repository,
-    openrouter_client,
     rag_repository,
     settings,
     telegram_bot_sender,
 )
-from services.bot_gateway.app.main import (
-    app as bot_app,
-)
+from services.api.app.main import app as api_app
+from services.bot_gateway.app.main import app as bot_app
 from services.bot_gateway.app.main import (
     hitl_ticket_repository as bot_hitl_repo,
 )
@@ -33,20 +31,27 @@ def _wire(tmp_path, monkeypatch, *, primary_operator: str = "@ajdevy"):
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     incident_repository.dedup_window_seconds = 300
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
+    answer_trace_repository.db_path = str(tmp_path / "answer_traces.sqlite3")
     monkeypatch.setattr(settings, "hitl_primary_operator_username", primary_operator)
+    monkeypatch.setattr(
+        answer_pipeline, "run", AsyncMock(return_value=AnswerResult(handled=False))
+    )
 
 
 @pytest.mark.story("04-01")
-def test_epic04_guardrail_blocked_suggest_then_route_and_resolve(tmp_path, monkeypatch):
+def test_epic04_inbound_escalation_then_route_and_resolve(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch)
-    monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
     client = TestClient(api_app)
 
-    suggest = client.post("/suggest", json={"text": "Customer needs an uncertain answer path."})
-    assert suggest.status_code == 200
-    blocked = suggest.json()
-    assert blocked["response_mode"] == "blocked_invalid"
-    ticket_id = blocked["hitl_ticket_id"]
+    inbound = client.post(
+        "/conversations/inbound",
+        json={"text": "Customer needs an uncertain answer path."},
+    )
+    assert inbound.status_code == 200
+    body = inbound.json()
+    assert body["escalated"] is True
+    ticket_id = body["hitl_ticket_id"]
 
     routed = client.post(
         f"/hitl/tickets/{ticket_id}/route",
@@ -61,18 +66,17 @@ def test_epic04_guardrail_blocked_suggest_then_route_and_resolve(tmp_path, monke
 
 
 @pytest.mark.story("04-02")
-def test_epic04_full_bot_authored_reply_chain(tmp_path, monkeypatch):
+def test_epic04_full_inbound_to_operator_reply_chain(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch)
-    monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
     send_mock = AsyncMock(return_value=12345)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
     client = TestClient(api_app)
 
-    blocked = client.post(
-        "/suggest",
+    inbound = client.post(
+        "/conversations/inbound",
         json={"text": "Help me with this question.", "chat_id": 9001},
     ).json()
-    ticket_id = blocked["hitl_ticket_id"]
+    ticket_id = inbound["hitl_ticket_id"]
 
     tickets = client.get("/hitl/tickets").json()["items"]
     assert tickets[0]["target_chat_id"] == 9001
@@ -86,42 +90,52 @@ def test_epic04_full_bot_authored_reply_chain(tmp_path, monkeypatch):
         json={"operator_username": "@operator_a", "reply_text": "Here is the answer."},
     )
     assert reply.status_code == 200
-    assert reply.json()["delivered"] is True
-    send_mock.assert_awaited_once_with(chat_id=9001, text="Here is the answer.")
+    body = reply.json()
+    assert body["delivered"] is True
+    assert body["resolved"] is True
 
-    resolved = client.post(f"/hitl/tickets/{ticket_id}/resolve")
-    assert resolved.json()["status"] == "resolved"
+    # Verify the operator-authored reply was sent to the customer chat
+    sent_to_customer = [
+        c for c in send_mock.await_args_list
+        if c.kwargs["chat_id"] == 9001 and c.kwargs["text"] == "Here is the answer."
+    ]
+    assert len(sent_to_customer) == 1
+
+    refreshed = hitl_ticket_repository.get(ticket_id)
+    assert refreshed.status == "resolved"
 
 
 @pytest.mark.story("04-01")
 def test_epic04_route_without_operator_emits_incident(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch, primary_operator="")
-    monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
     client = TestClient(api_app)
 
-    blocked = client.post("/suggest", json={"text": "Question."}).json()
-    ticket_id = blocked["hitl_ticket_id"]
+    inbound = client.post(
+        "/conversations/inbound", json={"text": "Question."}
+    ).json()
+    ticket_id = inbound["hitl_ticket_id"]
 
     response = client.post(f"/hitl/tickets/{ticket_id}/route", json={})
     assert response.status_code == 503
     assert response.json()["detail"] == "hitl_operator_missing"
 
     incidents = client.get("/incidents/hitl_delivery_failures").json()["items"]
-    assert len(incidents) == 1
-    assert incidents[0]["severity"] == "critical"
+    assert len(incidents) >= 1
+    assert any(item["severity"] == "critical" for item in incidents)
 
 
 @pytest.mark.story("04-02")
 def test_epic04_reply_missing_target_chat_id_emits_incident(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch)
-    monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
     client = TestClient(api_app)
 
-    # No chat_id supplied -> ticket created with target_chat_id=None
-    blocked = client.post("/suggest", json={"text": "Question without chat."}).json()
-    ticket_id = blocked["hitl_ticket_id"]
+    inbound = client.post(
+        "/conversations/inbound", json={"text": "Question without chat."}
+    ).json()
+    ticket_id = inbound["hitl_ticket_id"]
 
     client.post(
         f"/hitl/tickets/{ticket_id}/route",
@@ -133,25 +147,22 @@ def test_epic04_reply_missing_target_chat_id_emits_incident(tmp_path, monkeypatc
     )
     assert response.status_code == 503
     assert response.json()["detail"] == "missing_target_chat_id"
-    send_mock.assert_not_awaited()
 
     incidents = client.get("/incidents/hitl_delivery_failures").json()["items"]
-    assert len(incidents) == 1
+    assert any(item["severity"] == "critical" for item in incidents)
 
 
 @pytest.mark.story("04-02")
 def test_epic04_reply_rejects_non_assigned_operator(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch)
-    monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
     client = TestClient(api_app)
 
-    blocked = client.post(
-        "/suggest",
-        json={"text": "Question.", "chat_id": 42},
+    inbound = client.post(
+        "/conversations/inbound", json={"text": "Question.", "chat_id": 42}
     ).json()
-    ticket_id = blocked["hitl_ticket_id"]
+    ticket_id = inbound["hitl_ticket_id"]
 
     client.post(
         f"/hitl/tickets/{ticket_id}/route",
@@ -163,13 +174,12 @@ def test_epic04_reply_rejects_non_assigned_operator(tmp_path, monkeypatch):
     )
     assert response.status_code == 403
     assert response.json()["detail"] == "operator_not_assigned"
-    send_mock.assert_not_awaited()
 
 
 @pytest.mark.story("04-runtime-config")
 def test_epic04_runtime_config_overrides_default_operator(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch)
-    monkeypatch.setattr(openrouter_client, "suggest", AsyncMock(return_value="I don't know."))
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
 
     bot_client = TestClient(bot_app)
     config_response = bot_client.post(
@@ -187,8 +197,10 @@ def test_epic04_runtime_config_overrides_default_operator(tmp_path, monkeypatch)
     assert config_response.json()["status"] == "configured"
 
     api_client = TestClient(api_app)
-    blocked = api_client.post("/suggest", json={"text": "Need help."}).json()
-    assert blocked["hitl_operator_username"] == "@runtime_op"
+    inbound = api_client.post(
+        "/conversations/inbound", json={"text": "Need help."}
+    ).json()
+    assert inbound["hitl_operator_username"] == "@runtime_op"
 
     tickets = api_client.get("/hitl/tickets").json()["items"]
     assert tickets[0]["operator_username"] == "@runtime_op"

@@ -1,0 +1,8 @@
+# Policy violation phrases. Substring match against normalized text
+# (lowercased, slang-substituted).
+игнорируй предыдущие инструкции
+обойди правила
+номер кредитной карты
+ignore previous instructions
+bypass policy
+credit card number

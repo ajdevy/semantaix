@@ -20,11 +20,23 @@ class AppSettings(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "openai/gpt-4o-mini"
+    openrouter_grounding_model: str = "google/gemini-2.0-flash-lite-001"
     incident_db_path: str = ".data/semantaix_incidents.db"
     incident_dedup_window_seconds: int = 300
     telegram_alert_debounce_seconds: int = 300
     hitl_ticket_db_path: str = ".data/semantaix_hitl.db"
     hitl_primary_operator_username: str = "@ajdevy"
+    hitl_primary_operator_chat_id: str | None = None
+    inbound_ack_message: str = (
+        "Спасибо за сообщение. Уточняю детали у команды и скоро вернусь с ответом."
+    )
+    api_internal_base_url: str = "http://api:8000"
+    rag_grounding_score_threshold: float = 0.6
+    default_language: str = "ru"
+    default_country_code: str = "RU"
+    default_timezone: str = "Europe/Moscow"
+    default_location: str = "Moscow"
+    weather_provider_base_url: str = "https://api.open-meteo.com"
     rag_db_path: str = ".data/semantaix_rag.db"
     knowledge_db_path: str = ".data/semantaix_knowledge.db"
     hitl_config_admin_username: str = "@ajdevy"
