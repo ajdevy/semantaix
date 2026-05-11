@@ -207,3 +207,179 @@ def test_inbound_uses_runtime_configured_hitl_operator(tmp_path, monkeypatch):
     )
     assert response.status_code == 200
     assert response.json()["hitl_operator_username"] == "@flexsentlabs"
+
+
+def test_effective_hitl_operator_chat_id_prefers_runtime_config(tmp_path):
+    from services.api.app.main import _effective_hitl_operator_chat_id
+
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    settings.hitl_primary_operator_chat_id = "111"
+    hitl_ticket_repository.set_runtime_config(
+        key="hitl_primary_operator_chat_id",
+        value="222",
+        updated_by="@ajdevy",
+    )
+    assert _effective_hitl_operator_chat_id() == "222"
+
+
+def test_effective_hitl_operator_chat_id_falls_back_to_env(tmp_path):
+    from services.api.app.main import _effective_hitl_operator_chat_id
+
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    settings.hitl_primary_operator_chat_id = "333"
+    assert _effective_hitl_operator_chat_id() == "333"
+
+
+def test_effective_hitl_operator_chat_id_none_when_unset(tmp_path):
+    from services.api.app.main import _effective_hitl_operator_chat_id
+
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    settings.hitl_primary_operator_chat_id = None
+    assert _effective_hitl_operator_chat_id() is None
+
+
+@pytest.mark.asyncio
+async def test_notify_hitl_operator_summary_skips_when_no_chat_id(tmp_path, monkeypatch):
+    from services.api.app.main import _notify_hitl_operator_summary
+
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    settings.hitl_primary_operator_chat_id = None
+    mock_send = AsyncMock()
+    monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
+
+    sent = await _notify_hitl_operator_summary(ticket_id=1, summary="x")
+    assert sent is False
+    mock_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_notify_hitl_operator_summary_rejects_non_numeric_chat_id(
+    tmp_path, monkeypatch
+):
+    from services.api.app.main import _notify_hitl_operator_summary
+
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    settings.hitl_primary_operator_chat_id = "not-a-number"
+    mock_send = AsyncMock()
+    monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
+
+    sent = await _notify_hitl_operator_summary(ticket_id=1, summary="x")
+    assert sent is False
+    mock_send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_notify_hitl_operator_summary_returns_false_on_send_failure(
+    tmp_path, monkeypatch
+):
+    from services.api.app.main import _notify_hitl_operator_summary
+
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    settings.hitl_primary_operator_chat_id = "650934815"
+    monkeypatch.setattr(
+        telegram_bot_sender,
+        "send_message",
+        AsyncMock(side_effect=RuntimeError("missing_bot_token")),
+    )
+
+    sent = await _notify_hitl_operator_summary(ticket_id=1, summary="x")
+    assert sent is False
+
+
+@pytest.mark.asyncio
+async def test_notify_hitl_operator_summary_sends_and_returns_true(tmp_path, monkeypatch):
+    from services.api.app.main import _notify_hitl_operator_summary
+
+    hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    settings.hitl_primary_operator_chat_id = "650934815"
+    mock_send = AsyncMock(return_value=999)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
+
+    sent = await _notify_hitl_operator_summary(
+        ticket_id=42, summary="assigned to @ops"
+    )
+    assert sent is True
+    mock_send.assert_awaited_once_with(
+        chat_id=650934815,
+        text="HITL ticket #42: assigned to @ops",
+    )
+
+
+@pytest.mark.e2e
+@pytest.mark.epic("04")
+@pytest.mark.story("04-operator-dm")
+def test_inbound_escalation_dms_operator_when_chat_id_configured(tmp_path, monkeypatch):
+    _wire(tmp_path)
+    settings.hitl_primary_operator_username = "@flexsentlabs"
+    settings.hitl_primary_operator_chat_id = "650934815"
+    _force_escalation(monkeypatch)
+    mock_send = AsyncMock(return_value=1234)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
+    client = TestClient(api_app)
+
+    response = client.post(
+        "/conversations/inbound",
+        json={
+            "text": "Need escalation",
+            "chat_id": 9001,
+            "customer_username": "@cust",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["escalated"] is True
+    # The operator DM is sent in addition to the customer ack. Find the
+    # send_message call whose chat_id matches the configured operator chat.
+    operator_calls = [
+        c for c in mock_send.await_args_list if c.kwargs["chat_id"] == 650934815
+    ]
+    assert len(operator_calls) == 1
+    operator_text = operator_calls[0].kwargs["text"]
+    assert "HITL ticket #" in operator_text
+    assert "Need escalation" in operator_text
+    assert "@cust" in operator_text
+    settings.hitl_primary_operator_chat_id = None
+
+
+def test_inbound_escalation_skips_dm_when_chat_id_missing(tmp_path, monkeypatch):
+    _wire(tmp_path)
+    settings.hitl_primary_operator_chat_id = None
+    _force_escalation(monkeypatch)
+    mock_send = AsyncMock(return_value=1)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
+    client = TestClient(api_app)
+
+    response = client.post(
+        "/conversations/inbound",
+        json={"text": "Need escalation", "chat_id": 9001},
+    )
+    assert response.status_code == 200
+    # Only the customer ack was sent; no operator DM (chat_id unconfigured).
+    chat_ids = {c.kwargs["chat_id"] for c in mock_send.await_args_list}
+    assert chat_ids == {9001}
+
+
+@pytest.mark.e2e
+@pytest.mark.epic("04")
+@pytest.mark.story("04-operator-dm")
+def test_hitl_route_dms_operator_when_chat_id_configured(tmp_path, monkeypatch):
+    _wire(tmp_path)
+    settings.hitl_primary_operator_chat_id = "650934815"
+    mock_send = AsyncMock(return_value=4321)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", mock_send)
+    client = TestClient(api_app)
+    created = hitl_ticket_repository.create(conversation_ref="conv-route-dm", reason="policy")
+
+    response = client.post(
+        f"/hitl/tickets/{created.id}/route",
+        json={"operator_username": "@flexsentlabs"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["operator_username"] == "@flexsentlabs"
+    mock_send.assert_awaited_once_with(
+        chat_id=650934815,
+        text=f"HITL ticket #{created.id}: assigned to @flexsentlabs",
+    )
+    settings.hitl_primary_operator_chat_id = None

@@ -254,6 +254,25 @@ async def _safe_send_message(
         return False
 
 
+async def _notify_hitl_operator_summary(*, ticket_id: int, summary: str) -> bool:
+    """Short-form operator DM, used for status changes like route/assign."""
+    chat_id_raw = _effective_hitl_operator_chat_id()
+    if not chat_id_raw:
+        return False
+    try:
+        chat_id = int(chat_id_raw)
+    except ValueError:
+        return False
+    try:
+        await telegram_bot_sender.send_message(
+            chat_id=chat_id,
+            text=f"HITL ticket #{ticket_id}: {summary}",
+        )
+    except Exception:  # broad: best-effort notification
+        return False
+    return True
+
+
 async def _notify_hitl_operator_with_question(
     *,
     ticket_id: int,
@@ -615,7 +634,7 @@ def list_hitl_tickets() -> dict[str, object]:
 
 
 @app.post("/hitl/tickets/{ticket_id}/route")
-def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[str, object]:
+async def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[str, object]:
     operator = request.operator_username or _effective_hitl_operator_username()
     if not operator:
         incident = incident_repository.ingest(
@@ -631,6 +650,9 @@ def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[str, ob
         raise HTTPException(status_code=503, detail="hitl_operator_missing")
 
     ticket = hitl_ticket_repository.assign(ticket_id=ticket_id, operator_username=operator)
+    await _notify_hitl_operator_summary(
+        ticket_id=ticket.id, summary=f"assigned to {operator}"
+    )
     return {
         "id": ticket.id,
         "status": ticket.status,
