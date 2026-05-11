@@ -144,6 +144,33 @@ def _effective_hitl_operator_username() -> str:
     )
 
 
+def _effective_hitl_operator_chat_id() -> str | None:
+    return (
+        hitl_ticket_repository.get_runtime_config("hitl_primary_operator_chat_id")
+        or settings.hitl_primary_operator_chat_id
+    )
+
+
+async def _notify_hitl_operator(*, ticket_id: int, summary: str) -> bool:
+    chat_id_raw = _effective_hitl_operator_chat_id()
+    if not chat_id_raw:
+        return False
+    try:
+        chat_id = int(chat_id_raw)
+    except ValueError:
+        return False
+    try:
+        await telegram_bot_sender.send_message(
+            chat_id=chat_id,
+            text=f"HITL ticket #{ticket_id}: {summary}",
+        )
+    except RuntimeError:
+        return False
+    except Exception:  # pragma: no cover - provider failure path
+        return False
+    return True
+
+
 def _persist_answer_trace(
     *,
     trace_id: str,
@@ -230,6 +257,10 @@ async def suggest(request: SuggestRequest) -> dict[str, object]:
         hitl_ticket_repository.assign(
             ticket_id=ticket.id,
             operator_username=_effective_hitl_operator_username(),
+        )
+        await _notify_hitl_operator(
+            ticket_id=ticket.id,
+            summary=f"created — {','.join(decision.reasons) or 'blocked'}",
         )
         incident = incident_repository.ingest(
             fingerprint="guardrail_invalid_suggestion",
@@ -500,7 +531,7 @@ def list_hitl_tickets() -> dict[str, object]:
 
 
 @app.post("/hitl/tickets/{ticket_id}/route")
-def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[str, object]:
+async def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[str, object]:
     operator = request.operator_username or _effective_hitl_operator_username()
     if not operator:
         incident = incident_repository.ingest(
@@ -516,6 +547,7 @@ def route_hitl_ticket(ticket_id: int, request: HitlRouteRequest) -> dict[str, ob
         raise HTTPException(status_code=503, detail="hitl_operator_missing")
 
     ticket = hitl_ticket_repository.assign(ticket_id=ticket_id, operator_username=operator)
+    await _notify_hitl_operator(ticket_id=ticket.id, summary=f"assigned to {operator}")
     return {
         "id": ticket.id,
         "status": ticket.status,

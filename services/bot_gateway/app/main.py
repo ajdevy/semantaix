@@ -45,10 +45,16 @@ def _handle_admin_hitl_command(*, username: str | None, text: str) -> dict[str, 
         value=chat_id,
         updated_by=username,
     )
+    hitl_ticket_repository.set_runtime_config(
+        key="hitl_primary_operator_chat_id",
+        value=chat_id,
+        updated_by=username,
+    )
     return {
         "status": "configured",
         "hitl_primary_operator_username": operator_username,
         "telegram_alert_chat_id": chat_id,
+        "hitl_primary_operator_chat_id": chat_id,
     }
 
 
