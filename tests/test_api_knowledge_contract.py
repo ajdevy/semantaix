@@ -1,5 +1,3 @@
-import sqlite3
-
 from fastapi.testclient import TestClient
 
 from services.api.app.main import (
@@ -10,46 +8,13 @@ from services.api.app.main import (
     knowledge_candidate_repository,
     knowledge_moderation_repository,
 )
-
-
-def _seed_transcripts(path: str) -> None:
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation_id INTEGER NOT NULL,
-                source_message_id INTEGER NOT NULL UNIQUE,
-                role TEXT NOT NULL,
-                text TEXT NOT NULL,
-                trace_id TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO messages (
-                conversation_id, source_message_id, role, text, trace_id, created_at
-            )
-            VALUES
-                (1, 100, 'user', 'Hello', 't1', '2026-01-01T00:00:00Z'),
-                (
-                    1, 101, 'user', 'Reset password via settings and email token.',
-                    't2', '2026-01-01T00:00:01Z'
-                ),
-                (
-                    2, 200, 'user', 'Billing cycle is monthly with invoice on day one.',
-                    't3', '2026-01-01T00:00:02Z'
-                )
-            """
-        )
+from tests.e2e.db_seed import seed_transcript_messages
 
 
 def test_knowledge_extract_mixed_transcript(tmp_path):
     transcript_path = str(tmp_path / "transcripts.sqlite3")
     knowledge_path = str(tmp_path / "knowledge.sqlite3")
-    _seed_transcripts(transcript_path)
+    seed_transcript_messages(transcript_path)
 
     knowledge_candidate_repository.transcript_db_path = transcript_path
     knowledge_candidate_repository.db_path = knowledge_path
@@ -76,7 +41,7 @@ def test_knowledge_extract_mixed_transcript(tmp_path):
 def test_extract_idempotent_second_pass_does_not_enqueue(tmp_path):
     transcript_path = str(tmp_path / "transcripts.sqlite3")
     knowledge_path = str(tmp_path / "knowledge.sqlite3")
-    _seed_transcripts(transcript_path)
+    seed_transcript_messages(transcript_path)
 
     knowledge_candidate_repository.transcript_db_path = transcript_path
     knowledge_candidate_repository.db_path = knowledge_path
