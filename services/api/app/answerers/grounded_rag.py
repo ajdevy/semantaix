@@ -15,6 +15,10 @@ class _RagReader(Protocol):
     def retrieve(self, *, query: str, limit: int = 3) -> list[RagChunk]: ...
 
 
+class _PersonaReader(Protocol):
+    def __call__(self) -> tuple[str, str]: ...
+
+
 class GroundedRagAnswerer:
     name = "grounded_rag"
 
@@ -23,9 +27,11 @@ class GroundedRagAnswerer:
         *,
         rag_repository: _RagReader,
         openrouter_client: OpenRouterClient,
+        persona_reader: _PersonaReader,
     ) -> None:
         self._rag = rag_repository
         self._llm = openrouter_client
+        self._persona_reader = persona_reader
 
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
@@ -35,11 +41,14 @@ class GroundedRagAnswerer:
             return AnswerResult(handled=False)
 
         today_iso = ctx.now.date().isoformat()
+        first_name, last_name = self._persona_reader()
         try:
             answer = await self._llm.answer_grounded(
                 question=question,
                 snippets=chunks,
                 today_iso=today_iso,
+                persona_first_name=first_name,
+                persona_last_name=last_name,
             )
         except Exception:
             return AnswerResult(handled=False)

@@ -61,7 +61,11 @@ async def test_strong_retrieval_grounded_verifier_delivers_answer():
     llm = _fake_llm(
         answer="Возврат занимает пять рабочих дней."
     )
-    answerer = GroundedRagAnswerer(rag_repository=rag, openrouter_client=llm)
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+    )
     result = await answerer.try_answer(
         question="когда придёт мой возврат?", ctx=_ctx()
     )
@@ -70,13 +74,20 @@ async def test_strong_retrieval_grounded_verifier_delivers_answer():
     assert "пять рабочих дней" in result.text
     assert result.metadata["verifier"] == "matches snippet"
     assert result.metadata["retrieval"][0]["source_id"] == "kb-1"
+    # Persona name must reach the LLM call so it speaks in-character.
+    assert llm.answer_grounded.await_args.kwargs["persona_first_name"] == "Анна"
+    assert llm.answer_grounded.await_args.kwargs["persona_last_name"] == "Иванова"
 
 
 @pytest.mark.asyncio
 async def test_weak_retrieval_falls_through():
     rag = _FakeRag(_chunks(score=0.2))
     llm = _fake_llm()
-    answerer = GroundedRagAnswerer(rag_repository=rag, openrouter_client=llm)
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+    )
     result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
     llm.answer_grounded.assert_not_awaited()
@@ -86,7 +97,11 @@ async def test_weak_retrieval_falls_through():
 async def test_empty_retrieval_falls_through():
     rag = _FakeRag([])
     llm = _fake_llm()
-    answerer = GroundedRagAnswerer(rag_repository=rag, openrouter_client=llm)
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+    )
     result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
     llm.answer_grounded.assert_not_awaited()
@@ -96,7 +111,11 @@ async def test_empty_retrieval_falls_through():
 async def test_sentinel_response_escalates():
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm(answer="ESCALATE_TO_HUMAN")
-    answerer = GroundedRagAnswerer(rag_repository=rag, openrouter_client=llm)
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+    )
     result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
     llm.verify_grounding.assert_not_awaited()
@@ -106,7 +125,11 @@ async def test_sentinel_response_escalates():
 async def test_verifier_not_grounded_escalates():
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm(verdict_label="NOT_GROUNDED", verdict_reason="hallucination")
-    answerer = GroundedRagAnswerer(rag_repository=rag, openrouter_client=llm)
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+    )
     result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
 
@@ -116,7 +139,11 @@ async def test_guardrail_hedge_escalates_even_when_verifier_grounded():
     rag = _FakeRag(_chunks(score=0.9))
     # Hedging phrase will trigger evaluate_suggestion -> low_confidence.
     llm = _fake_llm(answer="Я не знаю точного ответа.")
-    answerer = GroundedRagAnswerer(rag_repository=rag, openrouter_client=llm)
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+    )
     result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
 
@@ -125,7 +152,11 @@ async def test_guardrail_hedge_escalates_even_when_verifier_grounded():
 async def test_profane_llm_output_escalates():
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm(answer="Полный пиздец, ничего не работает у нас.")
-    answerer = GroundedRagAnswerer(rag_repository=rag, openrouter_client=llm)
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+    )
     result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
 
@@ -135,7 +166,11 @@ async def test_llm_generator_exception_falls_through():
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm()
     llm.answer_grounded = AsyncMock(side_effect=RuntimeError("boom"))
-    answerer = GroundedRagAnswerer(rag_repository=rag, openrouter_client=llm)
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+    )
     result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
 
@@ -145,6 +180,10 @@ async def test_llm_verifier_exception_falls_through():
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm()
     llm.verify_grounding = AsyncMock(side_effect=RuntimeError("verify failed"))
-    answerer = GroundedRagAnswerer(rag_repository=rag, openrouter_client=llm)
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+    )
     result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False

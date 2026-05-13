@@ -135,7 +135,8 @@ def test_inbound_escalation_sends_ack_to_customer(tmp_path, monkeypatch):
     chat_ids_sent_to = [call.kwargs["chat_id"] for call in send_mock.await_args_list]
     assert 9001 in chat_ids_sent_to
     ack_call = next(c for c in send_mock.await_args_list if c.kwargs["chat_id"] == 9001)
-    assert "уточняю" in ack_call.kwargs["text"].lower()
+    assert "уточню" in ack_call.kwargs["text"].lower()
+    assert "бот" not in ack_call.kwargs["text"].lower()
 
 
 def test_inbound_escalation_notifies_operator_with_question(tmp_path, monkeypatch):
