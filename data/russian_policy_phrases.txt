@@ -6,3 +6,19 @@
 ignore previous instructions
 bypass policy
 credit card number
+# Bot self-identification (must never be revealed to customers).
+я бот
+я — бот
+я ассистент
+я — ассистент
+я ии
+я искусственный интеллект
+я нейросеть
+я языковая модель
+как ассистент
+как бот
+i am a bot
+i'm a bot
+as an ai
+as an assistant
+language model

@@ -59,3 +59,47 @@ def test_hitl_schema_migration_adds_target_chat_id(tmp_path):
     repository = HitlTicketRepository(str(db_path))
     created = repository.create(conversation_ref="conv-legacy", reason="migration")
     assert created.target_chat_id is None
+
+
+def test_runtime_config_round_trip(tmp_path):
+    repository = HitlTicketRepository(str(tmp_path / "hitl.sqlite3"))
+    repository.set_runtime_config(key="foo", value="bar", updated_by="@ajdevy")
+    assert repository.get_runtime_config("foo") == "bar"
+    # Overwrite preserves the latest value.
+    repository.set_runtime_config(key="foo", value="baz", updated_by="@admin")
+    assert repository.get_runtime_config("foo") == "baz"
+    assert repository.get_runtime_config("missing") is None
+
+
+def test_get_bot_persona_falls_back_to_defaults(tmp_path):
+    repository = HitlTicketRepository(str(tmp_path / "hitl.sqlite3"))
+    persona = repository.get_bot_persona(
+        default_first_name="Анна", default_last_name="Иванова"
+    )
+    assert persona == ("Анна", "Иванова")
+
+
+def test_get_bot_persona_returns_runtime_override(tmp_path):
+    repository = HitlTicketRepository(str(tmp_path / "hitl.sqlite3"))
+    repository.set_runtime_config(
+        key="bot_persona_first_name", value="Мария", updated_by="@ajdevy"
+    )
+    repository.set_runtime_config(
+        key="bot_persona_last_name", value="Петрова", updated_by="@ajdevy"
+    )
+    persona = repository.get_bot_persona(
+        default_first_name="Анна", default_last_name="Иванова"
+    )
+    assert persona == ("Мария", "Петрова")
+
+
+def test_get_bot_persona_partial_override(tmp_path):
+    """Only first name overridden → last name falls back to default."""
+    repository = HitlTicketRepository(str(tmp_path / "hitl.sqlite3"))
+    repository.set_runtime_config(
+        key="bot_persona_first_name", value="Иван", updated_by="@ajdevy"
+    )
+    persona = repository.get_bot_persona(
+        default_first_name="Анна", default_last_name="Иванова"
+    )
+    assert persona == ("Иван", "Иванова")

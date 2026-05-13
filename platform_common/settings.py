@@ -28,8 +28,15 @@ class AppSettings(BaseSettings):
     hitl_primary_operator_username: str = "@ajdevy"
     hitl_primary_operator_chat_id: str | None = None
     inbound_ack_message: str = (
-        "Спасибо за сообщение. Уточняю детали у команды и скоро вернусь с ответом."
+        "Минутку, уточню и вернусь с ответом."
     )
+    bot_persona_first_name: str = "Анна"
+    bot_persona_last_name: str = "Иванова"
+    bot_telegram_description: str = (
+        "Здравствуйте! Напишите свой вопрос — постараюсь ответить здесь сразу. "
+        "Если потребуется помощь коллег, передам им и вернусь к вам с ответом."
+    )
+    bot_telegram_short_description: str = "На связи в чате. Пишите ваш вопрос."
     api_internal_base_url: str = "http://api:8000"
     rag_grounding_score_threshold: float = 0.6
     default_language: str = "ru"

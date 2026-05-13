@@ -30,6 +30,26 @@ class ApiClient:
         payload = {"operator_username": operator_username, "reply_text": reply_text}
         return await self._post(f"/hitl/tickets/{ticket_id}/reply", payload)
 
+    async def set_persona(
+        self,
+        *,
+        first_name: str,
+        last_name: str,
+        updated_by: str,
+        description: str | None = None,
+        short_description: str | None = None,
+    ) -> dict:
+        payload: dict[str, str] = {
+            "first_name": first_name,
+            "last_name": last_name,
+            "updated_by": updated_by,
+        }
+        if description is not None:
+            payload["description"] = description
+        if short_description is not None:
+            payload["short_description"] = short_description
+        return await self._post("/hitl/runtime-config/persona", payload)
+
     async def _post(self, path: str, json: dict) -> dict:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.post(f"{self._base_url}{path}", json=json)

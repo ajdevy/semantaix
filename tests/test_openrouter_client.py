@@ -39,7 +39,11 @@ async def test_answer_grounded_requires_api_key():
     client.api_key = None
     with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
         await client.answer_grounded(
-            question="hi", snippets=[_snippet()], today_iso="2026-05-11"
+            question="hi",
+            snippets=[_snippet()],
+            today_iso="2026-05-11",
+            persona_first_name="Анна",
+            persona_last_name="Иванова",
         )
 
 
@@ -55,14 +59,20 @@ async def test_answer_grounded_uses_grounding_model_and_sends_context(monkeypatc
         question="Когда мой возврат?",
         snippets=[_snippet()],
         today_iso="2026-05-11",
+        persona_first_name="Анна",
+        persona_last_name="Иванова",
     )
 
     assert result == "Final answer."
     sent = http_client.post.call_args.kwargs["json"]
     assert sent["model"] == "google/gemini-2.0-flash-lite-001"
     assert sent["messages"][0]["role"] == "system"
-    assert "ESCALATE_TO_HUMAN" in sent["messages"][0]["content"]
-    assert "2026-05-11" in sent["messages"][0]["content"]
+    system_prompt = sent["messages"][0]["content"]
+    assert "ESCALATE_TO_HUMAN" in system_prompt
+    assert "2026-05-11" in system_prompt
+    assert "Анна Иванова" in system_prompt
+    # Persona must NOT identify the agent as a bot/assistant/AI.
+    assert "Ты — ассистент" not in system_prompt
     assert "Когда мой возврат?" in sent["messages"][1]["content"]
 
 
@@ -77,9 +87,29 @@ async def test_answer_grounded_respects_model_override(monkeypatch):
         question="q",
         snippets=[_snippet()],
         today_iso="2026-05-11",
+        persona_first_name="Мария",
+        persona_last_name="Петрова",
         model="override-model",
     )
     assert http_client.post.call_args.kwargs["json"]["model"] == "override-model"
+
+
+@pytest.mark.asyncio
+async def test_answer_grounded_injects_persona_name_into_system_prompt(monkeypatch):
+    http_client = _http_mock(monkeypatch, content="ok")
+    client = OpenRouterClient()
+    client.api_key = "token"
+    await client.answer_grounded(
+        question="q",
+        snippets=[_snippet()],
+        today_iso="2026-05-11",
+        persona_first_name="Иван",
+        persona_last_name="Сидоров",
+    )
+    system_prompt = http_client.post.call_args.kwargs["json"]["messages"][0]["content"]
+    assert "Иван Сидоров" in system_prompt
+    # The prompt must instruct the LLM not to self-identify as a bot.
+    assert "не пиши, что ты бот" in system_prompt.lower()
 
 
 @pytest.mark.asyncio

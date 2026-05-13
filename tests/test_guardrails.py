@@ -51,3 +51,24 @@ def test_guardrails_accept_valid_russian_answer():
     decision = evaluate_suggestion("Возврат денег занимает пять рабочих дней.")
     assert decision.valid is True
     assert decision.reasons == []
+
+
+def test_guardrails_block_bot_self_identification_russian():
+    decision = evaluate_suggestion("Я бот поддержки, отвечаю автоматически.")
+    assert decision.valid is False
+    assert "policy_violation" in decision.reasons
+    assert decision.score == 0.2
+
+
+def test_guardrails_block_assistant_self_identification_russian():
+    decision = evaluate_suggestion("Как ассистент я не могу выполнить вашу просьбу.")
+    assert decision.valid is False
+    assert "policy_violation" in decision.reasons
+
+
+def test_guardrails_block_ai_self_identification_english():
+    decision = evaluate_suggestion(
+        "As an AI language model, I cannot help with that request."
+    )
+    assert decision.valid is False
+    assert "policy_violation" in decision.reasons

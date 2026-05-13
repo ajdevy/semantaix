@@ -35,6 +35,11 @@ def test_settings_defaults(monkeypatch):
         ".data/semantaix_rag.db",
         ".data/semantaix_knowledge.db",
     ]
+    assert settings.bot_persona_first_name == "Анна"
+    assert settings.bot_persona_last_name == "Иванова"
+    assert "бот" not in settings.bot_telegram_description.lower()
+    assert "бот" not in settings.bot_telegram_short_description.lower()
+    assert settings.inbound_ack_message == "Минутку, уточню и вернусь с ответом."
 
 
 def test_settings_env_override(monkeypatch):
@@ -62,6 +67,10 @@ def test_settings_env_override(monkeypatch):
     monkeypatch.setenv("BACKUP_DB_PATH", ".tmp/backups.sqlite3")
     monkeypatch.setenv("BACKUP_ARCHIVE_DIR", ".tmp/backups")
     monkeypatch.setenv("BACKUP_SOURCE_PATHS", " .tmp/a.db , .tmp/b.db , ")
+    monkeypatch.setenv("BOT_PERSONA_FIRST_NAME", "Мария")
+    monkeypatch.setenv("BOT_PERSONA_LAST_NAME", "Петрова")
+    monkeypatch.setenv("BOT_TELEGRAM_DESCRIPTION", "Здравствуйте, я на связи.")
+    monkeypatch.setenv("BOT_TELEGRAM_SHORT_DESCRIPTION", "Пишите вопрос.")
     settings = AppSettings(_env_file=None)
     assert settings.app_env == "test"
     assert settings.log_level == "DEBUG"
@@ -87,3 +96,7 @@ def test_settings_env_override(monkeypatch):
     assert settings.backup_db_path == ".tmp/backups.sqlite3"
     assert settings.backup_archive_dir == ".tmp/backups"
     assert settings.backup_source_path_list() == [".tmp/a.db", ".tmp/b.db"]
+    assert settings.bot_persona_first_name == "Мария"
+    assert settings.bot_persona_last_name == "Петрова"
+    assert settings.bot_telegram_description == "Здравствуйте, я на связи."
+    assert settings.bot_telegram_short_description == "Пишите вопрос."
