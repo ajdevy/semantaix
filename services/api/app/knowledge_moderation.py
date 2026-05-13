@@ -23,6 +23,16 @@ def _moderation_column_names(connection: sqlite3.Connection) -> set[str]:
     return {str(r["name"]) for r in rows}
 
 
+_OPERATOR_UPLOAD_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("uploaded_by_operator_username", "TEXT"),
+    ("is_confidential", "INTEGER NOT NULL DEFAULT 0"),
+    ("source_file_name", "TEXT"),
+    ("source_file_type", "TEXT"),
+    ("stored_binary_path", "TEXT"),
+    ("binary_sha256", "TEXT"),
+)
+
+
 def init_schema(db_path: str) -> None:
     with _connect(db_path) as connection:
         connection.execute(
@@ -50,6 +60,16 @@ def init_schema(db_path: str) -> None:
                     "ALTER TABLE knowledge_moderation_candidates "
                     "ADD COLUMN source_extraction_candidate_id INTEGER"
                 )
+            for column_name, column_decl in _OPERATOR_UPLOAD_COLUMNS:
+                if column_name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE knowledge_moderation_candidates "
+                        f"ADD COLUMN {column_name} {column_decl}"
+                    )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_kmc_binary_sha256 "
+                "ON knowledge_moderation_candidates(binary_sha256)"
+            )
 
 
 @dataclass(frozen=True)
@@ -61,6 +81,19 @@ class KnowledgeCandidateRow:
     created_at: str
     updated_at: str
     source_extraction_candidate_id: int | None
+    uploaded_by_operator_username: str | None = None
+    is_confidential: bool = False
+    source_file_name: str | None = None
+    source_file_type: str | None = None
+    stored_binary_path: str | None = None
+    binary_sha256: str | None = None
+
+
+_SELECT_COLUMNS = (
+    "id, candidate_text, published_text, status, created_at, updated_at, "
+    "source_extraction_candidate_id, uploaded_by_operator_username, is_confidential, "
+    "source_file_name, source_file_type, stored_binary_path, binary_sha256"
+)
 
 
 class KnowledgeModerationRepository:
@@ -94,23 +127,87 @@ class KnowledgeModerationRepository:
             row_id = int(cursor.lastrowid)
         return self.get(row_id)
 
+    def create_approved_operator_upload(
+        self,
+        *,
+        candidate_text: str,
+        published_text: str,
+        operator_username: str,
+        is_confidential: bool,
+        source_file_name: str | None,
+        source_file_type: str,
+        stored_binary_path: str | None,
+        binary_sha256: str | None,
+    ) -> KnowledgeCandidateRow:
+        init_schema(self.db_path)
+        now = _now()
+        with _connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO knowledge_moderation_candidates (
+                    candidate_text,
+                    published_text,
+                    status,
+                    created_at,
+                    updated_at,
+                    source_extraction_candidate_id,
+                    uploaded_by_operator_username,
+                    is_confidential,
+                    source_file_name,
+                    source_file_type,
+                    stored_binary_path,
+                    binary_sha256
+                )
+                VALUES (?, ?, 'approved', ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate_text,
+                    published_text,
+                    now,
+                    now,
+                    operator_username,
+                    1 if is_confidential else 0,
+                    source_file_name,
+                    source_file_type,
+                    stored_binary_path,
+                    binary_sha256,
+                ),
+            )
+            row_id = int(cursor.lastrowid)
+        return self.get(row_id)
+
+    def find_by_binary_sha256(self, sha256: str) -> KnowledgeCandidateRow | None:
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            row = connection.execute(
+                f"""
+                SELECT {_SELECT_COLUMNS}
+                FROM knowledge_moderation_candidates
+                WHERE binary_sha256 = ?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (sha256,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_candidate(row)
+
     def list_by_status(self, status: str | None) -> list[KnowledgeCandidateRow]:
         init_schema(self.db_path)
         with _connect(self.db_path) as connection:
             if status is None:
                 rows = connection.execute(
-                    """
-                    SELECT id, candidate_text, published_text, status, created_at, updated_at,
-                           source_extraction_candidate_id
+                    f"""
+                    SELECT {_SELECT_COLUMNS}
                     FROM knowledge_moderation_candidates
                     ORDER BY id ASC
                     """
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    """
-                    SELECT id, candidate_text, published_text, status, created_at, updated_at,
-                           source_extraction_candidate_id
+                    f"""
+                    SELECT {_SELECT_COLUMNS}
                     FROM knowledge_moderation_candidates
                     WHERE status = ?
                     ORDER BY id ASC
@@ -123,9 +220,8 @@ class KnowledgeModerationRepository:
         init_schema(self.db_path)
         with _connect(self.db_path) as connection:
             row = connection.execute(
-                """
-                SELECT id, candidate_text, published_text, status, created_at, updated_at,
-                       source_extraction_candidate_id
+                f"""
+                SELECT {_SELECT_COLUMNS}
                 FROM knowledge_moderation_candidates
                 WHERE id = ?
                 """,
@@ -200,6 +296,7 @@ class KnowledgeModerationRepository:
     @staticmethod
     def _row_to_candidate(row: sqlite3.Row) -> KnowledgeCandidateRow:
         extraction_id = row["source_extraction_candidate_id"]
+        is_conf_raw = row["is_confidential"]
         return KnowledgeCandidateRow(
             id=int(row["id"]),
             candidate_text=str(row["candidate_text"]),
@@ -210,4 +307,16 @@ class KnowledgeModerationRepository:
             source_extraction_candidate_id=int(extraction_id)
             if extraction_id is not None
             else None,
+            uploaded_by_operator_username=(
+                str(row["uploaded_by_operator_username"])
+                if row["uploaded_by_operator_username"]
+                else None
+            ),
+            is_confidential=bool(is_conf_raw) if is_conf_raw is not None else False,
+            source_file_name=str(row["source_file_name"]) if row["source_file_name"] else None,
+            source_file_type=str(row["source_file_type"]) if row["source_file_type"] else None,
+            stored_binary_path=(
+                str(row["stored_binary_path"]) if row["stored_binary_path"] else None
+            ),
+            binary_sha256=str(row["binary_sha256"]) if row["binary_sha256"] else None,
         )

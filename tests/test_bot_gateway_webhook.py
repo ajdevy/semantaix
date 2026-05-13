@@ -81,7 +81,9 @@ def test_webhook_ignores_non_text_message():
         json=load_fixture("update_non_text_message_photo.json"),
     )
     assert response.status_code == 200
-    assert response.json()["status"] == "ignored"
+    body = response.json()
+    assert body["status"] == "ignored"
+    assert body["reason"] == "attachment_only"
 
 
 def test_duplicate_update_fixture_is_idempotent_at_gateway_level():

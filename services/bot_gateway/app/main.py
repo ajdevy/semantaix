@@ -2,15 +2,23 @@ import logging
 import re
 import uuid
 
-from fastapi import HTTPException, Request
+import httpx
+from fastapi import BackgroundTasks, HTTPException, Request
 
 from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
 from services.api.app.hitl import HitlTicketRepository
+from services.api.app.russian_text import get_russian_normalizer
 from services.bot_gateway.app.api_client import ApiClient
+from services.bot_gateway.app.kb_intent import KbIntent, detect_kb_intent
 from services.bot_gateway.app.persistence import persist_normalized_message
+from services.bot_gateway.app.telegram_file_download import (
+    TelegramFileDownloader,
+    TelegramFileDownloadError,
+)
 from services.bot_gateway.app.telegram_update import (
     NormalizedTelegramMessage,
+    TelegramAttachment,
     TelegramUpdateValidationError,
     normalize_update,
 )
@@ -100,6 +108,198 @@ def _fallback_open_ticket_for_operator(operator_username: str) -> int | None:
     return None
 
 
+_KB_ATTACHMENT_TYPE_MAP: dict[str, str] = {
+    "document": "_from_mime_or_name",
+    "photo": "image",
+    "audio": "audio",
+    "voice": "audio",
+    "video": "video",
+}
+
+
+def _kb_source_file_type(attachment: TelegramAttachment) -> str | None:
+    """Map a Telegram attachment to a `source_file_type` accepted by the API."""
+    explicit = _KB_ATTACHMENT_TYPE_MAP.get(attachment.kind)
+    if explicit and explicit != "_from_mime_or_name":
+        return explicit
+    name = (attachment.file_name or "").lower()
+    if name.endswith(".pdf"):
+        return "pdf"
+    if name.endswith(".docx"):
+        return "docx"
+    if name.endswith(".pptx"):
+        return "pptx"
+    if name.endswith(".txt"):
+        return "txt"
+    mime = (attachment.mime_type or "").lower()
+    if mime == "application/pdf":
+        return "pdf"
+    if mime in {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    }:
+        return "docx"
+    if mime in {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.ms-powerpoint",
+    }:
+        return "pptx"
+    if mime.startswith("text/"):
+        return "txt"
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("audio/"):
+        return "audio"
+    if mime.startswith("video/"):
+        return "video"
+    return None
+
+
+def _kb_extension_for(attachment: TelegramAttachment, source_file_type: str) -> str:
+    if attachment.file_name and "." in attachment.file_name:
+        return attachment.file_name.rsplit(".", 1)[-1]
+    fallback = {
+        "pdf": "pdf",
+        "docx": "docx",
+        "pptx": "pptx",
+        "txt": "txt",
+        "image": "jpg",
+        "audio": "ogg",
+        "video": "mp4",
+    }
+    return fallback.get(source_file_type, "bin")
+
+
+async def _send_dm(chat_id: int, text: str) -> None:
+    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            await client.post(url, json={"chat_id": chat_id, "text": text})
+        except Exception as exc:  # best-effort DM; do not block on Telegram errors
+            logger.warning("operator_dm_failed", extra={"chat_id": chat_id, "error": str(exc)})
+
+
+def _kb_attachment_count_word(count: int) -> str:
+    if count == 1:
+        return "файл"
+    if 2 <= count <= 4:
+        return "файла"
+    return "файлов"
+
+
+async def _process_operator_upload(
+    *,
+    normalized: NormalizedTelegramMessage,
+    intent: KbIntent,
+) -> None:
+    downloader = TelegramFileDownloader(
+        bot_token=settings.telegram_bot_token,
+        storage_dir=settings.operator_upload_storage_dir,
+        max_bytes=settings.operator_upload_max_bytes,
+    )
+    successes: list[dict] = []
+    failures: list[tuple[str, str]] = []
+
+    if not normalized.attachments:
+        inline_body = (intent.cleaned_text or "").strip()
+        try:
+            result = await api_client.submit_operator_upload(
+                operator_username=normalized.username or "",
+                source_file_type="inline_text",
+                source_file_name=None,
+                stored_binary_path=None,
+                is_confidential=intent.confidential,
+                inline_text=inline_body,
+                timeout_seconds=settings.operator_upload_api_timeout_seconds,
+            )
+            successes.append(result)
+        except Exception as exc:
+            failures.append(("inline_text", str(exc)))
+    else:
+        for attachment in normalized.attachments:
+            label = attachment.file_name or attachment.file_id
+            source_file_type = _kb_source_file_type(attachment)
+            if source_file_type is None:
+                failures.append((label, "unsupported_attachment_type"))
+                continue
+            extension = _kb_extension_for(attachment, source_file_type)
+            try:
+                downloaded = await downloader.download(
+                    file_id=attachment.file_id,
+                    suggested_extension=extension,
+                    mime_type=attachment.mime_type,
+                )
+            except TelegramFileDownloadError as exc:
+                failures.append((label, exc.reason))
+                continue
+            except Exception as exc:
+                failures.append((label, f"download_failed:{exc}"))
+                continue
+            try:
+                result = await api_client.submit_operator_upload(
+                    operator_username=normalized.username or "",
+                    source_file_type=source_file_type,
+                    source_file_name=attachment.file_name,
+                    stored_binary_path=str(downloaded.path),
+                    is_confidential=intent.confidential,
+                    timeout_seconds=settings.operator_upload_api_timeout_seconds,
+                )
+                successes.append(result)
+            except Exception as exc:
+                failures.append((label, f"api_failed:{exc}"))
+
+    total_chunks = sum(int(item.get("inserted_chunks", 0) or 0) for item in successes)
+    confidential_count = sum(
+        1 for item in successes if item.get("is_confidential")
+    )
+    deduped = sum(1 for item in successes if item.get("deduplicated"))
+    summary_lines = [
+        f"✅ Добавлено в базу: {len(successes)} {_kb_attachment_count_word(len(successes))}, "
+        f"{total_chunks} чанков, {confidential_count} помечен(о) confidential."
+    ]
+    if deduped:
+        summary_lines.append(f"♻️ Из них уже было в базе: {deduped}.")
+    for name, reason in failures:
+        summary_lines.append(f"⚠️ Не удалось обработать {name}: {reason}")
+    await _send_dm(normalized.chat_id, "\n".join(summary_lines))
+
+
+async def _handle_kb_command(
+    normalized: NormalizedTelegramMessage,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str] | None:
+    operator_username = _effective_operator_username()
+    if not normalized.username or normalized.username != operator_username:
+        return None
+    intent = detect_kb_intent(
+        text=normalized.text,
+        caption=normalized.caption,
+        normalizer=get_russian_normalizer(),
+    )
+    if intent is None:
+        return None
+
+    n_attachments = len(normalized.attachments)
+    inline_body = (intent.cleaned_text or "").strip()
+    if n_attachments == 0 and not inline_body:
+        return {"status": "ignored", "reason": "no_attachments_no_inline_text"}
+
+    if n_attachments == 0:
+        ack = "Принял текст, добавляю в базу…"
+    else:
+        ack = (
+            f"Принял {n_attachments} {_kb_attachment_count_word(n_attachments)}, обрабатываю…"
+        )
+    await _send_dm(normalized.chat_id, ack)
+
+    background_tasks.add_task(_process_operator_upload, normalized=normalized, intent=intent)
+    return {
+        "status": "accepted",
+        "kb_mode": intent.mode,
+        "attachment_count": str(n_attachments),
+    }
+
+
 async def _handle_operator_reply(normalized: NormalizedTelegramMessage) -> dict[str, str]:
     ticket_id = _extract_ticket_id(normalized.reply_to_text)
     if ticket_id is None:
@@ -125,7 +325,10 @@ async def _handle_operator_reply(normalized: NormalizedTelegramMessage) -> dict[
 
 
 @app.post("/telegram/webhook")
-async def telegram_webhook(request: Request) -> dict[str, str]:
+async def telegram_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
     try:
         payload = await request.json()
     except Exception as exc:  # pragma: no cover - defensive guard
@@ -150,6 +353,19 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
             extra={"trace_id": trace_id, "update_id": payload.get("update_id")},
         )
         return {"status": "ignored", "trace_id": trace_id}
+
+    kb_result = await _handle_kb_command(normalized, background_tasks)
+    if kb_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(kb_result)
+        return response
+
+    if normalized.text == "":
+        logger.info(
+            "telegram_attachment_only_message_ignored",
+            extra={"trace_id": trace_id, "update_id": normalized.update_id},
+        )
+        return {"status": "ignored", "reason": "attachment_only", "trace_id": trace_id}
 
     admin_command_result = _handle_admin_hitl_command(
         username=normalized.username,

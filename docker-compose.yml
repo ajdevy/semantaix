@@ -4,6 +4,9 @@ services:
       context: .
       dockerfile: services/api/Dockerfile
     env_file: .env
+    volumes:
+      - operator_uploads:/app/.data/operator_uploads
+      - whisper_cache:/app/.cache/whisper
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')"]
       interval: 15s
@@ -26,6 +29,8 @@ services:
       context: .
       dockerfile: services/bot_gateway/Dockerfile
     env_file: .env
+    volumes:
+      - operator_uploads:/app/.data/operator_uploads
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health/live')"]
       interval: 15s
@@ -101,3 +106,5 @@ services:
 volumes:
   qdrant_data:
   postgres_data:
+  operator_uploads:
+  whisper_cache:
