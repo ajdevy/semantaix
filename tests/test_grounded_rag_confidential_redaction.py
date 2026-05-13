@@ -48,7 +48,11 @@ async def test_confidential_chunk_redacts_metadata_but_grounds_normally():
         return_value=GroundingVerdict(label="GROUNDED", reason="matches confidential snippet")
     )
 
-    answerer = GroundedRagAnswerer(rag_repository=rag, openrouter_client=llm)
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+    )
     result = await answerer.try_answer(question="сколько стоит ремонт?", ctx=_ctx())
 
     assert result.handled is True
@@ -80,7 +84,11 @@ async def test_non_confidential_chunk_passes_through_in_metadata():
     llm.verify_grounding = AsyncMock(
         return_value=GroundingVerdict(label="GROUNDED", reason="matches public snippet")
     )
-    answerer = GroundedRagAnswerer(rag_repository=rag, openrouter_client=llm)
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+    )
     result = await answerer.try_answer(question="часы работы офиса?", ctx=_ctx())
 
     assert result.handled is True

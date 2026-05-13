@@ -1,3 +1,5 @@
+import logging
+import re
 import time
 import uuid
 from datetime import UTC, datetime
@@ -35,6 +37,7 @@ from services.api.app.trace_corrections import (
 )
 
 app = create_service_app("api")
+logger = logging.getLogger(__name__)
 openrouter_client = OpenRouterClient()
 settings = get_settings()
 incident_repository = IncidentRepository(
@@ -66,6 +69,15 @@ answer_trace_repository = AnswerTraceRepository(
 nl_knowledge_ops_repository = NlKnowledgeOpsRepository(db_path=settings.nl_ops_db_path)
 trace_correction_repository = TraceCorrectionRepository(db_path=settings.nl_ops_db_path)
 weather_client = WeatherClient(base_url=settings.weather_provider_base_url)
+
+
+def _effective_bot_persona() -> tuple[str, str]:
+    return hitl_ticket_repository.get_bot_persona(
+        default_first_name=settings.bot_persona_first_name,
+        default_last_name=settings.bot_persona_last_name,
+    )
+
+
 answer_pipeline = AnswerPipeline(
     [
         DateTimeAnswerer(),
@@ -74,6 +86,7 @@ answer_pipeline = AnswerPipeline(
         GroundedRagAnswerer(
             rag_repository=rag_repository,
             openrouter_client=openrouter_client,
+            persona_reader=_effective_bot_persona,
         ),
     ]
 )
@@ -162,6 +175,26 @@ class OperatorUploadRequest(BaseModel):
     stored_binary_path: str | None = None
     is_confidential: bool = False
     inline_text: str | None = None
+
+
+class BotPersonaRequest(BaseModel):
+    first_name: str
+    last_name: str
+    description: str | None = None
+    short_description: str | None = None
+    updated_by: str
+
+
+_PERSONA_NAME_RE = re.compile(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё \-']{0,31}$")
+_PERSONA_DESCRIPTION_MAX = 512
+_PERSONA_SHORT_DESCRIPTION_MAX = 120
+
+
+def _validate_persona_name(value: str) -> str:
+    candidate = value.strip()
+    if not _PERSONA_NAME_RE.fullmatch(candidate):
+        raise HTTPException(status_code=422, detail="invalid_persona_name")
+    return candidate
 
 
 def _effective_hitl_operator_username() -> str:
@@ -677,6 +710,127 @@ def resolve_hitl_ticket(ticket_id: int) -> dict[str, object]:
         "status": ticket.status,
         "resolved_at": ticket.resolved_at,
     }
+
+
+@app.post("/hitl/runtime-config/persona")
+async def update_bot_persona(request: BotPersonaRequest) -> dict[str, object]:
+    if request.updated_by != settings.hitl_config_admin_username:
+        raise HTTPException(status_code=403, detail="not_authorized")
+
+    first_name = _validate_persona_name(request.first_name)
+    last_name = _validate_persona_name(request.last_name)
+
+    description: str | None = None
+    if request.description is not None:
+        candidate = request.description.strip()
+        if not candidate or len(candidate) > _PERSONA_DESCRIPTION_MAX:
+            raise HTTPException(status_code=422, detail="invalid_description")
+        description = candidate
+
+    short_description: str | None = None
+    if request.short_description is not None:
+        candidate = request.short_description.strip()
+        if not candidate or len(candidate) > _PERSONA_SHORT_DESCRIPTION_MAX:
+            raise HTTPException(status_code=422, detail="invalid_short_description")
+        short_description = candidate
+
+    hitl_ticket_repository.set_runtime_config(
+        key="bot_persona_first_name",
+        value=first_name,
+        updated_by=request.updated_by,
+    )
+    hitl_ticket_repository.set_runtime_config(
+        key="bot_persona_last_name",
+        value=last_name,
+        updated_by=request.updated_by,
+    )
+    if description is not None:
+        hitl_ticket_repository.set_runtime_config(
+            key="bot_telegram_description",
+            value=description,
+            updated_by=request.updated_by,
+        )
+    if short_description is not None:
+        hitl_ticket_repository.set_runtime_config(
+            key="bot_telegram_short_description",
+            value=short_description,
+            updated_by=request.updated_by,
+        )
+
+    full_name = f"{first_name} {last_name}"
+    telegram_results: dict[str, object] = {}
+    telegram_results["set_my_name"] = await _safe_telegram_identity_call(
+        method=telegram_bot_sender.set_my_name, name=full_name
+    )
+    effective_description = description or (
+        hitl_ticket_repository.get_runtime_config("bot_telegram_description")
+        or settings.bot_telegram_description
+    )
+    telegram_results["set_my_description"] = await _safe_telegram_identity_call(
+        method=telegram_bot_sender.set_my_description,
+        description=effective_description,
+    )
+    effective_short = short_description or (
+        hitl_ticket_repository.get_runtime_config("bot_telegram_short_description")
+        or settings.bot_telegram_short_description
+    )
+    telegram_results["set_my_short_description"] = (
+        await _safe_telegram_identity_call(
+            method=telegram_bot_sender.set_my_short_description,
+            short_description=effective_short,
+        )
+    )
+
+    return {
+        "first_name": first_name,
+        "last_name": last_name,
+        "full_name": full_name,
+        "telegram": telegram_results,
+    }
+
+
+async def _safe_telegram_identity_call(*, method, **kwargs) -> dict:
+    """Wrap a single setMyX call so a Telegram error doesn't fail the endpoint."""
+    try:
+        return await method(**kwargs)
+    except Exception as exc:  # broad: identity calls are best-effort
+        logger.warning(
+            "telegram_identity_call_failed",
+            extra={"method": method.__name__, "error": str(exc)},
+        )
+        return {"ok": False, "error": str(exc)}
+
+
+@app.on_event("startup")
+async def sync_telegram_identity_on_startup() -> None:
+    """Push persona/description from config to Telegram once on boot.
+
+    Idempotent on Telegram's side; safe to run on every restart. Skips
+    entirely when the bot token is the unconfigured placeholder so unit
+    tests don't reach the network.
+    """
+    if not telegram_bot_sender._is_token_configured():
+        return
+    first_name, last_name = _effective_bot_persona()
+    description = (
+        hitl_ticket_repository.get_runtime_config("bot_telegram_description")
+        or settings.bot_telegram_description
+    )
+    short_description = (
+        hitl_ticket_repository.get_runtime_config("bot_telegram_short_description")
+        or settings.bot_telegram_short_description
+    )
+    await _safe_telegram_identity_call(
+        method=telegram_bot_sender.set_my_name,
+        name=f"{first_name} {last_name}",
+    )
+    await _safe_telegram_identity_call(
+        method=telegram_bot_sender.set_my_description, description=description
+    )
+    await _safe_telegram_identity_call(
+        method=telegram_bot_sender.set_my_short_description,
+        short_description=short_description,
+    )
 
 
 @app.post("/hitl/tickets/{ticket_id}/reply")

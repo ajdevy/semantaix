@@ -8,15 +8,17 @@ import httpx
 from platform_common.settings import get_settings
 from services.api.app.rag import RagChunk
 
-_GROUNDING_SYSTEM_PROMPT = (
-    "Ты — ассистент поддержки. Отвечай на том же языке, что и вопрос "
-    "пользователя; если вопрос на русском — отвечай формальным русским, "
-    "без сленга и нецензурной лексики. Используй ТОЛЬКО приведённые ниже "
-    "фрагменты знаний и сегодняшнюю дату ({today_iso}). Если ответ не "
-    "полностью подтверждён этими источниками — верни строго "
-    "`ESCALATE_TO_HUMAN` без каких-либо других слов. Не хеджируй "
-    "(\"возможно\", \"вроде\", \"наверное\", \"хз\") — либо точный ответ, "
-    "либо `ESCALATE_TO_HUMAN`."
+_GROUNDING_SYSTEM_PROMPT_TEMPLATE = (
+    "Ты — {first_name} {last_name}, сотрудник поддержки, отвечающий клиенту "
+    "от первого лица. Никогда не пиши, что ты бот, ассистент, AI, ИИ, "
+    "нейросеть или языковая модель. Если спросят, отвечай как обычный "
+    "человек на работе. Отвечай на том же языке, что и вопрос пользователя; "
+    "если вопрос на русском — отвечай формальным русским, без сленга и "
+    "нецензурной лексики. Используй ТОЛЬКО приведённые ниже фрагменты "
+    "знаний и сегодняшнюю дату ({today_iso}). Если ответ не полностью "
+    "подтверждён этими источниками — верни строго `ESCALATE_TO_HUMAN` без "
+    "каких-либо других слов. Не хеджируй (\"возможно\", \"вроде\", "
+    "\"наверное\", \"хз\") — либо точный ответ, либо `ESCALATE_TO_HUMAN`."
 )
 
 _VERIFIER_SYSTEM_PROMPT = (
@@ -37,6 +39,14 @@ class GroundingVerdict:
 
 def _format_snippets(snippets: list[RagChunk]) -> str:
     return "\n".join(f"- [{chunk.source_id}] {chunk.chunk_text}" for chunk in snippets)
+
+
+def _build_grounding_system_prompt(
+    *, first_name: str, last_name: str, today_iso: str
+) -> str:
+    return _GROUNDING_SYSTEM_PROMPT_TEMPLATE.format(
+        first_name=first_name, last_name=last_name, today_iso=today_iso
+    )
 
 
 class OpenRouterClient:
@@ -72,9 +82,15 @@ class OpenRouterClient:
         question: str,
         snippets: list[RagChunk],
         today_iso: str,
+        persona_first_name: str,
+        persona_last_name: str,
         model: str | None = None,
     ) -> str:
-        system = _GROUNDING_SYSTEM_PROMPT.format(today_iso=today_iso)
+        system = _build_grounding_system_prompt(
+            first_name=persona_first_name,
+            last_name=persona_last_name,
+            today_iso=today_iso,
+        )
         user_block = (
             "Snippets:\n"
             + _format_snippets(snippets)

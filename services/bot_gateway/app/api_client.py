@@ -55,6 +55,26 @@ class ApiClient:
             timeout_override=timeout_seconds,
         )
 
+    async def set_persona(
+        self,
+        *,
+        first_name: str,
+        last_name: str,
+        updated_by: str,
+        description: str | None = None,
+        short_description: str | None = None,
+    ) -> dict:
+        payload: dict[str, str] = {
+            "first_name": first_name,
+            "last_name": last_name,
+            "updated_by": updated_by,
+        }
+        if description is not None:
+            payload["description"] = description
+        if short_description is not None:
+            payload["short_description"] = short_description
+        return await self._post("/hitl/runtime-config/persona", payload)
+
     async def _post(
         self,
         path: str,

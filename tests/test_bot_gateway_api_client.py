@@ -101,3 +101,40 @@ async def test_submit_operator_upload_uses_default_timeout(monkeypatch):
         inline_text="hello",
     )
     assert http.post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_set_persona_posts_minimal_payload(monkeypatch):
+    http = _http_mock(monkeypatch, response_json={"first_name": "Анна", "last_name": "Иванова"})
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.set_persona(
+        first_name="Анна", last_name="Иванова", updated_by="@ajdevy"
+    )
+    assert result == {"first_name": "Анна", "last_name": "Иванова"}
+    args = http.post.await_args
+    assert args.args[0] == "http://api:8000/hitl/runtime-config/persona"
+    assert args.kwargs["json"] == {
+        "first_name": "Анна",
+        "last_name": "Иванова",
+        "updated_by": "@ajdevy",
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_persona_includes_optional_description_fields(monkeypatch):
+    http = _http_mock(monkeypatch, response_json={"first_name": "x", "last_name": "y"})
+    client = ApiClient(base_url="http://api:8000")
+    await client.set_persona(
+        first_name="Иван",
+        last_name="Сидоров",
+        updated_by="@ajdevy",
+        description="Здравствуйте.",
+        short_description="На связи.",
+    )
+    assert http.post.await_args.kwargs["json"] == {
+        "first_name": "Иван",
+        "last_name": "Сидоров",
+        "updated_by": "@ajdevy",
+        "description": "Здравствуйте.",
+        "short_description": "На связи.",
+    }

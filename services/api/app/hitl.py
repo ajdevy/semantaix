@@ -204,6 +204,19 @@ class HitlTicketRepository:
                 return None
             return str(row["value"])
 
+    def get_bot_persona(
+        self, *, default_first_name: str, default_last_name: str
+    ) -> tuple[str, str]:
+        """Read persona overrides with settings fallback.
+
+        Returns ``(first_name, last_name)``. Used by the LLM system prompt
+        and the startup Telegram identity sync so they share one source of
+        truth.
+        """
+        first = self.get_runtime_config("bot_persona_first_name") or default_first_name
+        last = self.get_runtime_config("bot_persona_last_name") or default_last_name
+        return first, last
+
     @staticmethod
     def _row_to_ticket(row: sqlite3.Row) -> HitlTicket:
         return HitlTicket(
