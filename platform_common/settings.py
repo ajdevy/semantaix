@@ -62,6 +62,14 @@ class AppSettings(BaseSettings):
         ".data/semantaix_rag.db,"
         ".data/semantaix_knowledge.db"
     )
+    operator_upload_max_bytes: int = 20 * 1024 * 1024
+    operator_upload_max_audio_seconds: int = 900
+    operator_upload_storage_dir: str = ".data/operator_uploads"
+    operator_kb_intent_phrases_path: str = "data/russian_kb_intent_phrases.txt"
+    operator_upload_api_timeout_seconds: int = 120
+    faster_whisper_model_size: str = "base"
+    faster_whisper_compute_type: str = "int8"
+    faster_whisper_cache_dir: str = "/app/.cache/whisper"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

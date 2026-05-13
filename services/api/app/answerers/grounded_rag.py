@@ -79,15 +79,24 @@ class GroundedRagAnswerer:
             text=answer.strip(),
             response_mode="grounded_rag",
             metadata={
-                "retrieval": [
-                    {
-                        "source_id": chunk.source_id,
-                        "chunk_text": chunk.chunk_text,
-                        "score": chunk.score,
-                    }
-                    for chunk in chunks
-                ],
+                "retrieval": [_render_chunk_metadata(chunk) for chunk in chunks],
                 "verifier": verdict.reason,
                 "guardrail_score": decision.score,
             },
         )
+
+
+def _render_chunk_metadata(chunk: RagChunk) -> dict[str, object]:
+    if chunk.is_confidential:
+        return {
+            "source_id": "knowledge_candidate:confidential",
+            "chunk_text": "[redacted]",
+            "score": chunk.score,
+            "is_confidential": True,
+        }
+    return {
+        "source_id": chunk.source_id,
+        "chunk_text": chunk.chunk_text,
+        "score": chunk.score,
+        "is_confidential": False,
+    }

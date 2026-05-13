@@ -168,6 +168,15 @@ class TraceCorrectionRequest(BaseModel):
     branch: str
 
 
+class OperatorUploadRequest(BaseModel):
+    operator_username: str
+    source_file_type: str
+    source_file_name: str | None = None
+    stored_binary_path: str | None = None
+    is_confidential: bool = False
+    inline_text: str | None = None
+
+
 class BotPersonaRequest(BaseModel):
     first_name: str
     last_name: str
@@ -1029,6 +1038,124 @@ def reject_knowledge_candidate(candidate_id: int) -> dict[str, object]:
             raise HTTPException(status_code=409, detail="candidate_not_pending") from exc
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"id": candidate_id, "status": "rejected"}
+
+
+_OPERATOR_UPLOAD_TYPES = frozenset(
+    {"pdf", "docx", "pptx", "txt", "image", "audio", "video", "inline_text"}
+)
+_OPERATOR_UPLOAD_MEDIA_TYPES = frozenset({"audio", "video"})
+_operator_transcriber: object | None = None
+
+
+def _get_operator_transcriber() -> object:
+    global _operator_transcriber
+    if _operator_transcriber is None:
+        from services.api.app.operator_uploads.extractors import WhisperTranscriber
+
+        _operator_transcriber = WhisperTranscriber()
+    return _operator_transcriber
+
+
+@app.post("/knowledge/operator_upload")
+async def operator_upload(request: OperatorUploadRequest) -> dict[str, object]:
+    from pathlib import Path as _Path
+
+    from services.api.app.operator_uploads.extractors import (
+        EXTRACTORS,
+        ExtractionError,
+        binary_sha256,
+        extract_media,
+        soft_wrap,
+    )
+
+    if request.source_file_type not in _OPERATOR_UPLOAD_TYPES:
+        raise HTTPException(status_code=422, detail="unsupported_source_file_type")
+
+    sha: str | None = None
+    if request.source_file_type == "inline_text":
+        if not request.inline_text or not request.inline_text.strip():
+            raise HTTPException(status_code=422, detail="empty_inline_text")
+    else:
+        if not request.stored_binary_path:
+            raise HTTPException(status_code=422, detail="missing_stored_binary_path")
+        binary_path = _Path(request.stored_binary_path)
+        if not binary_path.exists():
+            raise HTTPException(status_code=404, detail="binary_not_found")
+        sha = binary_sha256(binary_path)
+        existing = knowledge_moderation_repository.find_by_binary_sha256(sha)
+        if existing is not None:
+            return {
+                "candidate_id": existing.id,
+                "source_id": f"knowledge_candidate:{existing.id}",
+                "inserted_chunks": 0,
+                "extracted_chars": 0,
+                "is_confidential": existing.is_confidential,
+                "deduplicated": True,
+            }
+
+    try:
+        if request.source_file_type == "inline_text":
+            raw_text = request.inline_text.strip()  # type: ignore[union-attr]
+        elif request.source_file_type in _OPERATOR_UPLOAD_MEDIA_TYPES:
+            raw_text = await extract_media(
+                request.source_file_type,
+                _Path(request.stored_binary_path),  # type: ignore[arg-type]
+                transcriber=_get_operator_transcriber(),  # type: ignore[arg-type]
+            )
+        else:
+            extractor = EXTRACTORS[request.source_file_type]
+            raw_text = extractor(_Path(request.stored_binary_path))  # type: ignore[arg-type]
+            if not raw_text or not raw_text.strip():
+                raise ExtractionError("empty_text")
+    except ExtractionError as exc:
+        raise HTTPException(status_code=422, detail=exc.reason) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        incident = incident_repository.ingest(
+            fingerprint="operator_upload_failures",
+            severity="critical",
+            summary=f"Operator upload extraction failed: {exc}",
+        )
+        incident_repository.append_event(
+            incident_id=incident.id,
+            event_type="operator_upload_failed",
+            details=(
+                f"operator={request.operator_username};"
+                f"type={request.source_file_type};"
+                f"path={request.stored_binary_path}"
+            ),
+        )
+        raise HTTPException(status_code=500, detail="operator_upload_failed") from exc
+
+    wrapped = soft_wrap(raw_text)
+    if not wrapped.strip():
+        raise HTTPException(status_code=422, detail="empty_text")
+
+    candidate = knowledge_moderation_repository.create_approved_operator_upload(
+        candidate_text=raw_text,
+        published_text=wrapped,
+        operator_username=request.operator_username,
+        is_confidential=request.is_confidential,
+        source_file_name=request.source_file_name,
+        source_file_type=request.source_file_type,
+        stored_binary_path=request.stored_binary_path,
+        binary_sha256=sha,
+    )
+    source_id = f"knowledge_candidate:{candidate.id}"
+    inserted_chunks = rag_repository.ingest(
+        source_id=source_id,
+        text=wrapped,
+        is_confidential=request.is_confidential,
+    )
+    return {
+        "candidate_id": candidate.id,
+        "source_id": source_id,
+        "inserted_chunks": inserted_chunks,
+        "extracted_chars": len(wrapped),
+        "is_confidential": request.is_confidential,
+        "deduplicated": False,
+    }
 
 
 def _serialize_nl_session(session: object) -> dict[str, object]:

@@ -60,6 +60,17 @@ Each row marks whether a happy path (`H`) and/or an error/incident path (`E`) is
 | 08 | 08-02 | `/suggest` persists trace; admin trace list + detail render sources/policy/routing/confidence | H | `tests/e2e/test_e2e_epic08_trace_ui.py::test_epic08_trace_visible_in_web_ui` |
 | 08 | 08-03 | NL knowledge op: preview → confirm → reindexed; audit log captured | H | `tests/e2e/test_e2e_epic08_nl_ops.py::test_epic08_nl_op_preview_confirm_reindex` |
 | 08 | 08-04 | Trace → correction (moderation branch) → approve → retrievable; audit captured | H | `tests/e2e/test_e2e_epic08_correction_loop.py::test_epic08_trace_correction_to_moderation_then_approved_retrievable` |
+| 09 | 09-01 | Operator KB intent detection (slash + Russian free-text with lemma fallback) | H | `tests/test_kb_intent.py` |
+| 09 | 09-01 | Telegram attachment normalization (document, photo, audio, video, voice, media_group_id) | H | `tests/test_telegram_update_attachments.py` |
+| 09 | 09-01 | Telegram file download two-step with size cap and stream-abort cleanup | H/E | `tests/test_telegram_file_download.py` |
+| 09 | 09-02 | Local extractors for PDF/DOCX/PPTX/TXT/image (tesseract patched) + soft_wrap | H | `tests/test_operator_uploads_extractors.py` |
+| 09 | 09-03 | Audio/video transcription with duration cap + binary SHA-256 streaming | H/E | `tests/test_operator_uploads_extractors.py` |
+| 09 | 09-04 | `/knowledge/operator_upload` auto-approval, dedup short-circuit, confidential propagation | H/E | `tests/test_api_operator_upload.py` |
+| 09 | 09-04 | Schema migration idempotency on knowledge_moderation_candidates | H | `tests/test_knowledge_moderation_repository_operator.py` |
+| 09 | 09-04 | `is_confidential` round-trip through `RagRepository` | H | `tests/test_rag_repository_confidential.py` |
+| 09 | 09-04 | Confidential chunk metadata redacted in `GroundedRagAnswerer` while LLM still receives raw text | H | `tests/test_grounded_rag_confidential_redaction.py` |
+| 09 | 09-05 | Bot orchestration: webhook → ack → background upload → summary DM | H/E | `tests/test_bot_gateway_kb_command.py` |
+| 09 | 09-05 | Scripted live demo: inline → file → dedup → confidential | H | `scripts/epic09_signoff_demo.sh` |
 
 ## CI
 

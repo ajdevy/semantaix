@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import pymorphy3
-from razdel import tokenize
+from razdel import sentenize, tokenize
 
 from services.api.app.russian_text.profanity import load_profanity
 from services.api.app.russian_text.slang import load_slang
@@ -59,6 +59,10 @@ class RussianNormalizer:
     def contains_profanity(self, text: str) -> bool:
         """True if any lemma in `text` matches a profanity entry."""
         return bool(set(self.lemmas(text)) & self._profanity)
+
+    def sentenize(self, text: str) -> list[str]:
+        """Split text into Russian sentences via razdel. Whitespace-only ignored."""
+        return [substring.text.strip() for substring in sentenize(text) if substring.text.strip()]
 
 
 @lru_cache(maxsize=1)

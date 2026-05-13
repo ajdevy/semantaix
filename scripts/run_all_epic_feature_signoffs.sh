@@ -20,7 +20,7 @@ echo "== ruff (CI parity) =="
 echo "== pytest + coverage (CI parity) =="
 "${VENV_PYTEST}" --cov --cov-config=.coveragerc --cov-report=term-missing
 
-for epic in 01 02 03 04 05 06 07 08; do
+for epic in 01 02 03 04 05 06 07 08 09; do
   echo "== Epic ${epic} live demo =="
   bash "${ROOT_DIR}/scripts/epic${epic}_signoff_demo.sh"
 done

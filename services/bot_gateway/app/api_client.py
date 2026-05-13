@@ -30,6 +30,31 @@ class ApiClient:
         payload = {"operator_username": operator_username, "reply_text": reply_text}
         return await self._post(f"/hitl/tickets/{ticket_id}/reply", payload)
 
+    async def submit_operator_upload(
+        self,
+        *,
+        operator_username: str,
+        source_file_type: str,
+        source_file_name: str | None,
+        stored_binary_path: str | None,
+        is_confidential: bool,
+        inline_text: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict:
+        payload = {
+            "operator_username": operator_username,
+            "source_file_type": source_file_type,
+            "source_file_name": source_file_name,
+            "stored_binary_path": stored_binary_path,
+            "is_confidential": is_confidential,
+            "inline_text": inline_text,
+        }
+        return await self._post(
+            "/knowledge/operator_upload",
+            payload,
+            timeout_override=timeout_seconds,
+        )
+
     async def set_persona(
         self,
         *,
@@ -50,8 +75,15 @@ class ApiClient:
             payload["short_description"] = short_description
         return await self._post("/hitl/runtime-config/persona", payload)
 
-    async def _post(self, path: str, json: dict) -> dict:
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+    async def _post(
+        self,
+        path: str,
+        json: dict,
+        *,
+        timeout_override: int | None = None,
+    ) -> dict:
+        timeout = timeout_override if timeout_override is not None else self._timeout
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(f"{self._base_url}{path}", json=json)
             response.raise_for_status()
             return response.json()

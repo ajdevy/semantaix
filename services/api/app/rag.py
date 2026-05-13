@@ -29,6 +29,14 @@ def init_schema(db_path: str) -> None:
             )
             """
         )
+        columns = {
+            str(r["name"])
+            for r in connection.execute("PRAGMA table_info(rag_chunks)").fetchall()
+        }
+        if "is_confidential" not in columns:
+            connection.execute(
+                "ALTER TABLE rag_chunks ADD COLUMN is_confidential INTEGER NOT NULL DEFAULT 0"
+            )
 
 
 def _tokenize(text: str) -> set[str]:
@@ -48,6 +56,7 @@ class RagChunk:
     source_id: str
     chunk_text: str
     score: float
+    is_confidential: bool = False
 
 
 class RagRepository:
@@ -55,19 +64,21 @@ class RagRepository:
         self.db_path = db_path
         init_schema(db_path)
 
-    def ingest(self, *, source_id: str, text: str) -> int:
+    def ingest(self, *, source_id: str, text: str, is_confidential: bool = False) -> int:
         init_schema(self.db_path)
         inserted = 0
         chunks = split_into_chunks(text)
+        confidential_flag = 1 if is_confidential else 0
         with _connect(self.db_path) as connection:
             for chunk in chunks:
                 digest = hashlib.sha256(chunk.encode("utf-8")).hexdigest()
                 cursor = connection.execute(
                     """
-                    INSERT OR IGNORE INTO rag_chunks (source_id, chunk_hash, chunk_text)
-                    VALUES (?, ?, ?)
+                    INSERT OR IGNORE INTO rag_chunks
+                        (source_id, chunk_hash, chunk_text, is_confidential)
+                    VALUES (?, ?, ?, ?)
                     """,
-                    (source_id, digest, chunk),
+                    (source_id, digest, chunk, confidential_flag),
                 )
                 if cursor.rowcount > 0:
                     inserted += 1
@@ -81,7 +92,7 @@ class RagRepository:
 
         with _connect(self.db_path) as connection:
             rows = connection.execute(
-                "SELECT id, source_id, chunk_text FROM rag_chunks"
+                "SELECT id, source_id, chunk_text, is_confidential FROM rag_chunks"
             ).fetchall()
 
         scored: list[RagChunk] = []
@@ -98,6 +109,7 @@ class RagRepository:
                     source_id=str(row["source_id"]),
                     chunk_text=chunk_text,
                     score=score,
+                    is_confidential=bool(row["is_confidential"]),
                 )
             )
 
