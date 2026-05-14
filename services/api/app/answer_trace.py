@@ -40,10 +40,20 @@ def init_schema(db_path: str) -> None:
                 no_retrieval_hit INTEGER NOT NULL,
                 confidence REAL,
                 retrieval_json TEXT NOT NULL,
-                limitations_json TEXT NOT NULL
+                limitations_json TEXT NOT NULL,
+                hitl_ticket_id INTEGER
             )
             """
         )
+        # ALTER for pre-existing databases — keep idempotent for legacy installs.
+        columns = [
+            row[1]
+            for row in connection.execute("PRAGMA table_info(answer_traces)").fetchall()
+        ]
+        if "hitl_ticket_id" not in columns:
+            connection.execute(
+                "ALTER TABLE answer_traces ADD COLUMN hitl_ticket_id INTEGER"
+            )
 
 
 @dataclass(frozen=True)
@@ -65,6 +75,7 @@ class AnswerTrace:
     confidence: float | None
     retrieval: list[dict[str, object]]
     limitations: list[str]
+    hitl_ticket_id: int | None = None
 
 
 def _truncate_snippet(text: str, max_chars: int) -> str:
@@ -95,6 +106,7 @@ class AnswerTraceRepository:
         retrieval: list[dict[str, object]],
         confidence: float | None,
         limitations: list[str],
+        hitl_ticket_id: int | None = None,
     ) -> AnswerTrace:
         if not trace_id:
             raise ValueError("trace_id_required")
@@ -130,9 +142,9 @@ class AnswerTraceRepository:
                     trace_id, created_at, request_text, model_id, model_provider,
                     latency_ms, response_mode, guardrails_applied, guardrail_outcome,
                     guardrail_reasons, guardrail_score, grounded, no_retrieval_hit,
-                    confidence, retrieval_json, limitations_json
+                    confidence, retrieval_json, limitations_json, hitl_ticket_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trace_id,
@@ -151,6 +163,7 @@ class AnswerTraceRepository:
                     confidence,
                     retrieval_json,
                     limitations_json,
+                    hitl_ticket_id,
                 ),
             )
             return self._fetch(connection, int(cursor.lastrowid))
@@ -163,7 +176,7 @@ class AnswerTraceRepository:
                 SELECT id, trace_id, created_at, request_text, model_id, model_provider,
                        latency_ms, response_mode, guardrails_applied, guardrail_outcome,
                        guardrail_reasons, guardrail_score, grounded, no_retrieval_hit,
-                       confidence, retrieval_json, limitations_json
+                       confidence, retrieval_json, limitations_json, hitl_ticket_id
                 FROM answer_traces
                 WHERE trace_id = ?
                 """,
@@ -172,6 +185,13 @@ class AnswerTraceRepository:
         if row is None:
             raise LookupError(f"answer_trace_not_found:{trace_id}")
         return self._row_to_trace(row)
+
+    def find_by_trace_id(self, trace_id: str) -> AnswerTrace | None:
+        """Non-raising variant of get_by_trace_id used for idempotency checks."""
+        try:
+            return self.get_by_trace_id(trace_id)
+        except LookupError:
+            return None
 
     def list_traces(self, *, limit: int = 50) -> list[AnswerTrace]:
         if limit <= 0:
@@ -183,7 +203,7 @@ class AnswerTraceRepository:
                 SELECT id, trace_id, created_at, request_text, model_id, model_provider,
                        latency_ms, response_mode, guardrails_applied, guardrail_outcome,
                        guardrail_reasons, guardrail_score, grounded, no_retrieval_hit,
-                       confidence, retrieval_json, limitations_json
+                       confidence, retrieval_json, limitations_json, hitl_ticket_id
                 FROM answer_traces
                 ORDER BY id DESC
                 LIMIT ?
@@ -198,7 +218,7 @@ class AnswerTraceRepository:
             SELECT id, trace_id, created_at, request_text, model_id, model_provider,
                    latency_ms, response_mode, guardrails_applied, guardrail_outcome,
                    guardrail_reasons, guardrail_score, grounded, no_retrieval_hit,
-                   confidence, retrieval_json, limitations_json
+                   confidence, retrieval_json, limitations_json, hitl_ticket_id
             FROM answer_traces
             WHERE id = ?
             """,
@@ -232,4 +252,7 @@ class AnswerTraceRepository:
             confidence=float(row["confidence"]) if row["confidence"] is not None else None,
             retrieval=list(retrieval),
             limitations=list(limitations),
+            hitl_ticket_id=(
+                int(row["hitl_ticket_id"]) if row["hitl_ticket_id"] is not None else None
+            ),
         )

@@ -17,12 +17,30 @@ class TelegramBotSender:
     async def send_message(self, *, chat_id: int, text: str) -> int:
         self._require_token()
 
+        # One retry on transient failure (5xx or network error). 4xx is
+        # client error (bad chat_id, blocked bot, message too long) — those
+        # never become valid on retry, so we surface them immediately.
+        # Idempotency note: Telegram does not dedupe sendMessage calls by
+        # content, so a successful-but-disconnected first attempt would
+        # double-post. We rely on api-side idempotency
+        # (answer_traces.trace_id) to make that case rare; this retry is
+        # specifically for fully-failed first attempts.
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        body = {"chat_id": chat_id, "text": text}
         async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
-                json={"chat_id": chat_id, "text": text},
-            )
-            response.raise_for_status()
+            try:
+                response = await client.post(url, json=body)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status >= 500:
+                    response = await client.post(url, json=body)
+                    response.raise_for_status()
+                else:
+                    raise
+            except httpx.TransportError:
+                response = await client.post(url, json=body)
+                response.raise_for_status()
             payload = response.json()
             return int(payload["result"]["message_id"])
 

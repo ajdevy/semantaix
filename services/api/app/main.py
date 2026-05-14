@@ -349,6 +349,7 @@ def _persist_answer_trace(
     retrieval: list[dict[str, object]],
     latency_ms: int,
     limitations: list[str],
+    hitl_ticket_id: int | None = None,
 ) -> str | None:
     try:
         trace = answer_trace_repository.write(
@@ -365,6 +366,7 @@ def _persist_answer_trace(
             retrieval=retrieval,
             confidence=guardrail_score,
             limitations=limitations,
+            hitl_ticket_id=hitl_ticket_id,
         )
     except Exception as exc:
         incident = incident_repository.ingest(
@@ -388,6 +390,31 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
 
     started_at = time.perf_counter()
     trace_id = request.trace_id or str(uuid.uuid4())
+
+    # Idempotency: if we've already processed this trace_id, return the cached
+    # outcome and skip the side effects (ack, ticket, operator notify). This
+    # defends against duplicate /conversations/inbound calls — for example a
+    # Telegram webhook retry that slips past the bot_gateway dedup, or a
+    # script that posts the same trace_id twice.
+    existing_trace = answer_trace_repository.find_by_trace_id(trace_id)
+    if existing_trace is not None:
+        logger.info(
+            "inbound_idempotent_replay",
+            extra={
+                "trace_id": trace_id,
+                "response_mode": existing_trace.response_mode,
+                "hitl_ticket_id": existing_trace.hitl_ticket_id,
+            },
+        )
+        return {
+            "deduplicated": True,
+            "delivered": False,
+            "escalated": existing_trace.response_mode == "human_only",
+            "response_mode": existing_trace.response_mode,
+            "hitl_ticket_id": existing_trace.hitl_ticket_id,
+            "trace_id": existing_trace.trace_id,
+        }
+
     now = datetime.now(UTC)
     ctx = _build_answer_context(
         chat_id=request.chat_id,
@@ -433,6 +460,48 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             "trace_id": persisted_trace_id,
         }
 
+    # Escalation path. Coalesce onto an active ticket for the same chat when
+    # one exists so a customer's rapid follow-up questions become one human
+    # conversation instead of N parallel tickets + N acks.
+    active_ticket = (
+        hitl_ticket_repository.find_active_for_chat(request.chat_id)
+        if request.chat_id is not None
+        else None
+    )
+    if active_ticket is not None:
+        # Customer already has an active ticket. Don't re-ack (they got one
+        # on the original message); just forward the follow-up to the
+        # assigned operator as a continuation.
+        operator_username = (
+            active_ticket.operator_username or _effective_hitl_operator_username()
+        )
+        await _notify_hitl_operator_with_question(
+            ticket_id=active_ticket.id,
+            question=f"[follow-up] {request.text}",
+            customer_username=request.customer_username,
+        )
+        persisted_trace_id = _persist_answer_trace(
+            trace_id=trace_id,
+            request_text=request.text,
+            response_mode="human_only",
+            guardrail_outcome="escalated",
+            guardrail_reasons=[],
+            guardrail_score=None,
+            retrieval=[],
+            latency_ms=latency_ms,
+            limitations=["awaiting_human_response", "coalesced_follow_up"],
+            hitl_ticket_id=active_ticket.id,
+        )
+        return {
+            "delivered": False,
+            "escalated": True,
+            "response_mode": "human_only",
+            "hitl_ticket_id": active_ticket.id,
+            "hitl_operator_username": operator_username,
+            "trace_id": persisted_trace_id,
+            "coalesced": True,
+        }
+
     ack_message = _effective_inbound_ack_message()
     if request.chat_id is not None:
         await _safe_send_message(
@@ -467,6 +536,7 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         retrieval=[],
         latency_ms=latency_ms,
         limitations=["awaiting_human_response"],
+        hitl_ticket_id=ticket.id,
     )
     return {
         "delivered": False,

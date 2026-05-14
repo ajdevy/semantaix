@@ -36,6 +36,17 @@ def _wire(tmp_path, monkeypatch):
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
     answer_trace_repository.db_path = str(tmp_path / "answer_traces.sqlite3")
+    # Isolate the bot_gateway persistence DB too: the gateway now
+    # short-circuits on duplicate source_message_id, so leaking rows from
+    # earlier test runs would make the first webhook in this test appear
+    # as a duplicate. We monkeypatch the attribute on the cached settings
+    # singleton rather than setenv+cache_clear, because clearing the
+    # lru_cache breaks downstream tests that monkeypatch get_settings()
+    # (which would return a different instance from the api/main module's
+    # module-level ``settings`` binding).
+    monkeypatch.setattr(
+        settings, "persistence_db_path", str(tmp_path / "persistence.sqlite3")
+    )
     monkeypatch.setattr(settings, "hitl_primary_operator_username", "@operator")
 
 

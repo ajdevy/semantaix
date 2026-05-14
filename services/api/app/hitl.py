@@ -150,6 +150,52 @@ class HitlTicketRepository:
             assert row is not None
             return self._row_to_ticket(row)
 
+    def find_active_for_chat(self, target_chat_id: int) -> HitlTicket | None:
+        """Return the most recent active (open or assigned) ticket for a chat.
+
+        Used to coalesce rapid customer follow-up questions onto a single
+        HITL ticket so the operator does not see N parallel notifications
+        for the same conversation.
+        """
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
+                       created_at, updated_at, resolved_at
+                FROM hitl_tickets
+                WHERE target_chat_id = ?
+                  AND status IN ('open', 'assigned')
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (target_chat_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_ticket(row)
+
+    def list_active_for_operator(self, operator_username: str) -> list[HitlTicket]:
+        """Return assigned tickets for an operator, newest first.
+
+        Used by the bot gateway to disambiguate operator replies when no
+        ticket reference is present in the quoted message.
+        """
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, conversation_ref, reason, status, operator_username, target_chat_id,
+                       created_at, updated_at, resolved_at
+                FROM hitl_tickets
+                WHERE operator_username = ?
+                  AND status = 'assigned'
+                ORDER BY id DESC
+                """,
+                (operator_username,),
+            ).fetchall()
+            return [self._row_to_ticket(row) for row in rows]
+
     def list_all(self) -> list[HitlTicket]:
         init_schema(self.db_path)
         with _connect(self.db_path) as connection:

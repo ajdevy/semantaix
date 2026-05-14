@@ -215,14 +215,30 @@ def _extract_ticket_id(reply_to_text: str | None) -> int | None:
 
 def _fallback_open_ticket_for_operator(operator_username: str) -> int | None:
     """Return the single open-assigned ticket id for this operator, if any."""
-    open_tickets = [
-        t
-        for t in hitl_ticket_repository.list_all()
-        if t.operator_username == operator_username and t.status == "assigned"
-    ]
+    open_tickets = hitl_ticket_repository.list_active_for_operator(operator_username)
     if len(open_tickets) == 1:
         return open_tickets[0].id
     return None
+
+
+def _format_disambiguation_dm(open_tickets: list) -> str:
+    """Render an operator-facing prompt listing active tickets to reply to.
+
+    Called when the operator sends a free-form message without a quoted
+    HITL ticket reference and there are 2+ assigned tickets — without this
+    prompt the message would be silently dropped, hiding the operator's
+    reply from the customer.
+    """
+    lines = ["Не понял, к какому тикету относится ответ. Активные тикеты:"]
+    for ticket in open_tickets:
+        snippet = ticket.conversation_ref or ""
+        if len(snippet) > 60:
+            snippet = snippet[:60].rstrip() + "…"
+        lines.append(f"  • HITL ticket #{ticket.id}: «{snippet}»")
+    lines.append(
+        "Ответьте через Reply на сообщение бота с нужным «HITL ticket #N»."
+    )
+    return "\n".join(lines)
 
 
 _KB_ATTACHMENT_TYPE_MAP: dict[str, str] = {
@@ -422,6 +438,33 @@ async def _handle_operator_reply(normalized: NormalizedTelegramMessage) -> dict[
     if ticket_id is None:
         ticket_id = _fallback_open_ticket_for_operator(normalized.username or "")
     if ticket_id is None:
+        # Disambiguation path: with 2+ assigned tickets the operator must
+        # tell us which one this reply belongs to. Silently dropping the
+        # reply (the historical behaviour) hides operator work from the
+        # customer, which is the worst possible failure mode.
+        open_tickets = hitl_ticket_repository.list_active_for_operator(
+            normalized.username or ""
+        )
+        if open_tickets:
+            await _safe_send_text(
+                chat_id=normalized.chat_id,
+                text=_format_disambiguation_dm(open_tickets),
+            )
+            logger.info(
+                "operator_reply_disambiguation_requested",
+                extra={
+                    "operator_username": normalized.username,
+                    "open_ticket_ids": [t.id for t in open_tickets],
+                },
+            )
+            return {
+                "status": "operator_reply_disambiguation_requested",
+                "open_ticket_count": str(len(open_tickets)),
+            }
+        logger.warning(
+            "operator_reply_unmatched_no_open_tickets",
+            extra={"operator_username": normalized.username},
+        )
         return {
             "status": "ignored",
             "reason": "operator_reply_unmatched",
@@ -441,6 +484,48 @@ async def _handle_operator_reply(normalized: NormalizedTelegramMessage) -> dict[
     return {"status": "operator_reply_delivered", "ticket_id": str(ticket_id)}
 
 
+async def _forward_inbound_safe(
+    *,
+    text: str,
+    chat_id: int,
+    customer_username: str | None,
+    trace_id: str,
+) -> None:
+    """Forward a customer message to the api, swallowing+logging failures.
+
+    Runs as a FastAPI BackgroundTask after the webhook has already returned
+    200 OK to Telegram. The api side emits its own incidents on failure;
+    this wrapper exists so an exception in the background task does not
+    propagate uncaught.
+    """
+    try:
+        await api_client.forward_inbound(
+            text=text,
+            chat_id=chat_id,
+            customer_username=customer_username,
+            trace_id=trace_id,
+        )
+    except Exception as exc:  # broad: best-effort; api emits incidents on its side
+        logger.warning(
+            "inbound_forward_failed",
+            extra={"trace_id": trace_id, "error": str(exc)},
+        )
+
+
+def _derive_trace_id(*, header_trace: str | None, update_id: object) -> str:
+    """Deterministic trace_id for a Telegram update.
+
+    Keying on the update_id ensures Telegram retries (which reuse the same
+    update_id) collide on the same trace_id, so api-side idempotency on
+    /conversations/inbound can short-circuit duplicate calls.
+    """
+    if header_trace:
+        return header_trace
+    if isinstance(update_id, int):
+        return f"tg-update-{update_id}"
+    return str(uuid.uuid4())
+
+
 @app.post("/telegram/webhook")
 async def telegram_webhook(
     request: Request,
@@ -454,7 +539,32 @@ async def telegram_webhook(
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="invalid_payload_type")
 
-    trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    trace_id = _derive_trace_id(
+        header_trace=request.headers.get("X-Trace-Id"),
+        update_id=payload.get("update_id"),
+    )
+
+    # Top-level guard: any unhandled exception below this point becomes a
+    # 200 + structured failure marker so Telegram does not retry and amplify
+    # the failure into duplicate user-visible messages. HTTPException is
+    # re-raised since it represents an intentional 4xx (bad payload).
+    try:
+        return await _process_telegram_update(payload, trace_id, background_tasks)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "telegram_webhook_unhandled_exception",
+            extra={"trace_id": trace_id, "error": str(exc)},
+        )
+        return {"status": "accepted", "handler": "failed", "trace_id": trace_id}
+
+
+async def _process_telegram_update(
+    payload: dict,
+    trace_id: str,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
     try:
         normalized = normalize_update(payload)
     except TelegramUpdateValidationError as exc:
@@ -523,6 +633,23 @@ async def telegram_webhook(
             "persisted": persisted,
         },
     )
+    if not persisted:
+        # Telegram retried the same update_id (or a script replayed the
+        # webhook). The original message has already been forwarded to the
+        # api; replaying would produce a second ack + ticket + operator DM.
+        logger.info(
+            "telegram_duplicate_update_ignored",
+            extra={
+                "trace_id": trace_id,
+                "source_message_id": normalized.source_message_id,
+                "update_id": normalized.update_id,
+            },
+        )
+        return {
+            "status": "ignored",
+            "reason": "duplicate_source_message",
+            "trace_id": trace_id,
+        }
 
     operator_username = _effective_operator_username()
     if normalized.username and normalized.username == operator_username:
@@ -531,20 +658,15 @@ async def telegram_webhook(
         response.update(operator_result)
         return response
 
-    try:
-        await api_client.forward_inbound(
-            text=normalized.text,
-            chat_id=normalized.chat_id,
-            customer_username=normalized.username,
-            trace_id=trace_id,
-        )
-    except Exception as exc:
-        # Best-effort forward; api emits incidents on its side. Webhook
-        # still acks Telegram so it doesn't retry the same update.
-        logger.warning(
-            "inbound_forward_failed",
-            extra={"trace_id": trace_id, "error": str(exc)},
-        )
-        return {"status": "accepted", "forward": "failed", "trace_id": trace_id}
-
+    # Customer forward runs as a background task so the webhook returns 200
+    # OK within a few milliseconds. The AnswerPipeline (LLM + RAG + verifier
+    # + guardrails) frequently exceeds Telegram's ~5s webhook deadline; when
+    # that happened in production Telegram retried and produced 3x acks.
+    background_tasks.add_task(
+        _forward_inbound_safe,
+        text=normalized.text,
+        chat_id=normalized.chat_id,
+        customer_username=normalized.username,
+        trace_id=trace_id,
+    )
     return {"status": "accepted", "trace_id": trace_id}

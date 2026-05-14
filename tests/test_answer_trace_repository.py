@@ -238,6 +238,103 @@ def test_list_traces_returns_recent_first(tmp_path):
     assert [t.trace_id for t in listed] == ["t-2", "t-1"]
 
 
+def test_write_persists_hitl_ticket_id(tmp_path):
+    """Escalation traces carry the HITL ticket id so an idempotent replay
+    of /conversations/inbound can return the original ticket without
+    re-creating it."""
+    repository = _build_repository(tmp_path)
+    trace = repository.write(
+        trace_id="t-esc",
+        request_text="когда возврат?",
+        model_id=None,
+        model_provider=None,
+        latency_ms=12,
+        response_mode="human_only",
+        guardrails_applied=True,
+        guardrail_outcome="escalated",
+        guardrail_reasons=[],
+        guardrail_score=None,
+        retrieval=[],
+        confidence=None,
+        limitations=["awaiting_human_response"],
+        hitl_ticket_id=42,
+    )
+    assert trace.hitl_ticket_id == 42
+    fetched = repository.get_by_trace_id("t-esc")
+    assert fetched.hitl_ticket_id == 42
+
+
+def test_find_by_trace_id_returns_none_when_missing(tmp_path):
+    repository = _build_repository(tmp_path)
+    assert repository.find_by_trace_id("missing") is None
+
+
+def test_find_by_trace_id_returns_trace_when_present(tmp_path):
+    repository = _build_repository(tmp_path)
+    repository.write(
+        trace_id="t-here",
+        request_text="hi",
+        model_id=None,
+        model_provider=None,
+        latency_ms=None,
+        response_mode="suggestion_only",
+        guardrails_applied=True,
+        guardrail_outcome="valid",
+        guardrail_reasons=[],
+        guardrail_score=None,
+        retrieval=[],
+        confidence=None,
+        limitations=[],
+    )
+    fetched = repository.find_by_trace_id("t-here")
+    assert fetched is not None
+    assert fetched.trace_id == "t-here"
+
+
+def test_init_schema_alters_legacy_db_to_add_hitl_ticket_id(tmp_path):
+    """Production databases predating the idempotency fix lack the
+    hitl_ticket_id column. init_schema must add it idempotently so reads
+    don't crash after deploy."""
+    import sqlite3
+
+    db_path = str(tmp_path / "legacy.sqlite3")
+    # Recreate the pre-migration schema by hand.
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE answer_traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                request_text TEXT NOT NULL,
+                model_id TEXT,
+                model_provider TEXT,
+                latency_ms INTEGER,
+                response_mode TEXT NOT NULL,
+                guardrails_applied INTEGER NOT NULL,
+                guardrail_outcome TEXT NOT NULL,
+                guardrail_reasons TEXT NOT NULL,
+                guardrail_score REAL,
+                grounded INTEGER NOT NULL,
+                no_retrieval_hit INTEGER NOT NULL,
+                confidence REAL,
+                retrieval_json TEXT NOT NULL,
+                limitations_json TEXT NOT NULL
+            )
+            """
+        )
+
+    # init_schema must add the column without raising.
+    init_schema(db_path)
+    init_schema(db_path)  # second call is a no-op
+    with sqlite3.connect(db_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(answer_traces)").fetchall()
+        }
+        assert "hitl_ticket_id" in columns
+
+
 def test_list_traces_with_zero_or_negative_limit(tmp_path):
     repository = _build_repository(tmp_path)
     repository.write(
