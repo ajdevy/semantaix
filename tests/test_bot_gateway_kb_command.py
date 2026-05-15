@@ -8,6 +8,8 @@ from services.bot_gateway.app import kb_session as kb_session_module
 from services.bot_gateway.app import main as bot_main
 from services.bot_gateway.app.kb_session import OperatorKbSessionRepository
 from services.bot_gateway.app.main import app as bot_app
+from services.bot_gateway.app.media_group_buffer import MediaGroupBuffer
+from services.bot_gateway.app.operator_files import OperatorFileRepository
 from services.bot_gateway.app.telegram_file_download import (
     DownloadedFile,
     TelegramFileDownloadError,
@@ -25,6 +27,15 @@ def isolated_bot(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_main, "hitl_ticket_repository", _StubHitlRepo())
     fresh_kb_repo = OperatorKbSessionRepository(str(tmp_path / "hitl.db"))
     monkeypatch.setattr(bot_main, "kb_session_repository", fresh_kb_repo)
+    fresh_files_repo = OperatorFileRepository(
+        str(tmp_path / "operator_files.db")
+    )
+    monkeypatch.setattr(bot_main, "operator_file_repository", fresh_files_repo)
+    fresh_mg_buffer = MediaGroupBuffer(str(tmp_path / "hitl.db"))
+    monkeypatch.setattr(bot_main, "media_group_buffer", fresh_mg_buffer)
+    monkeypatch.setattr(
+        bot_main.settings, "operator_media_group_debounce_seconds", 0
+    )
 
     sent_dms: list[tuple[int, str]] = []
 
@@ -36,6 +47,8 @@ def isolated_bot(tmp_path, monkeypatch):
         "tmp_path": tmp_path,
         "dms": sent_dms,
         "kb_session_repo": fresh_kb_repo,
+        "files_repo": fresh_files_repo,
+        "media_group_buffer": fresh_mg_buffer,
     }
 
 
@@ -153,6 +166,10 @@ def test_kb_command_from_non_operator_is_ignored(isolated_bot):
 
 
 def test_kb_download_failure_reports_in_summary(isolated_bot, monkeypatch):
+    # Use a small file_size so the size pre-check passes and we reach the
+    # download attempt that the stub fails.
+    monkeypatch.setattr(bot_main.settings, "operator_upload_max_bytes", 999_999_999)
+
     async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
         raise TelegramFileDownloadError("file_too_large", file_size=99_999_999)
 
@@ -173,7 +190,7 @@ def test_kb_download_failure_reports_in_summary(isolated_bot, monkeypatch):
                         "file_id": "BIG",
                         "file_name": "huge.pdf",
                         "mime_type": "application/pdf",
-                        "file_size": 999999,
+                        "file_size": 100,
                     },
                 }
             ],
@@ -184,7 +201,8 @@ def test_kb_download_failure_reports_in_summary(isolated_bot, monkeypatch):
         (text for _, text in isolated_bot["dms"] if "Не удалось обработать" in text), None
     )
     assert summary is not None
-    assert "file_too_large" in summary
+    assert "huge.pdf" in summary
+    assert "Telegram Bot API" in summary or "файл больше" in summary
 
 
 def test_kb_unsupported_attachment_type_falls_through_to_failures(isolated_bot, monkeypatch):
@@ -209,8 +227,8 @@ def test_kb_unsupported_attachment_type_falls_through_to_failures(isolated_bot, 
         ),
     )
     assert response.status_code == 200
-    summaries = [t for _, t in isolated_bot["dms"]]
-    assert any("unsupported_attachment_type" in t for t in summaries)
+    summaries = [t for _, t in isolated_bot["dms"] if "Не удалось обработать" in t]
+    assert any("тип файла не поддерживается" in t for t in summaries)
 
 
 def test_kb_api_submit_failure_reports_failure(isolated_bot, monkeypatch):
@@ -781,3 +799,527 @@ def test_kb_continuation_clears_when_attachment_processed_but_session_expires_na
     repo.upsert(chat_id=1, username="@op", is_confidential=False, ttl_seconds=0)
     # ttl=0 → expires_at <= now() immediately → considered inactive.
     assert repo.get_active(chat_id=1, username="@op") is None
+
+
+def test_kb_pre_check_too_large_skips_download_but_records_registry(
+    isolated_bot, monkeypatch
+):
+    monkeypatch.setattr(bot_main.settings, "operator_upload_max_bytes", 1024)
+
+    download_invoked: list[str] = []
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        download_invoked.append(file_id)
+        raise AssertionError("download must not be called for oversize files")
+
+    monkeypatch.setattr(bot_main.TelegramFileDownloader, "download", fake_download)
+
+    async def fake_submit(**kwargs):  # pragma: no cover - should not run
+        raise AssertionError("submit must not be called for oversize files")
+
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_message(
+            caption="/kb_add",
+            attachments=[
+                {
+                    "document": {
+                        "file_id": "HUGE",
+                        "file_name": "brochure.pdf",
+                        "mime_type": "application/pdf",
+                        "file_size": 50_000_000,
+                    }
+                }
+            ],
+        ),
+    )
+    assert response.status_code == 200
+    assert download_invoked == []
+    summary = next(
+        (t for _, t in isolated_bot["dms"] if "Не удалось обработать" in t), None
+    )
+    assert summary is not None
+    assert "файл больше" in summary
+    assert "brochure.pdf" in summary
+
+    records = isolated_bot["files_repo"].list_recent(
+        username="@ajdevy", limit=10
+    )
+    assert len(records) == 1
+    assert records[0].download_status == "too_large"
+    assert records[0].kb_ingest_status == "skipped"
+    assert records[0].source_file_name == "brochure.pdf"
+    assert records[0].telegram_file_id == "HUGE"
+
+
+def test_kb_success_writes_registry_row_with_ok_status(isolated_bot, monkeypatch):
+    pdf = isolated_bot["tmp_path"] / "ok.pdf"
+    pdf.write_bytes(b"%PDF-OK")
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        return DownloadedFile(path=pdf, byte_size=7, mime_type=mime_type)
+
+    async def fake_submit(**kwargs):
+        return {"inserted_chunks": 3, "is_confidential": False, "deduplicated": False}
+
+    monkeypatch.setattr(bot_main.TelegramFileDownloader, "download", fake_download)
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+    client = TestClient(bot_app)
+    client.post(
+        "/telegram/webhook",
+        json=_operator_message(
+            caption="/kb_add",
+            attachments=[
+                {
+                    "document": {
+                        "file_id": "F1",
+                        "file_name": "ok.pdf",
+                        "mime_type": "application/pdf",
+                        "file_size": 7,
+                    }
+                }
+            ],
+        ),
+    )
+    records = isolated_bot["files_repo"].list_recent(
+        username="@ajdevy", limit=10
+    )
+    assert len(records) == 1
+    assert records[0].download_status == "ok"
+    assert records[0].kb_ingest_status == "ok"
+    assert records[0].kb_inserted_chunks == 3
+    assert records[0].stored_binary_path == str(pdf)
+
+    summaries = [t for _, t in isolated_bot["dms"] if "Добавлено в базу" in t]
+    assert summaries
+    assert f"#{records[0].short_id}" in summaries[0]
+    assert "ok.pdf" in summaries[0]
+
+
+def test_kb_api_failure_marks_registry_kb_ingest_failed(isolated_bot, monkeypatch):
+    pdf = isolated_bot["tmp_path"] / "x.pdf"
+    pdf.write_bytes(b"%PDF")
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        return DownloadedFile(path=pdf, byte_size=4, mime_type=mime_type)
+
+    async def fake_submit(**kwargs):
+        raise httpx.HTTPError("api boom")
+
+    monkeypatch.setattr(bot_main.TelegramFileDownloader, "download", fake_download)
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+    client = TestClient(bot_app)
+    client.post(
+        "/telegram/webhook",
+        json=_operator_message(
+            caption="/kb_add",
+            attachments=[
+                {
+                    "document": {
+                        "file_id": "F2",
+                        "file_name": "doc.pdf",
+                        "mime_type": "application/pdf",
+                        "file_size": 4,
+                    }
+                }
+            ],
+        ),
+    )
+    records = isolated_bot["files_repo"].list_recent(
+        username="@ajdevy", limit=10
+    )
+    assert len(records) == 1
+    assert records[0].download_status == "ok"
+    assert records[0].kb_ingest_status.startswith("failed:")
+
+
+def test_kb_unsupported_writes_registry_row_with_failed_status(
+    isolated_bot, monkeypatch
+):
+    async def fake_submit(**kwargs):  # pragma: no cover
+        raise AssertionError("must not submit")
+
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+    client = TestClient(bot_app)
+    client.post(
+        "/telegram/webhook",
+        json=_operator_message(
+            caption="/kb_add",
+            attachments=[
+                {
+                    "document": {
+                        "file_id": "ZZ",
+                        "file_name": "weird.xyz",
+                        "mime_type": "application/x-xyz",
+                    }
+                }
+            ],
+        ),
+    )
+    records = isolated_bot["files_repo"].list_recent(
+        username="@ajdevy", limit=10
+    )
+    assert len(records) == 1
+    assert records[0].download_status == "failed:unsupported_attachment_type"
+    assert records[0].kb_ingest_status == "skipped"
+
+
+def test_kb_telegram_error_messages_do_not_leak_bot_token(
+    isolated_bot, monkeypatch
+):
+    monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "SECRET_LEAK_NOT")
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        raise TelegramFileDownloadError(
+            "telegram_get_file_failed",
+            description="Bad Request: wrong file_id specified",
+        )
+
+    monkeypatch.setattr(bot_main.TelegramFileDownloader, "download", fake_download)
+    client = TestClient(bot_app)
+    client.post(
+        "/telegram/webhook",
+        json=_operator_message(
+            caption="/kb_add",
+            attachments=[
+                {
+                    "document": {
+                        "file_id": "F",
+                        "file_name": "x.pdf",
+                        "mime_type": "application/pdf",
+                        "file_size": 10,
+                    }
+                }
+            ],
+        ),
+    )
+    summaries = [t for _, t in isolated_bot["dms"]]
+    for summary in summaries:
+        assert "SECRET_LEAK_NOT" not in summary
+    summary = next((t for t in summaries if "Не удалось обработать" in t), "")
+    assert "Telegram" in summary
+
+
+def test_kb_friendly_failure_reason_helper_covers_branches():
+    from services.bot_gateway.app.main import _friendly_failure_reason
+
+    assert "20 МБ" in _friendly_failure_reason(
+        "file_too_large", max_bytes=20 * 1024 * 1024
+    )
+    assert _friendly_failure_reason("unsupported_attachment_type", max_bytes=1) == (
+        "тип файла не поддерживается"
+    )
+    assert "Telegram" in _friendly_failure_reason(
+        "telegram_network_error", max_bytes=1
+    )
+    assert "Telegram" in _friendly_failure_reason(
+        "telegram_cdn_error", max_bytes=1
+    )
+    assert "wrong file_id" in _friendly_failure_reason(
+        "telegram_get_file_failed:wrong file_id", max_bytes=1
+    )
+    assert _friendly_failure_reason("telegram_get_file_failed", max_bytes=1).startswith(
+        "Telegram"
+    )
+    assert _friendly_failure_reason(
+        "api_failed:something", max_bytes=1
+    ).startswith("api_failed:")
+    assert _friendly_failure_reason("download_failed", max_bytes=1) == (
+        "не удалось скачать файл"
+    )
+    # Default branch redacts token if present
+    redacted = _friendly_failure_reason(
+        "weird bot12345:ABCDEF token leak", max_bytes=1
+    )
+    assert "bot12345:ABCDEF" not in redacted
+
+
+def test_kb_media_group_buffers_first_file_no_immediate_ack(
+    isolated_bot, monkeypatch
+):
+    submit_calls: list[dict] = []
+
+    async def fake_submit(**kwargs):
+        submit_calls.append(kwargs)
+        return {"inserted_chunks": 1, "is_confidential": False, "deduplicated": False}
+
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+
+    # Suppress the auto-flush so we can observe pure buffered state.
+    scheduled: list[str] = []
+
+    async def fake_flush(*, media_group_id, debounce_seconds):
+        scheduled.append(media_group_id)
+
+    monkeypatch.setattr(bot_main, "_flush_media_group_after_debounce", fake_flush)
+
+    client = TestClient(bot_app)
+    # Open the session first
+    open_msg = _operator_message(text="хочу добавить материалы в knowledge base")
+    open_msg["update_id"] = 8001
+    open_msg["message"]["message_id"] = 8001
+    client.post("/telegram/webhook", json=open_msg)
+    isolated_bot["dms"].clear()
+
+    # First message of a media group — only buffer; do not ack/submit yet.
+    mg1 = _operator_message(
+        attachments=[
+            {
+                "document": {
+                    "file_id": "MG-A",
+                    "file_name": "a.pdf",
+                    "mime_type": "application/pdf",
+                    "file_size": 100,
+                }
+            }
+        ],
+    )
+    mg1["update_id"] = 8002
+    mg1["message"]["message_id"] = 8002
+    mg1["message"]["media_group_id"] = "MG_X"
+    response = client.post("/telegram/webhook", json=mg1)
+    body = response.json()
+    assert body["status"] == "accepted"
+    assert body["kb_mode"] == "media_group_buffered"
+    # No "Принял" ack and no submit yet — the (suppressed) flush would do it.
+    assert not any("Принял" in text for _, text in isolated_bot["dms"])
+    assert submit_calls == []
+    # The buffer holds the attachment.
+    drained = isolated_bot["media_group_buffer"].drain(media_group_id="MG_X")
+    assert [d.attachment.file_id for d in drained] == ["MG-A"]
+    # The flush was scheduled exactly once.
+    assert scheduled == ["MG_X"]
+
+
+def test_kb_media_group_two_files_single_ack_and_single_summary(
+    isolated_bot, monkeypatch
+):
+    pdf_a = isolated_bot["tmp_path"] / "a.pdf"
+    pdf_a.write_bytes(b"AAAA")
+    pdf_b = isolated_bot["tmp_path"] / "b.pdf"
+    pdf_b.write_bytes(b"BBBB")
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        if file_id == "MG-A":
+            return DownloadedFile(path=pdf_a, byte_size=4, mime_type=mime_type)
+        return DownloadedFile(path=pdf_b, byte_size=4, mime_type=mime_type)
+
+    submit_calls: list[dict] = []
+
+    async def fake_submit(**kwargs):
+        submit_calls.append(kwargs)
+        return {"inserted_chunks": 2, "is_confidential": False, "deduplicated": False}
+
+    monkeypatch.setattr(bot_main.TelegramFileDownloader, "download", fake_download)
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+
+    # Capture the real flush, then suppress it so it doesn't fire mid-batch.
+    real_flush = bot_main._flush_media_group_after_debounce
+
+    async def noop_flush(**kwargs):
+        return None
+
+    monkeypatch.setattr(bot_main, "_flush_media_group_after_debounce", noop_flush)
+
+    client = TestClient(bot_app)
+    # Open session
+    open_msg = _operator_message(text="хочу добавить материалы в knowledge base")
+    open_msg["update_id"] = 9001
+    open_msg["message"]["message_id"] = 9001
+    client.post("/telegram/webhook", json=open_msg)
+    isolated_bot["dms"].clear()
+
+    # Two media-group updates
+    for offset, fid, name in ((1, "MG-A", "a.pdf"), (2, "MG-B", "b.pdf")):
+        msg = _operator_message(
+            attachments=[
+                {
+                    "document": {
+                        "file_id": fid,
+                        "file_name": name,
+                        "mime_type": "application/pdf",
+                        "file_size": 4,
+                    }
+                }
+            ],
+        )
+        msg["update_id"] = 9100 + offset
+        msg["message"]["message_id"] = 9100 + offset
+        msg["message"]["media_group_id"] = "MG_X"
+        client.post("/telegram/webhook", json=msg)
+
+    # Now manually run the real flush — Telegram's media-group window settled.
+    import asyncio
+
+    asyncio.run(real_flush(media_group_id="MG_X", debounce_seconds=0))
+
+    acks = [t for _, t in isolated_bot["dms"] if "Принял" in t]
+    summaries = [t for _, t in isolated_bot["dms"] if "Добавлено в базу" in t]
+    assert len(acks) == 1
+    assert "2" in acks[0]
+    assert "файла" in acks[0]
+    assert len(summaries) == 1
+    assert len(submit_calls) == 2
+    assert "a.pdf" in summaries[0]
+    assert "b.pdf" in summaries[0]
+
+
+def test_kb_media_group_flush_empty_buffer_is_noop(
+    isolated_bot, monkeypatch
+):
+    """If two flush tasks somehow run for the same group, the second sees an
+    empty buffer and returns without sending anything."""
+    import asyncio
+
+    submit_calls: list[dict] = []
+
+    async def fake_submit(**kwargs):  # pragma: no cover - must not run
+        submit_calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+    asyncio.run(
+        bot_main._flush_media_group_after_debounce(
+            media_group_id="UNKNOWN", debounce_seconds=0
+        )
+    )
+    assert submit_calls == []
+    assert not any("Принял" in t for _, t in isolated_bot["dms"])
+
+
+def test_kb_media_group_flush_sleeps_when_debounce_positive(monkeypatch):
+    """A positive debounce must sleep before draining, so Telegram has time
+    to deliver every update in the group."""
+    import asyncio
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(bot_main.asyncio, "sleep", fake_sleep)
+    asyncio.run(
+        bot_main._flush_media_group_after_debounce(
+            media_group_id="UNKNOWN_DEBOUNCED", debounce_seconds=2.5
+        )
+    )
+    assert sleep_calls == [2.5]
+
+
+def test_kb_media_group_flush_swallows_internal_errors(
+    isolated_bot, monkeypatch, caplog
+):
+    """A crash inside the flush task must be logged, not raised."""
+    import asyncio
+
+    monkeypatch.setattr(bot_main, "_send_dm", _raising_send_dm)
+    # Pre-populate the buffer so drain returns something.
+    from services.bot_gateway.app.telegram_update import TelegramAttachment
+
+    isolated_bot["media_group_buffer"].add(
+        media_group_id="ERR",
+        chat_id=100,
+        username="@ajdevy",
+        update_id=1,
+        source_message_id=1,
+        attachment=TelegramAttachment(file_id="x", kind="document"),
+        is_confidential=False,
+    )
+    with caplog.at_level("ERROR"):
+        asyncio.run(
+            bot_main._flush_media_group_after_debounce(
+                media_group_id="ERR", debounce_seconds=0
+            )
+        )
+    assert any("media_group_flush_failed" in r.message for r in caplog.records)
+
+
+async def _raising_send_dm(chat_id: int, text: str) -> None:
+    raise RuntimeError("send_dm boom")
+
+
+def test_kb_command_with_caption_and_media_group_buffers(
+    isolated_bot, monkeypatch
+):
+    """When the operator's intent caption + first PDF arrive together as the
+    head of a media group, the KB command branch must buffer (not ack)
+    instead of submitting immediately. The flush will pick up all files
+    in the group."""
+    scheduled: list[str] = []
+
+    async def fake_flush(*, media_group_id, debounce_seconds):
+        scheduled.append(media_group_id)
+
+    monkeypatch.setattr(bot_main, "_flush_media_group_after_debounce", fake_flush)
+
+    async def fake_submit(**kwargs):  # pragma: no cover - must not run yet
+        raise AssertionError("submit must not run before flush")
+
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+    client = TestClient(bot_app)
+    msg = _operator_message(
+        caption="/kb_add",
+        attachments=[
+            {
+                "document": {
+                    "file_id": "MG-FIRST",
+                    "file_name": "first.pdf",
+                    "mime_type": "application/pdf",
+                    "file_size": 10,
+                }
+            }
+        ],
+    )
+    msg["message"]["media_group_id"] = "MG_CAP"
+    response = client.post("/telegram/webhook", json=msg)
+    body = response.json()
+    assert body["kb_mode"] == "media_group_buffered"
+    assert body["media_group_id"] == "MG_CAP"
+    # No "Принял N файл" ack yet
+    assert not any("Принял" in t for _, t in isolated_bot["dms"])
+    # Buffer holds the attachment
+    drained = isolated_bot["media_group_buffer"].drain(media_group_id="MG_CAP")
+    assert len(drained) == 1
+    assert drained[0].attachment.file_id == "MG-FIRST"
+    # Flush was scheduled once
+    assert scheduled == ["MG_CAP"]
+
+
+def test_kb_non_media_group_keeps_immediate_ack(isolated_bot, monkeypatch):
+    """Regression: a single PDF without media_group_id still acks
+    immediately (no debounce delay)."""
+    pdf = isolated_bot["tmp_path"] / "single.pdf"
+    pdf.write_bytes(b"PDF")
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        return DownloadedFile(path=pdf, byte_size=3, mime_type=mime_type)
+
+    async def fake_submit(**kwargs):
+        return {"inserted_chunks": 1, "is_confidential": False, "deduplicated": False}
+
+    monkeypatch.setattr(bot_main.TelegramFileDownloader, "download", fake_download)
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+    client = TestClient(bot_app)
+    msg = _operator_message(
+        caption="/kb_add",
+        attachments=[
+            {
+                "document": {
+                    "file_id": "S1",
+                    "file_name": "single.pdf",
+                    "mime_type": "application/pdf",
+                    "file_size": 3,
+                }
+            }
+        ],
+    )
+    msg["update_id"] = 10001
+    msg["message"]["message_id"] = 10001
+    response = client.post("/telegram/webhook", json=msg)
+    body = response.json()
+    assert body["kb_mode"] == "freetext" or body.get("attachment_count") == "1"
+    acks = [t for _, t in isolated_bot["dms"] if "Принял" in t]
+    assert acks
+    assert "1" in acks[0]

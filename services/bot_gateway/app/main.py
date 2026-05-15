@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import re
 import uuid
+from pathlib import Path
 
 import httpx
 from fastapi import BackgroundTasks, HTTPException, Request
@@ -13,10 +15,21 @@ from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.bot_gateway.app.api_client import ApiClient
 from services.bot_gateway.app.kb_intent import KbIntent, detect_kb_intent
 from services.bot_gateway.app.kb_session import OperatorKbSessionRepository
+from services.bot_gateway.app.media_group_buffer import (
+    MediaGroupBuffer,
+)
+from services.bot_gateway.app.operator_files import (
+    OperatorFileRecord,
+    OperatorFileRepository,
+)
 from services.bot_gateway.app.persistence import persist_normalized_message
 from services.bot_gateway.app.telegram_file_download import (
     TelegramFileDownloader,
     TelegramFileDownloadError,
+)
+from services.bot_gateway.app.telegram_file_send import (
+    TelegramFileSender,
+    TelegramFileSendError,
 )
 from services.bot_gateway.app.telegram_update import (
     NormalizedTelegramMessage,
@@ -30,8 +43,18 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 hitl_ticket_repository = HitlTicketRepository(settings.hitl_ticket_db_path)
 kb_session_repository = OperatorKbSessionRepository(settings.hitl_ticket_db_path)
+operator_file_repository = OperatorFileRepository(settings.operator_files_db_path)
+media_group_buffer = MediaGroupBuffer(settings.hitl_ticket_db_path)
 api_client = ApiClient(base_url=settings.api_internal_base_url)
 telegram_bot_sender = TelegramBotSender(bot_token=settings.telegram_bot_token)
+telegram_file_sender = TelegramFileSender(bot_token=settings.telegram_bot_token)
+
+_BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
+
+
+def _redact_token(message: str) -> str:
+    """Strip any bot token from a string so it never reaches a log line or DM."""
+    return _BOT_TOKEN_RE.sub("bot<REDACTED>", message)
 
 _TICKET_REF = re.compile(r"HITL\s+ticket\s+#(\d+)", re.IGNORECASE)
 
@@ -74,6 +97,13 @@ _HELP_TEXT = (
     "можно дослать PDF/DOCX/TXT/PPTX отдельными сообщениями — "
     "следующие 10 минут они будут попадать в KB автоматически.\n"
     "• /kb_cancel — закрыть открытую KB-сессию досрочно.\n"
+    "\n"
+    "📂 Библиотека файлов\n"
+    "• /files [N] — последние сохранённые загрузки (по умолчанию 10).\n"
+    "• /send #<id> @username  — переслать сохранённый файл клиенту.\n"
+    "• /send #<id> <chat_id>  — то же, но по числовому chat_id (в т.ч. отрицательному).\n"
+    "  Работает с файлами любого размера — даже теми, что больше 20 МБ "
+    "и не помещаются в KB.\n"
     "\n"
     "👤 Имя бота\n"
     "• /persona Имя — переименовать бота (фамилия не обязательна).\n"
@@ -515,7 +545,8 @@ async def _process_operator_upload(
         max_bytes=settings.operator_upload_max_bytes,
     )
     successes: list[dict] = []
-    failures: list[tuple[str, str]] = []
+    successes_meta: list[tuple[str | None, str | None]] = []
+    failures: list[tuple[str, str, str | None]] = []
 
     if not normalized.attachments:
         inline_body = (intent.cleaned_text or "").strip()
@@ -530,14 +561,45 @@ async def _process_operator_upload(
                 timeout_seconds=settings.operator_upload_api_timeout_seconds,
             )
             successes.append(result)
+            successes_meta.append((None, None))
         except Exception as exc:
-            failures.append(("inline_text", str(exc)))
+            failures.append(("inline_text", _redact_token(str(exc)), None))
     else:
         for attachment in normalized.attachments:
             label = attachment.file_name or attachment.file_id
             source_file_type = _kb_source_file_type(attachment)
             if source_file_type is None:
-                failures.append((label, "unsupported_attachment_type"))
+                record = operator_file_repository.record_upload(
+                    chat_id=normalized.chat_id,
+                    username=normalized.username or "",
+                    source_message_id=normalized.source_message_id,
+                    attachment=attachment,
+                    is_confidential=intent.confidential,
+                    stored_binary_path=None,
+                    download_status="failed:unsupported_attachment_type",
+                    source_file_type=None,
+                    kb_ingest_status="skipped",
+                )
+                failures.append(
+                    (label, "unsupported_attachment_type", record.short_id)
+                )
+                continue
+            if (
+                attachment.file_size is not None
+                and attachment.file_size > settings.operator_upload_max_bytes
+            ):
+                record = operator_file_repository.record_upload(
+                    chat_id=normalized.chat_id,
+                    username=normalized.username or "",
+                    source_message_id=normalized.source_message_id,
+                    attachment=attachment,
+                    is_confidential=intent.confidential,
+                    stored_binary_path=None,
+                    download_status="too_large",
+                    source_file_type=source_file_type,
+                    kb_ingest_status="skipped",
+                )
+                failures.append((label, "file_too_large", record.short_id))
                 continue
             extension = _kb_extension_for(attachment, source_file_type)
             try:
@@ -547,11 +609,57 @@ async def _process_operator_upload(
                     mime_type=attachment.mime_type,
                 )
             except TelegramFileDownloadError as exc:
-                failures.append((label, exc.reason))
+                record = operator_file_repository.record_upload(
+                    chat_id=normalized.chat_id,
+                    username=normalized.username or "",
+                    source_message_id=normalized.source_message_id,
+                    attachment=attachment,
+                    is_confidential=intent.confidential,
+                    stored_binary_path=None,
+                    download_status=(
+                        "too_large"
+                        if exc.reason == "file_too_large"
+                        else f"failed:{exc.reason}"
+                    ),
+                    source_file_type=source_file_type,
+                    kb_ingest_status="skipped",
+                )
+                reason = (
+                    f"telegram_get_file_failed:{exc.description}"
+                    if exc.reason == "telegram_get_file_failed" and exc.description
+                    else exc.reason
+                )
+                failures.append((label, reason, record.short_id))
                 continue
             except Exception as exc:
-                failures.append((label, f"download_failed:{exc}"))
+                logger.warning(
+                    "operator_upload_download_unexpected_error",
+                    extra={"error": _redact_token(str(exc))},
+                )
+                record = operator_file_repository.record_upload(
+                    chat_id=normalized.chat_id,
+                    username=normalized.username or "",
+                    source_message_id=normalized.source_message_id,
+                    attachment=attachment,
+                    is_confidential=intent.confidential,
+                    stored_binary_path=None,
+                    download_status="failed:unexpected",
+                    source_file_type=source_file_type,
+                    kb_ingest_status="skipped",
+                )
+                failures.append((label, "download_failed", record.short_id))
                 continue
+            record = operator_file_repository.record_upload(
+                chat_id=normalized.chat_id,
+                username=normalized.username or "",
+                source_message_id=normalized.source_message_id,
+                attachment=attachment,
+                is_confidential=intent.confidential,
+                stored_binary_path=str(downloaded.path),
+                download_status="ok",
+                source_file_type=source_file_type,
+                kb_ingest_status="pending",
+            )
             try:
                 result = await api_client.submit_operator_upload(
                     operator_username=normalized.username or "",
@@ -562,8 +670,22 @@ async def _process_operator_upload(
                     timeout_seconds=settings.operator_upload_api_timeout_seconds,
                 )
                 successes.append(result)
+                successes_meta.append((record.short_id, attachment.file_name))
+                operator_file_repository.update_kb_status(
+                    short_id=record.short_id,
+                    kb_ingest_status="ok",
+                    kb_inserted_chunks=int(result.get("inserted_chunks", 0) or 0),
+                )
             except Exception as exc:
-                failures.append((label, f"api_failed:{exc}"))
+                redacted = _redact_token(str(exc))
+                operator_file_repository.update_kb_status(
+                    short_id=record.short_id,
+                    kb_ingest_status=f"failed:{redacted}",
+                    kb_inserted_chunks=None,
+                )
+                failures.append(
+                    (label, f"api_failed:{redacted}", record.short_id)
+                )
 
     total_chunks = sum(int(item.get("inserted_chunks", 0) or 0) for item in successes)
     confidential_count = sum(
@@ -574,11 +696,51 @@ async def _process_operator_upload(
         f"✅ Добавлено в базу: {len(successes)} {_kb_attachment_count_word(len(successes))}, "
         f"{total_chunks} чанков, {confidential_count} помечен(о) confidential."
     ]
+    for short_id, name in successes_meta:
+        if short_id and name:
+            summary_lines.append(f"   • #{short_id} · {name}")
     if deduped:
         summary_lines.append(f"♻️ Из них уже было в базе: {deduped}.")
-    for name, reason in failures:
-        summary_lines.append(f"⚠️ Не удалось обработать {name}: {reason}")
+    for label, reason, short_id in failures:
+        friendly = _friendly_failure_reason(
+            reason, max_bytes=settings.operator_upload_max_bytes
+        )
+        suffix = f" (id: #{short_id})" if short_id else ""
+        summary_lines.append(
+            f"⚠️ Не удалось обработать {label}: {friendly}{suffix}"
+        )
     await _send_dm(normalized.chat_id, "\n".join(summary_lines))
+
+
+def _friendly_failure_reason(reason: str, *, max_bytes: int) -> str:
+    """Translate an internal failure reason to operator-facing Russian.
+
+    Falls back to the raw reason (token-redacted) for unknown categories so
+    diagnostic information is preserved without leaking the bot token.
+    """
+    if reason == "file_too_large":
+        mb = max_bytes // (1024 * 1024)
+        return (
+            f"файл больше {mb} МБ — Telegram Bot API не позволяет ботам "
+            f"скачивать такие файлы. Файл сохранён в библиотеке: можно "
+            f"переслать через /send."
+        )
+    if reason == "unsupported_attachment_type":
+        return "тип файла не поддерживается"
+    if reason == "telegram_network_error":
+        return "не удалось связаться с Telegram, попробуйте ещё раз"
+    if reason == "telegram_cdn_error":
+        return "Telegram CDN недоступен, попробуйте ещё раз"
+    if reason.startswith("telegram_get_file_failed"):
+        head, _, description = reason.partition(":")
+        if description:
+            return f"Telegram отклонил getFile: {description}"
+        return "Telegram отклонил getFile"
+    if reason.startswith("api_failed:"):
+        return reason
+    if reason == "download_failed":
+        return "не удалось скачать файл"
+    return _redact_token(reason)
 
 
 _KB_CANCEL_RE = re.compile(r"^\s*/kb_cancel\b", re.IGNORECASE)
@@ -651,6 +813,19 @@ async def _handle_kb_command(
             "attachment_count": "0",
         }
 
+    if n_attachments > 0 and normalized.media_group_id is not None:
+        _buffer_attachments_for_media_group(
+            normalized=normalized,
+            is_confidential=intent.confidential,
+            background_tasks=background_tasks,
+        )
+        return {
+            "status": "accepted",
+            "kb_mode": "media_group_buffered",
+            "attachment_count": str(n_attachments),
+            "media_group_id": normalized.media_group_id,
+        }
+
     if n_attachments == 0:
         ack = "Принял текст, добавляю в базу…"
     else:
@@ -701,15 +876,29 @@ async def _handle_kb_session_continuation(
         match_kind="literal",
     )
     n = len(normalized.attachments)
-    await _send_dm(
-        normalized.chat_id,
-        f"Принял {n} {_kb_attachment_count_word(n)}, обрабатываю…",
-    )
     kb_session_repository.upsert(
         chat_id=normalized.chat_id,
         username=normalized.username,
         is_confidential=session.is_confidential,
         ttl_seconds=settings.operator_kb_session_ttl_seconds,
+    )
+
+    if normalized.media_group_id is not None:
+        _buffer_attachments_for_media_group(
+            normalized=normalized,
+            is_confidential=session.is_confidential,
+            background_tasks=background_tasks,
+        )
+        return {
+            "status": "accepted",
+            "kb_mode": "media_group_buffered",
+            "attachment_count": str(n),
+            "media_group_id": normalized.media_group_id,
+        }
+
+    await _send_dm(
+        normalized.chat_id,
+        f"Принял {n} {_kb_attachment_count_word(n)}, обрабатываю…",
     )
     background_tasks.add_task(
         _process_operator_upload,
@@ -721,6 +910,285 @@ async def _handle_kb_session_continuation(
         "kb_mode": "session_continuation",
         "attachment_count": str(n),
     }
+
+
+def _buffer_attachments_for_media_group(
+    *,
+    normalized: NormalizedTelegramMessage,
+    is_confidential: bool,
+    background_tasks: BackgroundTasks,
+) -> None:
+    """Buffer every attachment under `media_group_id` and arm the flush.
+
+    Only the first call for a given group schedules the debounced flush; later
+    calls just append to the buffer. The flush itself drains the buffer and
+    runs `_process_operator_upload` once with all attachments — one ack and
+    one summary instead of N each.
+    """
+    assert normalized.media_group_id is not None
+    schedule_flush = False
+    for attachment in normalized.attachments:
+        first = media_group_buffer.add(
+            media_group_id=normalized.media_group_id,
+            chat_id=normalized.chat_id,
+            username=normalized.username or "",
+            update_id=normalized.update_id,
+            source_message_id=normalized.source_message_id,
+            attachment=attachment,
+            is_confidential=is_confidential,
+        )
+        if first:
+            schedule_flush = True
+    if schedule_flush:
+        background_tasks.add_task(
+            _flush_media_group_after_debounce,
+            media_group_id=normalized.media_group_id,
+            debounce_seconds=settings.operator_media_group_debounce_seconds,
+        )
+
+
+async def _flush_media_group_after_debounce(
+    *,
+    media_group_id: str,
+    debounce_seconds: float,
+) -> None:
+    """Wait for the media group to settle, then process its attachments.
+
+    `add` returns True only for the first attachment in a group, so this is
+    scheduled exactly once per group. The debounce gives Telegram time to
+    deliver every other update in the group before we drain.
+    """
+    if debounce_seconds > 0:
+        await asyncio.sleep(debounce_seconds)
+    try:
+        items = media_group_buffer.drain(media_group_id=media_group_id)
+        if not items:
+            return
+        first = items[0]
+        attachments = tuple(item.attachment for item in items)
+        synthesized = NormalizedTelegramMessage(
+            update_id=first.update_id,
+            source_message_id=first.source_message_id,
+            chat_id=first.chat_id,
+            user_id=0,
+            username=first.username,
+            text="",
+            reply_to_text=None,
+            caption=None,
+            media_group_id=media_group_id,
+            attachments=attachments,
+        )
+        intent = KbIntent(
+            confidential=any(item.is_confidential for item in items),
+            mode="freetext",
+            cleaned_text="",
+            match_kind="literal",
+        )
+        n = len(attachments)
+        await _send_dm(
+            first.chat_id,
+            f"Принял {n} {_kb_attachment_count_word(n)}, обрабатываю…",
+        )
+        await _process_operator_upload(normalized=synthesized, intent=intent)
+    except Exception as exc:  # broad: a flush failure must never crash the loop
+        logger.exception(
+            "media_group_flush_failed",
+            extra={
+                "media_group_id": media_group_id,
+                "error": _redact_token(str(exc)),
+            },
+        )
+
+
+_FILES_TRIGGER_RE = re.compile(r"^\s*/files(\b|$)", re.IGNORECASE)
+_SEND_TRIGGER_RE = re.compile(r"^\s*/send(\b|$)", re.IGNORECASE)
+
+
+async def _handle_operator_file_library_command(
+    *,
+    normalized: NormalizedTelegramMessage,
+) -> dict[str, str] | None:
+    """Dispatch `/files` and `/send` for the operator only.
+
+    Returns None when the message is not one of these commands or the sender
+    is not the configured operator (the normal routing continues).
+    """
+    if not normalized.username:
+        return None
+    if normalized.username != _effective_operator_username():
+        return None
+    text = normalized.text or ""
+    if _FILES_TRIGGER_RE.match(text):
+        return await _handle_files_command(normalized=normalized, text=text)
+    if _SEND_TRIGGER_RE.match(text):
+        return await _handle_send_command(normalized=normalized, text=text)
+    return None
+
+
+def _kb_kb_status_glyph(ingest_status: str) -> str:
+    if ingest_status == "ok":
+        return "✅"
+    if ingest_status == "skipped":
+        return "⏭️"
+    if ingest_status.startswith("failed"):
+        return "❌"
+    return "…"
+
+
+async def _handle_files_command(
+    *,
+    normalized: NormalizedTelegramMessage,
+    text: str,
+) -> dict[str, str]:
+    parts = text.split()
+    limit = settings.operator_files_list_default_limit
+    if len(parts) >= 2:
+        try:
+            limit = max(1, int(parts[1]))
+        except ValueError:
+            limit = settings.operator_files_list_default_limit
+    limit = min(limit, settings.operator_files_list_max_limit)
+    records = operator_file_repository.list_recent(
+        username=normalized.username or "", limit=limit
+    )
+    if not records:
+        await _send_dm(normalized.chat_id, "Пока нет сохранённых файлов.")
+        return {
+            "status": "accepted",
+            "route": "files_list",
+            "decision": "empty",
+        }
+    lines: list[str] = [
+        f"📂 Сохранённые файлы (последние {len(records)}):",
+    ]
+    for record in records:
+        lines.append(_format_record_line(record))
+    await _send_dm(normalized.chat_id, "\n".join(lines))
+    return {
+        "status": "accepted",
+        "route": "files_list",
+        "decision": "listed",
+        "count": str(len(records)),
+    }
+
+
+def _format_record_line(record: OperatorFileRecord) -> str:
+    name = record.source_file_name or record.telegram_file_id
+    size = (
+        f"{(record.file_size_bytes or 0) // 1024} KB"
+        if record.file_size_bytes is not None
+        else "—"
+    )
+    confidential = "🔒 " if record.is_confidential else ""
+    glyph = _kb_kb_status_glyph(record.kb_ingest_status)
+    when = record.created_at[:16].replace("T", " ")
+    return (
+        f"{confidential}{glyph} #{record.short_id} · {name} · {size} · "
+        f"{record.download_status}/{record.kb_ingest_status} · {when}"
+    )
+
+
+def _parse_send_target(token: str) -> int | str | None:
+    if token.startswith("@"):
+        return token
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
+_SEND_USAGE_TEXT = "Использование: /send <id> <@username|chat_id>"
+
+
+async def _handle_send_command(
+    *,
+    normalized: NormalizedTelegramMessage,
+    text: str,
+) -> dict[str, str]:
+    parts = text.split()
+    if len(parts) < 3:
+        await _send_dm(normalized.chat_id, _SEND_USAGE_TEXT)
+        return {
+            "status": "accepted",
+            "route": "file_send",
+            "decision": "bad_format",
+        }
+    short_id = parts[1].lstrip("#")
+    target = _parse_send_target(parts[2])
+    if target is None:
+        await _send_dm(normalized.chat_id, _SEND_USAGE_TEXT)
+        return {
+            "status": "accepted",
+            "route": "file_send",
+            "decision": "bad_target",
+        }
+    record = operator_file_repository.get(short_id=short_id)
+    if record is None:
+        await _send_dm(
+            normalized.chat_id,
+            f"Файл #{short_id} не найден.",
+        )
+        return {
+            "status": "accepted",
+            "route": "file_send",
+            "decision": "short_id_unknown",
+        }
+    try:
+        await telegram_file_sender.send_document_by_file_id(
+            chat_id=target, file_id=record.telegram_file_id
+        )
+    except TelegramFileSendError as exc:
+        if record.stored_binary_path:
+            local_path = Path(record.stored_binary_path)
+            try:
+                await telegram_file_sender.send_document_local(
+                    chat_id=target,
+                    path=local_path,
+                    file_name=record.source_file_name,
+                )
+            except TelegramFileSendError as fallback_exc:
+                await _send_dm(
+                    normalized.chat_id,
+                    _format_send_failure_dm(record, fallback_exc),
+                )
+                return {
+                    "status": "accepted",
+                    "route": "file_send",
+                    "decision": "send_failed",
+                }
+            await _send_dm(
+                normalized.chat_id,
+                f"Файл отправлен (локальная копия): #{record.short_id}",
+            )
+            return {
+                "status": "accepted",
+                "route": "file_send",
+                "decision": "sent_local",
+            }
+        await _send_dm(
+            normalized.chat_id, _format_send_failure_dm(record, exc)
+        )
+        return {
+            "status": "accepted",
+            "route": "file_send",
+            "decision": "send_failed",
+        }
+    await _send_dm(
+        normalized.chat_id, f"Файл отправлен: #{record.short_id}"
+    )
+    return {
+        "status": "accepted",
+        "route": "file_send",
+        "decision": "sent_by_id",
+    }
+
+
+def _format_send_failure_dm(
+    record: OperatorFileRecord, exc: TelegramFileSendError
+) -> str:
+    name = record.source_file_name or record.short_id
+    description = exc.description or "ошибка"
+    return f"Не удалось отправить #{record.short_id} ({name}): {description}"
 
 
 async def _handle_operator_reply(normalized: NormalizedTelegramMessage) -> dict[str, str]:
@@ -802,6 +1270,23 @@ async def _forward_inbound_safe(
         )
 
 
+def _log_routed(*, trace_id: str, result: dict, fallback: str) -> None:
+    route = result.get("route") or fallback
+    logger.info(
+        "telegram_update_routed",
+        extra={
+            "trace_id": trace_id,
+            "route": route,
+            "decision": (
+                result.get("decision")
+                or result.get("kb_mode")
+                or result.get("status")
+            ),
+            "media_group_id": result.get("media_group_id"),
+        },
+    )
+
+
 def _derive_trace_id(*, header_trace: str | None, update_id: object) -> str:
     """Deterministic trace_id for a Telegram update.
 
@@ -871,10 +1356,36 @@ async def _process_telegram_update(
         )
         return {"status": "ignored", "trace_id": trace_id}
 
+    logger.info(
+        "telegram_update_received",
+        extra={
+            "trace_id": trace_id,
+            "update_id": normalized.update_id,
+            "chat_id": normalized.chat_id,
+            "username": normalized.username,
+            "has_text": bool(normalized.text),
+            "caption_present": normalized.caption is not None,
+            "media_group_id": normalized.media_group_id,
+            "attachment_count": len(normalized.attachments),
+            "attachment_kinds": [a.kind for a in normalized.attachments],
+            "attachment_sizes": [a.file_size for a in normalized.attachments],
+        },
+    )
+
+    file_lib_result = await _handle_operator_file_library_command(
+        normalized=normalized
+    )
+    if file_lib_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(file_lib_result)
+        _log_routed(trace_id=trace_id, result=file_lib_result, fallback="file_library")
+        return response
+
     kb_result = await _handle_kb_command(normalized, background_tasks)
     if kb_result is not None:
         response = {"trace_id": trace_id}
         response.update(kb_result)
+        _log_routed(trace_id=trace_id, result=kb_result, fallback="kb_command")
         return response
 
     session_result = await _handle_kb_session_continuation(
@@ -884,6 +1395,9 @@ async def _process_telegram_update(
     if session_result is not None:
         response = {"trace_id": trace_id}
         response.update(session_result)
+        _log_routed(
+            trace_id=trace_id, result=session_result, fallback="kb_continuation"
+        )
         return response
 
     if normalized.text == "":

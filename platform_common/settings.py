@@ -68,6 +68,10 @@ class AppSettings(BaseSettings):
     operator_kb_intent_phrases_path: str = "data/russian_kb_intent_phrases.txt"
     operator_upload_api_timeout_seconds: int = 120
     operator_kb_session_ttl_seconds: int = 600
+    operator_media_group_debounce_seconds: float = 3.0
+    operator_files_db_path: str = ".data/semantaix_operator_files.db"
+    operator_files_list_default_limit: int = 10
+    operator_files_list_max_limit: int = 50
     faster_whisper_model_size: str = "base"
     faster_whisper_compute_type: str = "int8"
     faster_whisper_cache_dir: str = "/app/.cache/whisper"
