@@ -12,6 +12,7 @@ from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.bot_gateway.app.api_client import ApiClient
 from services.bot_gateway.app.kb_intent import KbIntent, detect_kb_intent
+from services.bot_gateway.app.kb_session import OperatorKbSessionRepository
 from services.bot_gateway.app.persistence import persist_normalized_message
 from services.bot_gateway.app.telegram_file_download import (
     TelegramFileDownloader,
@@ -28,6 +29,7 @@ app = create_service_app("bot_gateway")
 logger = logging.getLogger(__name__)
 settings = get_settings()
 hitl_ticket_repository = HitlTicketRepository(settings.hitl_ticket_db_path)
+kb_session_repository = OperatorKbSessionRepository(settings.hitl_ticket_db_path)
 api_client = ApiClient(base_url=settings.api_internal_base_url)
 telegram_bot_sender = TelegramBotSender(bot_token=settings.telegram_bot_token)
 
@@ -68,6 +70,10 @@ _HELP_TEXT = (
     "(не цитируется клиентам).\n"
     "• Свободный текст: «добавь в базу …», «сохрани в kb …», "
     "«запомни это для базы знаний …» — то же, что /kb_add.\n"
+    "• Multi-message: после фразы вроде «хочу добавить материалы в базу знаний» "
+    "можно дослать PDF/DOCX/TXT/PPTX отдельными сообщениями — "
+    "следующие 10 минут они будут попадать в KB автоматически.\n"
+    "• /kb_cancel — закрыть открытую KB-сессию досрочно.\n"
     "\n"
     "👤 Имя бота\n"
     "• /persona Имя — переименовать бота (фамилия не обязательна).\n"
@@ -575,6 +581,28 @@ async def _process_operator_upload(
     await _send_dm(normalized.chat_id, "\n".join(summary_lines))
 
 
+_KB_CANCEL_RE = re.compile(r"^\s*/kb_cancel\b", re.IGNORECASE)
+
+_KB_SESSION_WAIT_ACK = (
+    "Принял. Жду файлы — пришлите PDF/DOCX/TXT/PPTX следующими сообщениями "
+    "(в течение 10 минут). Отмена: /kb_cancel."
+)
+
+
+async def _handle_kb_cancel(
+    normalized: NormalizedTelegramMessage,
+) -> dict[str, str] | None:
+    # Caller (_handle_kb_command) already gates on operator username.
+    if not _KB_CANCEL_RE.match(normalized.text or ""):
+        return None
+    kb_session_repository.clear(
+        chat_id=normalized.chat_id,
+        username=normalized.username or "",
+    )
+    await _send_dm(normalized.chat_id, "Сессия закрыта.")
+    return {"status": "kb_session_cleared"}
+
+
 async def _handle_kb_command(
     normalized: NormalizedTelegramMessage,
     background_tasks: BackgroundTasks,
@@ -582,6 +610,11 @@ async def _handle_kb_command(
     operator_username = _effective_operator_username()
     if not normalized.username or normalized.username != operator_username:
         return None
+
+    cancel_result = await _handle_kb_cancel(normalized)
+    if cancel_result is not None:
+        return cancel_result
+
     intent = detect_kb_intent(
         text=normalized.text,
         caption=normalized.caption,
@@ -592,8 +625,31 @@ async def _handle_kb_command(
 
     n_attachments = len(normalized.attachments)
     inline_body = (intent.cleaned_text or "").strip()
-    if n_attachments == 0 and not inline_body:
-        return {"status": "ignored", "reason": "no_attachments_no_inline_text"}
+
+    # The lemma-fallback branch returns the candidate as-is (no trigger
+    # stripped), so its `cleaned_text` is the operator's META-request like
+    # "хочу добавить материалы в knowledge base" — NOT real knowledge.
+    # Treat it as a session-open signal, not as content to ingest. Only
+    # the literal-match path produces a `cleaned_text` we trust to contain
+    # real KB content (the trigger has been stripped out of the middle).
+    inline_is_real_content = (
+        intent.match_kind == "literal" and bool(inline_body)
+    )
+
+    kb_session_repository.upsert(
+        chat_id=normalized.chat_id,
+        username=normalized.username,
+        is_confidential=intent.confidential,
+        ttl_seconds=settings.operator_kb_session_ttl_seconds,
+    )
+
+    if n_attachments == 0 and not inline_is_real_content:
+        await _send_dm(normalized.chat_id, _KB_SESSION_WAIT_ACK)
+        return {
+            "status": "accepted",
+            "kb_mode": "session_opened",
+            "attachment_count": "0",
+        }
 
     if n_attachments == 0:
         ack = "Принял текст, добавляю в базу…"
@@ -608,6 +664,62 @@ async def _handle_kb_command(
         "status": "accepted",
         "kb_mode": intent.mode,
         "attachment_count": str(n_attachments),
+    }
+
+
+async def _handle_kb_session_continuation(
+    *,
+    normalized: NormalizedTelegramMessage,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str] | None:
+    """Route an attachment-only operator message into the open KB session.
+
+    Returns None when the message should fall through to the standard
+    flow (no attachments, non-operator, no active session, or the session
+    has expired). When a session is active we synthesize a KbIntent from
+    the stored confidential flag, ack the operator, refresh the TTL so
+    subsequent files in the same batch keep working, and schedule the
+    upload as a background task.
+    """
+    if not normalized.attachments:
+        return None
+    if not normalized.username:
+        return None
+    if normalized.username != _effective_operator_username():
+        return None
+    session = kb_session_repository.get_active(
+        chat_id=normalized.chat_id,
+        username=normalized.username,
+    )
+    if session is None:
+        return None
+
+    synthetic_intent = KbIntent(
+        confidential=session.is_confidential,
+        mode="freetext",
+        cleaned_text="",
+        match_kind="literal",
+    )
+    n = len(normalized.attachments)
+    await _send_dm(
+        normalized.chat_id,
+        f"Принял {n} {_kb_attachment_count_word(n)}, обрабатываю…",
+    )
+    kb_session_repository.upsert(
+        chat_id=normalized.chat_id,
+        username=normalized.username,
+        is_confidential=session.is_confidential,
+        ttl_seconds=settings.operator_kb_session_ttl_seconds,
+    )
+    background_tasks.add_task(
+        _process_operator_upload,
+        normalized=normalized,
+        intent=synthetic_intent,
+    )
+    return {
+        "status": "accepted",
+        "kb_mode": "session_continuation",
+        "attachment_count": str(n),
     }
 
 
@@ -763,6 +875,15 @@ async def _process_telegram_update(
     if kb_result is not None:
         response = {"trace_id": trace_id}
         response.update(kb_result)
+        return response
+
+    session_result = await _handle_kb_session_continuation(
+        normalized=normalized,
+        background_tasks=background_tasks,
+    )
+    if session_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(session_result)
         return response
 
     if normalized.text == "":

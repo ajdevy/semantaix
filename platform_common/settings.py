@@ -67,6 +67,7 @@ class AppSettings(BaseSettings):
     operator_upload_storage_dir: str = ".data/operator_uploads"
     operator_kb_intent_phrases_path: str = "data/russian_kb_intent_phrases.txt"
     operator_upload_api_timeout_seconds: int = 120
+    operator_kb_session_ttl_seconds: int = 600
     faster_whisper_model_size: str = "base"
     faster_whisper_compute_type: str = "int8"
     faster_whisper_cache_dir: str = "/app/.cache/whisper"

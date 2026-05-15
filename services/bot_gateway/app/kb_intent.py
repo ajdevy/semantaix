@@ -20,6 +20,18 @@ from typing import Literal, Protocol
 
 _SLASH_RE = re.compile(r"^\s*/kb_add(?:\s+(confidential))?\s*$", re.IGNORECASE)
 
+# Map common English KB synonyms to the Russian canonical form so the
+# existing imperative phrase list and pymorphy3 lemma fallback both keep
+# working when the operator writes "knowledge base" / "kb" mid-sentence.
+_KB_ENGLISH_SYNONYM_RE = re.compile(
+    r"\bknowledge[\s_\-]+base\b|\bkb\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_kb_synonyms(text: str) -> str:
+    return _KB_ENGLISH_SYNONYM_RE.sub("базу знаний", text)
+
 _CONFIDENTIAL_LITERALS: tuple[str, ...] = (
     "конфиденциально",
     "приватно",
@@ -43,6 +55,11 @@ class KbIntent:
     confidential: bool
     mode: Literal["slash", "freetext"]
     cleaned_text: str
+    # How the intent was identified. Downstream uses this to decide whether
+    # the free-text content is real knowledge (literal: the operator wrote
+    # actual KB content alongside a trigger phrase) or just a meta-request
+    # to open a KB session (lemma: the operator only declared intent).
+    match_kind: Literal["slash", "literal", "lemma"]
 
 
 @lru_cache(maxsize=1)
@@ -110,39 +127,48 @@ def detect_kb_intent(
         slash_match = _SLASH_RE.match(candidate.strip())
         if slash_match:
             confidential = slash_match.group(1) is not None
-            return KbIntent(confidential=confidential, mode="slash", cleaned_text="")
+            return KbIntent(
+                confidential=confidential,
+                mode="slash",
+                cleaned_text="",
+                match_kind="slash",
+            )
 
     phrases_file = phrases_path or _default_phrases_path()
     phrases = _load_phrases(phrases_file)
 
     for candidate in candidates:
-        lowered = candidate.lower()
+        normalized = _normalize_kb_synonyms(candidate)
+        lowered = normalized.lower()
         for phrase in phrases:
             if phrase in lowered:
                 cleaned = _strip_literal_trigger(candidate, phrase)
                 confidential = _detect_confidential(
                     lowered=lowered,
-                    lemmas=normalizer.lemmas(candidate),
+                    lemmas=normalizer.lemmas(normalized),
                 )
                 return KbIntent(
                     confidential=confidential,
                     mode="freetext",
                     cleaned_text=cleaned,
+                    match_kind="literal",
                 )
 
     for candidate in candidates:
-        lemmas = normalizer.lemmas(candidate)
+        normalized = _normalize_kb_synonyms(candidate)
+        lemmas = normalizer.lemmas(normalized)
         for phrase in phrases:
             phrase_lemmas = normalizer.lemmas(phrase)
             if _is_ordered_subsequence(phrase_lemmas, lemmas):
                 confidential = _detect_confidential(
-                    lowered=candidate.lower(),
+                    lowered=normalized.lower(),
                     lemmas=lemmas,
                 )
                 return KbIntent(
                     confidential=confidential,
                     mode="freetext",
                     cleaned_text=candidate.strip(),
+                    match_kind="lemma",
                 )
 
     return None
