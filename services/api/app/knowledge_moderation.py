@@ -31,6 +31,7 @@ _OPERATOR_UPLOAD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("stored_binary_path", "TEXT"),
     ("binary_sha256", "TEXT"),
     ("project_id", "INTEGER"),
+    ("operator_short_id", "TEXT"),
 )
 
 
@@ -89,13 +90,14 @@ class KnowledgeCandidateRow:
     stored_binary_path: str | None = None
     binary_sha256: str | None = None
     project_id: int | None = None
+    operator_short_id: str | None = None
 
 
 _SELECT_COLUMNS = (
     "id, candidate_text, published_text, status, created_at, updated_at, "
     "source_extraction_candidate_id, uploaded_by_operator_username, is_confidential, "
     "source_file_name, source_file_type, stored_binary_path, binary_sha256, "
-    "project_id"
+    "project_id, operator_short_id"
 )
 
 
@@ -141,6 +143,7 @@ class KnowledgeModerationRepository:
         source_file_type: str,
         stored_binary_path: str | None,
         binary_sha256: str | None,
+        operator_short_id: str | None = None,
     ) -> KnowledgeCandidateRow:
         init_schema(self.db_path)
         now = _now()
@@ -159,9 +162,10 @@ class KnowledgeModerationRepository:
                     source_file_name,
                     source_file_type,
                     stored_binary_path,
-                    binary_sha256
+                    binary_sha256,
+                    operator_short_id
                 )
-                VALUES (?, ?, 'approved', ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, 'approved', ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     candidate_text,
@@ -174,10 +178,30 @@ class KnowledgeModerationRepository:
                     source_file_type,
                     stored_binary_path,
                     binary_sha256,
+                    operator_short_id,
                 ),
             )
             row_id = int(cursor.lastrowid)
         return self.get(row_id)
+
+    def find_by_operator_short_id(
+        self, short_id: str
+    ) -> KnowledgeCandidateRow | None:
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            row = connection.execute(
+                f"""
+                SELECT {_SELECT_COLUMNS}
+                FROM knowledge_moderation_candidates
+                WHERE operator_short_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (short_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_candidate(row)
 
     def find_by_binary_sha256(self, sha256: str) -> KnowledgeCandidateRow | None:
         init_schema(self.db_path)
@@ -339,5 +363,10 @@ class KnowledgeModerationRepository:
             binary_sha256=str(row["binary_sha256"]) if row["binary_sha256"] else None,
             project_id=(
                 int(row["project_id"]) if row["project_id"] is not None else None
+            ),
+            operator_short_id=(
+                str(row["operator_short_id"])
+                if row["operator_short_id"] is not None
+                else None
             ),
         )
