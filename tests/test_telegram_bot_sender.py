@@ -43,6 +43,31 @@ class _CapturingClient:
 
 
 @pytest.mark.asyncio
+async def test_send_message_uses_custom_base_url(monkeypatch):
+    client = _CapturingClient()
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
+    sender = TelegramBotSender(
+        bot_token="abc", base_url="http://local-bot-api:8081"
+    )
+    await sender.send_message(chat_id=10, text="hi")
+    url = client.calls[0][0]
+    assert url == "http://local-bot-api:8081/botabc/sendMessage"
+
+
+@pytest.mark.asyncio
+async def test_identity_methods_use_custom_base_url(monkeypatch):
+    client = _CapturingClient()
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
+    sender = TelegramBotSender(
+        bot_token="abc", base_url="http://local-bot-api:8081"
+    )
+    await sender.set_my_name(name="X")
+    assert client.calls[0][0].startswith(
+        "http://local-bot-api:8081/botabc/setMyName"
+    )
+
+
+@pytest.mark.asyncio
 async def test_send_message_success(monkeypatch):
     captured: list[tuple[str, dict]] = []
 

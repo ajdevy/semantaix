@@ -189,6 +189,25 @@ async def test_send_document_by_file_id_non_json_response_categorised() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_document_uses_custom_base_url() -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    transport = httpx.MockTransport(handler)
+    sender = TelegramFileSender(
+        bot_token="TKN",
+        http_client_factory=_factory(transport),
+        base_url="http://local-bot-api:8081",
+    )
+    await sender.send_document_by_file_id(chat_id=1, file_id="fid")
+    assert any("local-bot-api:8081" in u for u in seen)
+    assert all("api.telegram.org" not in u for u in seen)
+
+
+@pytest.mark.asyncio
 async def test_send_document_local_network_error_categorised(tmp_path: Path) -> None:
     pdf = tmp_path / "x.pdf"
     pdf.write_bytes(b"x")

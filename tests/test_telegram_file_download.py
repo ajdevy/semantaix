@@ -362,6 +362,211 @@ async def test_get_file_html_response_categorised(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_base_url_threaded_into_request(tmp_path: Path):
+    """Custom base_url is used for both legs of the dance."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if request.url.path.endswith("/getFile"):
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {"file_path": "documents/x.pdf", "file_size": 4},
+                },
+            )
+        return httpx.Response(200, content=b"DATA")
+
+    transport = httpx.MockTransport(handler)
+    downloader = TelegramFileDownloader(
+        bot_token="TKN",
+        storage_dir=tmp_path,
+        max_bytes=1024,
+        http_client_factory=_make_factory(transport),
+        base_url="http://local-bot-api:8081",
+    )
+    result = await downloader.download(file_id="x", suggested_extension="pdf")
+    assert result.byte_size == 4
+    assert any("local-bot-api:8081" in u for u in seen)
+    assert all("api.telegram.org" not in u for u in seen)
+
+
+@pytest.mark.asyncio
+async def test_local_mode_reads_file_from_disk(tmp_path: Path):
+    """When the local Bot API server is in use, file_path is an absolute path
+    on a shared volume — we copy that file instead of making a CDN request."""
+    storage_root = tmp_path / "telegram-bot-api"
+    source = storage_root / "123/documents/file_42.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"%PDF-150MB-EXAMPLE")
+    cdn_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        cdn_calls.append(request.url.path)
+        if request.url.path.endswith("/getFile"):
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "file_path": str(source),
+                        "file_size": source.stat().st_size,
+                    },
+                },
+            )
+        return httpx.Response(500, text="cdn must not be called in local mode")
+
+    transport = httpx.MockTransport(handler)
+    target_dir = tmp_path / "uploads"
+    downloader = TelegramFileDownloader(
+        bot_token="TKN",
+        storage_dir=target_dir,
+        max_bytes=200 * 1024 * 1024,
+        http_client_factory=_make_factory(transport),
+        base_url="http://local-bot-api:8081",
+        local_mode=True,
+    )
+    result = await downloader.download(
+        file_id="x", suggested_extension="pdf", mime_type="application/pdf"
+    )
+    assert result.byte_size == source.stat().st_size
+    assert result.path.parent == target_dir
+    assert result.path.read_bytes() == source.read_bytes()
+    # CDN was not called — only getFile
+    assert all(p.endswith("/getFile") for p in cdn_calls)
+
+
+@pytest.mark.asyncio
+async def test_local_mode_oversize_reported_size_rejected(tmp_path: Path):
+    storage_root = tmp_path / "telegram-bot-api"
+    source = storage_root / "documents/big.bin"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"x" * 100)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {"file_path": str(source), "file_size": 10_000},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    downloader = TelegramFileDownloader(
+        bot_token="TKN",
+        storage_dir=tmp_path / "uploads",
+        max_bytes=1024,
+        http_client_factory=_make_factory(transport),
+        local_mode=True,
+    )
+    with pytest.raises(TelegramFileDownloadError) as exc:
+        await downloader.download(file_id="x", suggested_extension="bin")
+    assert exc.value.reason == "file_too_large"
+
+
+@pytest.mark.asyncio
+async def test_local_mode_oversize_actual_file_rejected(tmp_path: Path):
+    """getFile's reported size is within max_bytes, but the actual on-disk
+    file is larger — we still reject before exposing it."""
+    storage_root = tmp_path / "telegram-bot-api"
+    source = storage_root / "documents/sneaky.bin"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"x" * 4096)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {"file_path": str(source), "file_size": 10},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    downloader = TelegramFileDownloader(
+        bot_token="TKN",
+        storage_dir=tmp_path / "uploads",
+        max_bytes=1024,
+        http_client_factory=_make_factory(transport),
+        local_mode=True,
+    )
+    with pytest.raises(TelegramFileDownloadError) as exc:
+        await downloader.download(file_id="x", suggested_extension="bin")
+    assert exc.value.reason == "file_too_large"
+    assert exc.value.file_size == 4096
+
+
+@pytest.mark.asyncio
+async def test_local_mode_copy_oserror_categorised(tmp_path, monkeypatch):
+    """If shutil.copyfile fails mid-copy (volume unmounted, permission
+    revoked), surface a categorised error rather than a raw OSError."""
+    storage_root = tmp_path / "telegram-bot-api"
+    source = storage_root / "documents/x.pdf"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"PDF")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {"file_path": str(source), "file_size": 3},
+            },
+        )
+
+    import shutil
+
+    def boom(*args, **kwargs):
+        raise OSError("simulated I/O error")
+
+    monkeypatch.setattr(shutil, "copyfile", boom)
+    transport = httpx.MockTransport(handler)
+    downloader = TelegramFileDownloader(
+        bot_token="TKN",
+        storage_dir=tmp_path / "uploads",
+        max_bytes=1024,
+        http_client_factory=_make_factory(transport),
+        local_mode=True,
+    )
+    with pytest.raises(TelegramFileDownloadError) as exc:
+        await downloader.download(file_id="x", suggested_extension="pdf")
+    assert exc.value.reason == "local_file_missing"
+
+
+@pytest.mark.asyncio
+async def test_local_mode_missing_file_raises(tmp_path: Path):
+    """If the local Bot API server says the file exists but we cannot find
+    it on the shared volume, surface a categorised error rather than a raw
+    OSError."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {
+                    "file_path": "/nonexistent/path/x.pdf",
+                    "file_size": 10,
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    downloader = TelegramFileDownloader(
+        bot_token="TKN",
+        storage_dir=tmp_path / "uploads",
+        max_bytes=10_000,
+        http_client_factory=_make_factory(transport),
+        local_mode=True,
+    )
+    with pytest.raises(TelegramFileDownloadError) as exc:
+        await downloader.download(file_id="x", suggested_extension="pdf")
+    assert exc.value.reason == "local_file_missing"
+
+
+@pytest.mark.asyncio
 async def test_cdn_stream_httpx_error_categorised(tmp_path: Path):
     """A network-level error while streaming the CDN body classifies as
     telegram_cdn_error and cleans up the partial file."""

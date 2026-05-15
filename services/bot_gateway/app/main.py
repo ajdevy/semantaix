@@ -46,8 +46,14 @@ kb_session_repository = OperatorKbSessionRepository(settings.hitl_ticket_db_path
 operator_file_repository = OperatorFileRepository(settings.operator_files_db_path)
 media_group_buffer = MediaGroupBuffer(settings.hitl_ticket_db_path)
 api_client = ApiClient(base_url=settings.api_internal_base_url)
-telegram_bot_sender = TelegramBotSender(bot_token=settings.telegram_bot_token)
-telegram_file_sender = TelegramFileSender(bot_token=settings.telegram_bot_token)
+telegram_bot_sender = TelegramBotSender(
+    bot_token=settings.telegram_bot_token,
+    base_url=settings.telegram_bot_api_base_url,
+)
+telegram_file_sender = TelegramFileSender(
+    bot_token=settings.telegram_bot_token,
+    base_url=settings.telegram_bot_api_base_url,
+)
 
 _BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 
@@ -518,7 +524,8 @@ def _kb_extension_for(attachment: TelegramAttachment, source_file_type: str) -> 
 
 
 async def _send_dm(chat_id: int, text: str) -> None:
-    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    base_url = settings.telegram_bot_api_base_url.rstrip("/")
+    url = f"{base_url}/bot{settings.telegram_bot_token}/sendMessage"
     async with httpx.AsyncClient(timeout=15) as client:
         try:
             await client.post(url, json={"chat_id": chat_id, "text": text})
@@ -543,6 +550,8 @@ async def _process_operator_upload(
         bot_token=settings.telegram_bot_token,
         storage_dir=settings.operator_upload_storage_dir,
         max_bytes=settings.operator_upload_max_bytes,
+        base_url=settings.telegram_bot_api_base_url,
+        local_mode=settings.telegram_bot_api_local_mode,
     )
     successes: list[dict] = []
     successes_meta: list[tuple[str | None, str | None]] = []

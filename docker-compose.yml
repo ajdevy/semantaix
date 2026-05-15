@@ -1,4 +1,31 @@
 services:
+  # Self-hosted Telegram Bot API server.
+  # Lifts the `getFile` size cap from 20 MB (cloud) to 2 GB (local). When
+  # enabled, set TELEGRAM_BOT_API_BASE_URL=http://telegram_bot_api:8081 and
+  # TELEGRAM_BOT_API_LOCAL_MODE=true in .env. Disabled by default — comment
+  # out this block (and the depends_on / volume mount on api & bot_gateway)
+  # to fall back to api.telegram.org.
+  #
+  # Requires TELEGRAM_API_ID and TELEGRAM_API_HASH from https://my.telegram.org.
+  # One-time migration step BEFORE first start with the new server:
+  #   curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/logOut"
+  # See https://github.com/tdlib/telegram-bot-api for details.
+  telegram_bot_api:
+    image: aiogram/telegram-bot-api:latest
+    profiles: ["local-bot-api"]
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_LOCAL: 1
+      TELEGRAM_STAT: 1
+    volumes:
+      - telegram_bot_api_data:/var/lib/telegram-bot-api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/health || exit 0"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
   api:
     build:
       context: .
@@ -7,6 +34,7 @@ services:
     volumes:
       - operator_uploads:/app/.data/operator_uploads
       - whisper_cache:/app/.cache/whisper
+      - telegram_bot_api_data:/var/lib/telegram-bot-api
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live')"]
       interval: 15s
@@ -31,6 +59,7 @@ services:
     env_file: .env
     volumes:
       - operator_uploads:/app/.data/operator_uploads
+      - telegram_bot_api_data:/var/lib/telegram-bot-api
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health/live')"]
       interval: 15s
@@ -108,3 +137,4 @@ volumes:
   postgres_data:
   operator_uploads:
   whisper_cache:
+  telegram_bot_api_data:

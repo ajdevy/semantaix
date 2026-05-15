@@ -50,6 +50,7 @@ telegram_notifier = TelegramIncidentNotifier(
     bot_token=settings.telegram_bot_token,
     alert_chat_id=settings.telegram_alert_chat_id,
     alert_username=settings.telegram_alert_username,
+    base_url=settings.telegram_bot_api_base_url,
 )
 hitl_ticket_repository = HitlTicketRepository(settings.hitl_ticket_db_path)
 knowledge_candidate_repository = KnowledgeCandidateRepository(
@@ -58,7 +59,10 @@ knowledge_candidate_repository = KnowledgeCandidateRepository(
 )
 rag_repository = RagRepository(settings.rag_db_path)
 knowledge_moderation_repository = KnowledgeModerationRepository(settings.knowledge_db_path)
-telegram_bot_sender = TelegramBotSender(bot_token=settings.telegram_bot_token)
+telegram_bot_sender = TelegramBotSender(
+    bot_token=settings.telegram_bot_token,
+    base_url=settings.telegram_bot_api_base_url,
+)
 backup_repository = BackupRepository(
     db_path=settings.backup_db_path,
     archive_dir=settings.backup_archive_dir,
