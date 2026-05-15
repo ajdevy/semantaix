@@ -17,7 +17,17 @@ from services.api.app.admin_auth import (
     AdminSession,
     InvalidLoginCode,
 )
-from services.api.app.admin_nl_ops import AdminNlOpsRepository
+from services.api.app.admin_nl_ops import (
+    OP_FILE_ATTACH,
+    OP_OPERATOR_ATTACH,
+    OP_OPERATOR_DETACH,
+    OP_PROJECT_CREATE,
+    OP_PROJECT_RENAME,
+    AdminNlOpSession,
+    AdminNlOpsRepository,
+    InvalidConfirmToken,
+    SessionNotPending,
+)
 from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.answerers import AnswerContext, AnswerPipeline
 from services.api.app.answerers.datetime_answerer import DateTimeAnswerer
@@ -489,6 +499,169 @@ def reassign_candidate(
         project_id=request.project_id,
     )
     return {"candidate_id": candidate_id, "project_id": request.project_id}
+
+
+class AdminNlOpProposeRequest(BaseModel):
+    admin_username: str
+    utterance: str
+
+
+class AdminNlOpConfirmRequest(BaseModel):
+    confirm_token: str
+
+
+def _session_to_dict(session: AdminNlOpSession) -> dict[str, object]:
+    return {
+        "id": session.id,
+        "admin_username": session.admin_username,
+        "utterance": session.utterance,
+        "op_type": session.op_type,
+        "payload": session.payload,
+        "status": session.status,
+        "confirm_token": session.confirm_token,
+        "preview": session.preview,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+    }
+
+
+def _apply_admin_nl_op(session: AdminNlOpSession) -> None:
+    """Execute the side-effect for a confirmed admin NL op."""
+    payload = session.payload
+    if session.op_type == OP_PROJECT_CREATE:
+        try:
+            project_repository.create(
+                slug=str(payload["slug"]),
+                name=str(payload["name"]),
+            )
+        except ProjectSlugConflict as exc:
+            raise HTTPException(
+                status_code=409, detail="project_slug_conflict"
+            ) from exc
+        return
+    if session.op_type == OP_PROJECT_RENAME:
+        try:
+            project_repository.update(
+                slug=str(payload["slug"]), name=str(payload["name"])
+            )
+        except LookupError as exc:
+            raise HTTPException(
+                status_code=404, detail="project_not_found"
+            ) from exc
+        return
+    if session.op_type == OP_OPERATOR_ATTACH:
+        project = project_repository.get_by_slug(str(payload["project_slug"]))
+        if project is None:
+            raise HTTPException(
+                status_code=400, detail="project_not_found"
+            )
+        chat_id = payload.get("chat_id")
+        try:
+            operator_repository.create(
+                username=str(payload["username"]),
+                project_id=project.id,
+                chat_id=int(chat_id) if chat_id is not None else None,
+            )
+        except OperatorUsernameConflict as exc:
+            raise HTTPException(
+                status_code=409, detail="operator_username_conflict"
+            ) from exc
+        return
+    if session.op_type == OP_OPERATOR_DETACH:
+        try:
+            operator_repository.update(
+                username=str(payload["username"]), is_active=False
+            )
+        except LookupError as exc:
+            raise HTTPException(
+                status_code=404, detail="operator_not_found"
+            ) from exc
+        return
+    if session.op_type == OP_FILE_ATTACH:
+        project = project_repository.get_by_slug(str(payload["project_slug"]))
+        if project is None:
+            raise HTTPException(
+                status_code=400, detail="project_not_found"
+            )
+        candidate = knowledge_moderation_repository.find_by_operator_short_id(
+            str(payload["short_id"])
+        )
+        if candidate is None:
+            raise HTTPException(
+                status_code=404, detail="candidate_not_found"
+            )
+        knowledge_moderation_repository.set_project_id(
+            candidate_id=candidate.id, project_id=project.id
+        )
+        rag_repository.update_project_id_for_source(
+            source_id=f"knowledge_candidate:{candidate.id}",
+            project_id=project.id,
+        )
+        return
+    # OP_CLARIFY or unknown — nothing to apply (caller validates state).
+    raise HTTPException(status_code=400, detail="unconfirmable_op_type")
+
+
+@app.post("/admin/nl-ops")
+def admin_nl_ops_propose(
+    request: AdminNlOpProposeRequest,
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    _ensure_admin_username(request.admin_username)
+    session = admin_nl_ops_repository.propose(
+        admin_username=request.admin_username, utterance=request.utterance
+    )
+    return _session_to_dict(session)
+
+
+@app.post("/admin/nl-ops/{session_id}/confirm")
+def admin_nl_ops_confirm(
+    session_id: int,
+    request: AdminNlOpConfirmRequest,
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    try:
+        admin_nl_ops_repository.get(session_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
+    try:
+        confirmed = admin_nl_ops_repository.confirm(
+            session_id=session_id, confirm_token=request.confirm_token
+        )
+    except InvalidConfirmToken as exc:
+        raise HTTPException(status_code=401, detail="invalid_confirm_token") from exc
+    except SessionNotPending as exc:
+        raise HTTPException(status_code=409, detail=f"session_status:{exc}") from exc
+    _apply_admin_nl_op(confirmed)
+    return _session_to_dict(confirmed)
+
+
+@app.post("/admin/nl-ops/{session_id}/cancel")
+def admin_nl_ops_cancel(
+    session_id: int,
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    try:
+        cancelled = admin_nl_ops_repository.cancel(session_id=session_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
+    except SessionNotPending as exc:
+        raise HTTPException(status_code=409, detail=f"session_status:{exc}") from exc
+    return _session_to_dict(cancelled)
+
+
+@app.get("/admin/nl-ops/latest-pending")
+def admin_nl_ops_latest_pending(
+    admin_username: str,
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    """Returns the most recent pending session for an admin, or {found: false}."""
+    session = admin_nl_ops_repository.latest_pending_for(admin_username)
+    if session is None:
+        return {"found": False}
+    payload = _session_to_dict(session)
+    payload["found"] = True
+    return payload
 
 
 class InboundMessageRequest(BaseModel):

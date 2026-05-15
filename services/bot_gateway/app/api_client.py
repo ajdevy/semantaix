@@ -121,6 +121,40 @@ class ApiClient:
             auth=True,
         )
 
+    async def admin_nl_ops_propose(
+        self, *, admin_username: str, utterance: str
+    ) -> dict:
+        return await self._post(
+            "/admin/nl-ops",
+            {"admin_username": admin_username, "utterance": utterance},
+            auth=True,
+        )
+
+    async def admin_nl_ops_confirm(
+        self, *, session_id: int, confirm_token: str
+    ) -> dict:
+        return await self._post(
+            f"/admin/nl-ops/{session_id}/confirm",
+            {"confirm_token": confirm_token},
+            auth=True,
+        )
+
+    async def admin_nl_ops_cancel(self, *, session_id: int) -> dict:
+        return await self._post(
+            f"/admin/nl-ops/{session_id}/cancel",
+            {},
+            auth=True,
+        )
+
+    async def admin_nl_ops_latest_pending(
+        self, *, admin_username: str
+    ) -> dict:
+        # Use _get with a query string.
+        return await self._get(
+            f"/admin/nl-ops/latest-pending?admin_username={admin_username}",
+            auth=True,
+        )
+
     async def set_persona(
         self,
         *,

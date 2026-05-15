@@ -62,3 +62,25 @@ def test_webhook_routes_admin_project_command(wired_bot):
     body = response.json()
     assert body["route"] == "projects_list"
     assert "trace_id" in body
+
+
+def test_webhook_routes_admin_nl_dialog(wired_bot, monkeypatch):
+    propose = AsyncMock(
+        return_value={
+            "id": 7,
+            "status": "pending_confirmation",
+            "confirm_token": "tok",
+            "preview": "Создать проект…",
+            "op_type": "project_create",
+        }
+    )
+    monkeypatch.setattr(bot_main.api_client, "admin_nl_ops_propose", propose)
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_admin_message("создай проект billing Биллинг команда"),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["route"] == "admin_nl_propose"
+    assert body["session_id"] == "7"
