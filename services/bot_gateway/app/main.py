@@ -54,6 +54,35 @@ _PERSONA_TRIGGER_RE = re.compile(
     re.IGNORECASE,
 )
 
+_HELP_TRIGGER_RE = re.compile(r"^\s*/help\b", re.IGNORECASE)
+
+_HELP_TEXT = (
+    "🤖 Команды оператора:\n"
+    "\n"
+    "📚 База знаний\n"
+    "• /kb_add — добавить вложение или текст в базу знаний "
+    "(прикрепите файл или ответьте текстом).\n"
+    "• /kb_add confidential — то же, но пометить как конфиденциально "
+    "(не цитируется клиентам).\n"
+    "• Свободный текст: «добавь в базу …», «сохрани в kb …», "
+    "«запомни это для базы знаний …» — то же, что /kb_add.\n"
+    "\n"
+    "👤 Имя бота (админ)\n"
+    "• /persona Имя Фамилия — переименовать бота.\n"
+    "• /persona — открыть диалог переименования.\n"
+    "\n"
+    "⚙️ Маршрутизация HITL (админ)\n"
+    "• /hitl_config @username chat_id — назначить оператора "
+    "и чат для алертов.\n"
+    "\n"
+    "💬 Ответ клиенту\n"
+    "• Просто ответьте на сообщение бота, в котором указан "
+    "«HITL ticket #N» — реплика уйдёт клиенту и закроет тикет. "
+    "Если у вас один открытый тикет, ответ можно отправить и без цитирования.\n"
+    "\n"
+    "ℹ️ /help — показать эту справку."
+)
+
 
 def _effective_operator_username() -> str:
     return (
@@ -199,6 +228,18 @@ async def _handle_persona_command(
 
     await _safe_send_text(chat_id=normalized.chat_id, text=_PERSONA_PROMPT)
     return {"status": "persona_prompt_sent"}
+
+
+async def _handle_help_command(
+    *, normalized: NormalizedTelegramMessage
+) -> dict[str, str] | None:
+    if not _HELP_TRIGGER_RE.match(normalized.text or ""):
+        return None
+    operator_username = _effective_operator_username()
+    if not normalized.username or normalized.username != operator_username:
+        return None
+    await _send_dm(normalized.chat_id, _HELP_TEXT)
+    return {"status": "help_sent"}
 
 
 def _extract_ticket_id(reply_to_text: str | None) -> int | None:
@@ -497,6 +538,12 @@ async def telegram_webhook(
     if persona_result is not None:
         response = {"trace_id": trace_id}
         response.update(persona_result)
+        return response
+
+    help_result = await _handle_help_command(normalized=normalized)
+    if help_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(help_result)
         return response
 
     logger.info(
