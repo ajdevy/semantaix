@@ -2,27 +2,37 @@
 
 Every extractor returns the raw text content of the source file. Empty
 output (no usable text) raises `ExtractionError("empty_text")`. All
-extractors run on CPU with zero external API calls — PDF, DOCX, PPTX and
-TXT use pure-Python libraries; images use the local `tesseract` binary
-through `pytesseract` (Russian + English language packs installed at
-container build time); audio/video use `faster-whisper` locally with an
-upper duration cap.
+extractors run on CPU with zero external API calls — PDF, DOCX, PPTX,
+XLSX, CSV, HTML, Markdown, RTF, EPUB and TXT use pure-Python libraries;
+images use the local `tesseract` binary through `pytesseract` (Russian +
+English language packs installed at container build time); audio/video
+use `faster-whisper` locally with an upper duration cap. ZIP archives
+are walked one level deep and each supported member is dispatched back
+through this module.
 """
 
 from __future__ import annotations
 
 import asyncio
+import csv as csv_module
 import hashlib
+import io
+import re
 import subprocess
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Protocol
 
 import pypdf
 import pytesseract
+from bs4 import BeautifulSoup
 from docx import Document
+from ebooklib import ITEM_DOCUMENT, epub
+from openpyxl import load_workbook
 from PIL import Image
 from pptx import Presentation
+from striprtf.striprtf import rtf_to_text
 
 from platform_common.settings import get_settings
 from services.api.app.russian_text import get_russian_normalizer
@@ -89,6 +99,150 @@ def extract_image(path: Path) -> str:
         return pytesseract.image_to_string(image, lang="rus+eng")
 
 
+def extract_xlsx(path: Path) -> str:
+    workbook = load_workbook(filename=str(path), read_only=True, data_only=True)
+    parts: list[str] = []
+    try:
+        for sheet_name in workbook.sheetnames:
+            sheet = workbook[sheet_name]
+            parts.append(f"# Sheet: {sheet_name}")
+            for row in sheet.iter_rows(values_only=True):
+                cells = [str(cell) for cell in row if cell is not None and str(cell).strip()]
+                if cells:
+                    parts.append("\t".join(cells))
+    finally:
+        workbook.close()
+    return "\n".join(parts)
+
+
+def extract_csv(path: Path) -> str:
+    raw = path.read_bytes().decode("utf-8", errors="replace")
+    if not raw.strip():
+        return ""
+    sample = raw[:4096]
+    try:
+        dialect = csv_module.Sniffer().sniff(sample, delimiters=",;\t|")
+    except csv_module.Error:
+        dialect = csv_module.excel
+    reader = csv_module.reader(io.StringIO(raw), dialect)
+    parts: list[str] = []
+    for row in reader:
+        cells = [cell.strip() for cell in row if cell and cell.strip()]
+        if cells:
+            parts.append(" | ".join(cells))
+    return "\n".join(parts)
+
+
+def _html_to_text(source: str | bytes) -> str:
+    """Strip script/style/template/noscript subtrees and return visible text."""
+    soup = BeautifulSoup(source, "html.parser")
+    for tag in soup(["script", "style", "noscript", "template"]):
+        tag.decompose()
+    return soup.get_text(separator="\n", strip=True)
+
+
+def extract_html(path: Path) -> str:
+    return _html_to_text(path.read_bytes())
+
+
+_MD_FENCE_RE = re.compile(r"^```.*$", re.MULTILINE)
+_MD_PREFIX_RE = re.compile(r"^\s*(?:#{1,6}\s+|>+\s*|[-*+]\s+)", re.MULTILINE)
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_MD_EMPHASIS_RE = re.compile(r"(\*\*|__|\*|_)(.+?)\1")
+_MD_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+
+
+def extract_md(path: Path) -> str:
+    raw = path.read_bytes().decode("utf-8", errors="replace")
+    text = _MD_FENCE_RE.sub("", raw)
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _MD_EMPHASIS_RE.sub(r"\2", text)
+    text = _MD_INLINE_CODE_RE.sub(r"\1", text)
+    text = _MD_PREFIX_RE.sub("", text)
+    lines = [line.strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def extract_rtf(path: Path) -> str:
+    raw = path.read_bytes().decode("utf-8", errors="replace")
+    return rtf_to_text(raw, errors="ignore")
+
+
+def extract_epub(path: Path) -> str:
+    book = epub.read_epub(str(path))
+    parts: list[str] = []
+    for item in book.get_items_of_type(ITEM_DOCUMENT):
+        text = _html_to_text(item.get_content())
+        if text.strip():
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+_ZIP_MAX_MEMBERS = 100
+_ZIP_MAX_TOTAL_UNCOMPRESSED = 50 * 1024 * 1024
+_ZIP_MEMBER_EXTENSIONS: dict[str, str] = {
+    ".pdf": "pdf",
+    ".docx": "docx",
+    ".pptx": "pptx",
+    ".txt": "txt",
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".gif": "image",
+    ".bmp": "image",
+    ".webp": "image",
+    ".tiff": "image",
+    ".xlsx": "xlsx",
+    ".csv": "csv",
+    ".html": "html",
+    ".htm": "html",
+    ".md": "md",
+    ".markdown": "md",
+    ".rtf": "rtf",
+    ".epub": "epub",
+}
+
+
+def extract_zip(path: Path) -> str:
+    try:
+        archive = zipfile.ZipFile(str(path))
+    except zipfile.BadZipFile as exc:
+        raise ExtractionError("zip_corrupt") from exc
+    with archive:
+        if archive.testzip() is not None:
+            raise ExtractionError("zip_corrupt")
+        members = [info for info in archive.infolist() if not info.is_dir()]
+        if len(members) > _ZIP_MAX_MEMBERS:
+            raise ExtractionError("zip_too_many_members")
+        total = sum(info.file_size for info in members)
+        if total > _ZIP_MAX_TOTAL_UNCOMPRESSED:
+            raise ExtractionError("zip_too_large")
+        max_member_bytes = get_settings().operator_upload_max_bytes
+        parts: list[str] = []
+        for info in members:
+            member_name = info.filename
+            suffix = Path(member_name).suffix.lower()
+            if suffix == ".zip":
+                raise ExtractionError("nested_zip_not_supported")
+            extractor_key = _ZIP_MEMBER_EXTENSIONS.get(suffix)
+            if extractor_key is None:
+                continue
+            if info.file_size > max_member_bytes:
+                continue
+            extractor = EXTRACTORS[extractor_key]
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                target = Path(tmp_dir) / f"member{suffix}"
+                with archive.open(info) as src, target.open("wb") as dst:
+                    dst.write(src.read())
+                try:
+                    text = extractor(target)
+                except ExtractionError:
+                    continue
+            if text and text.strip():
+                parts.append(f"--- {member_name} ---\n{text}")
+    return "\n\n".join(parts)
+
+
 def soft_wrap(text: str, *, max_chars: int = 200) -> str:
     """Sentence-segment text and wrap lines softly at `max_chars`.
 
@@ -127,6 +281,13 @@ EXTRACTORS: dict[str, callable] = {
     "pptx": extract_pptx,
     "txt": extract_txt,
     "image": extract_image,
+    "xlsx": extract_xlsx,
+    "csv": extract_csv,
+    "html": extract_html,
+    "md": extract_md,
+    "rtf": extract_rtf,
+    "epub": extract_epub,
+    "zip": extract_zip,
 }
 
 
