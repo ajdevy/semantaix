@@ -181,7 +181,7 @@ class OperatorUploadRequest(BaseModel):
 
 class BotPersonaRequest(BaseModel):
     first_name: str
-    last_name: str
+    last_name: str = ""
     description: str | None = None
     short_description: str | None = None
     updated_by: str
@@ -794,7 +794,12 @@ async def update_bot_persona(request: BotPersonaRequest) -> dict[str, object]:
         raise HTTPException(status_code=403, detail="not_authorized")
 
     first_name = _validate_persona_name(request.first_name)
-    last_name = _validate_persona_name(request.last_name)
+    # Last name is optional: callers can rename the bot to a single given name
+    # ("Анна") without inventing a surname. Empty / whitespace-only values are
+    # accepted and stored as an empty string; a present non-empty value is
+    # validated by the same regex as the first name.
+    last_name_raw = request.last_name.strip() if request.last_name else ""
+    last_name = _validate_persona_name(last_name_raw) if last_name_raw else ""
 
     description: str | None = None
     if request.description is not None:
@@ -833,7 +838,7 @@ async def update_bot_persona(request: BotPersonaRequest) -> dict[str, object]:
             updated_by=request.updated_by,
         )
 
-    full_name = f"{first_name} {last_name}"
+    full_name = f"{first_name} {last_name}".strip()
     telegram_results: dict[str, object] = {}
     telegram_results["set_my_name"] = await _safe_telegram_identity_call(
         method=telegram_bot_sender.set_my_name, name=full_name
@@ -898,7 +903,7 @@ async def sync_telegram_identity_on_startup() -> None:
     )
     await _safe_telegram_identity_call(
         method=telegram_bot_sender.set_my_name,
-        name=f"{first_name} {last_name}",
+        name=f"{first_name} {last_name}".strip(),
     )
     await _safe_telegram_identity_call(
         method=telegram_bot_sender.set_my_description, description=description

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
@@ -14,9 +15,11 @@ from services.bot_gateway.app.main import (
 )
 from services.bot_gateway.app.main import app as bot_app
 
+_BOT_GATEWAY_LOGGER = "services.bot_gateway.app.main"
+
 _PERSONA_PROMPT_FIXTURE = (
-    "📝 Как нас будут звать? Ответьте на это сообщение в формате: "
-    "«Имя Фамилия»"
+    "📝 Как нас будут звать? Ответьте на это сообщение в формате «Имя» "
+    "или «Имя Фамилия»."
 )
 
 
@@ -138,8 +141,12 @@ def test_persona_reply_to_prompt_applies_new_persona(monkeypatch):
     )
 
 
-def test_persona_reply_with_malformed_answer_reprompts(monkeypatch):
-    set_persona = AsyncMock()
+def test_persona_reply_with_only_first_name_applies(monkeypatch):
+    """Reply to the full prompt with a single token applies that as the first
+    name with an empty surname — the surname is optional."""
+    set_persona = AsyncMock(
+        return_value={"first_name": "ТолькоИмя", "last_name": ""}
+    )
     monkeypatch.setattr(api_client, "set_persona", set_persona)
     send = AsyncMock(return_value=42)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send)
@@ -152,15 +159,20 @@ def test_persona_reply_with_malformed_answer_reprompts(monkeypatch):
             reply_to_text=_PERSONA_PROMPT_FIXTURE,
         ),
     )
-    assert response.json()["status"] == "persona_invalid_reply"
-    set_persona.assert_not_awaited()
+    assert response.json()["status"] == "persona_updated"
+    set_persona.assert_awaited_once_with(
+        first_name="ТолькоИмя", last_name="", updated_by="@ajdevy"
+    )
     send.assert_awaited_once()
-    assert "Не разобрал" in send.await_args.kwargs["text"]
+    # Confirmation has no trailing space when last_name is empty.
+    assert send.await_args.kwargs["text"] == "Готово, теперь меня зовут ТолькоИмя."
 
 
-def test_persona_caller_other_than_effective_operator_is_ignored(monkeypatch):
-    """A non-operator user trying to rename the bot is silently ignored
-    (the gateway should not engage in dialog with random customers)."""
+def test_persona_caller_other_than_effective_operator_replies_with_diagnostic(monkeypatch):
+    """A non-operator user trying to rename the bot is rejected with a visible
+    reply that names both the configured operator and the sender's username,
+    so they can self-diagnose username/operator mismatches without spelunking
+    through container logs (the original 'ничего не происходит' bug)."""
     set_persona = AsyncMock()
     monkeypatch.setattr(api_client, "set_persona", set_persona)
     send = AsyncMock(return_value=42)
@@ -174,7 +186,11 @@ def test_persona_caller_other_than_effective_operator_is_ignored(monkeypatch):
     assert response.json()["status"] == "ignored"
     assert response.json()["reason"] == "unauthorized_persona"
     set_persona.assert_not_awaited()
-    send.assert_not_awaited()
+    send.assert_awaited_once()
+    sent_text = send.await_args.kwargs["text"]
+    assert "Сменить имя бота может только" in sent_text
+    assert "@ajdevy" in sent_text  # configured operator
+    assert "@random_user" in sent_text  # sender as the bot saw them
 
 
 def test_persona_runtime_configured_operator_can_rename(monkeypatch):
@@ -206,8 +222,8 @@ def test_persona_runtime_configured_operator_can_rename(monkeypatch):
 
 def test_persona_default_admin_is_no_longer_special_when_operator_overridden(monkeypatch):
     """If the runtime operator is @support_b, then @ajdevy is just an ex-operator —
-    persona commands from @ajdevy must be ignored. This guards against the
-    inverse regression of leaving an admin backdoor."""
+    persona commands from @ajdevy must be rejected. The diagnostic reply names
+    @support_b as the configured operator so the ex-admin can see the override."""
     hitl_ticket_repository.set_runtime_config(
         key="hitl_primary_operator_username",
         value="@support_b",
@@ -225,9 +241,13 @@ def test_persona_default_admin_is_no_longer_special_when_operator_overridden(mon
     )
     assert response.json()["reason"] == "unauthorized_persona"
     set_persona.assert_not_awaited()
+    send.assert_awaited_once()
+    sent_text = send.await_args.kwargs["text"]
+    assert "@support_b" in sent_text
+    assert "@ajdevy" in sent_text
 
 
-def test_persona_reply_from_non_operator_is_ignored(monkeypatch):
+def test_persona_reply_from_non_operator_is_rejected_with_diagnostic(monkeypatch):
     set_persona = AsyncMock()
     monkeypatch.setattr(api_client, "set_persona", set_persona)
     send = AsyncMock(return_value=42)
@@ -244,6 +264,8 @@ def test_persona_reply_from_non_operator_is_ignored(monkeypatch):
     )
     assert response.json()["reason"] == "unauthorized_persona"
     set_persona.assert_not_awaited()
+    send.assert_awaited_once()
+    assert "@random_user" in send.await_args.kwargs["text"]
 
 
 def test_persona_api_failure_reports_status_to_operator(monkeypatch):
@@ -265,10 +287,10 @@ def test_persona_api_failure_reports_status_to_operator(monkeypatch):
     assert "не получилось" in send.await_args.kwargs["text"].lower()
 
 
-def test_persona_slash_with_only_first_name_asks_for_surname(monkeypatch):
-    """/persona Анна → ask only for the surname, embedding the captured first
-    name in the prompt text so the Telegram reply can recover it."""
-    set_persona = AsyncMock()
+def test_persona_slash_with_only_first_name_applies_immediately(monkeypatch):
+    """/persona Анна → apply with empty surname; the surname is optional, so
+    no follow-up dialog and no second user-visible message."""
+    set_persona = AsyncMock(return_value={"first_name": "Анна", "last_name": ""})
     monkeypatch.setattr(api_client, "set_persona", set_persona)
     send = AsyncMock(return_value=42)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send)
@@ -279,13 +301,14 @@ def test_persona_slash_with_only_first_name_asks_for_surname(monkeypatch):
         json=_operator_payload(text="/persona Анна"),
     )
     body = response.json()
-    assert body["status"] == "persona_partial_first_name"
+    assert body["status"] == "persona_updated"
     assert body["first_name"] == "Анна"
-    set_persona.assert_not_awaited()
+    assert body["last_name"] == ""
+    set_persona.assert_awaited_once_with(
+        first_name="Анна", last_name="", updated_by="@ajdevy"
+    )
     send.assert_awaited_once()
-    sent_text = send.await_args.kwargs["text"]
-    assert sent_text.startswith("📝 Поняла, имя —")
-    assert "«Анна»" in sent_text
+    assert send.await_args.kwargs["text"] == "Готово, теперь меня зовут Анна."
 
 
 def test_persona_send_swallows_missing_bot_token(monkeypatch):
@@ -359,10 +382,11 @@ def test_persona_natural_trigger_with_first_and_last_applies_oneshot(monkeypatch
     assert "Анна Иванова" in send.await_args.kwargs["text"]
 
 
-def test_persona_natural_trigger_with_only_first_asks_for_surname(monkeypatch):
-    """`смени имя на Анна` (no surname) → partial prompt that asks only for the
-    surname, with the captured first name encoded in the prompt text."""
-    set_persona = AsyncMock()
+def test_persona_natural_trigger_with_only_first_applies_immediately(monkeypatch):
+    """`смени имя на Анна` → apply with empty surname; one Telegram reply
+    only, never the partial-dialog prompt that previously fired twice when the
+    operator sent the trigger more than once."""
+    set_persona = AsyncMock(return_value={"first_name": "Анна", "last_name": ""})
     monkeypatch.setattr(api_client, "set_persona", set_persona)
     send = AsyncMock(return_value=42)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send)
@@ -373,14 +397,14 @@ def test_persona_natural_trigger_with_only_first_asks_for_surname(monkeypatch):
         json=_operator_payload(text="смени имя на Анна"),
     )
     body = response.json()
-    assert body["status"] == "persona_partial_first_name"
+    assert body["status"] == "persona_updated"
     assert body["first_name"] == "Анна"
-    set_persona.assert_not_awaited()
+    assert body["last_name"] == ""
+    set_persona.assert_awaited_once_with(
+        first_name="Анна", last_name="", updated_by="@ajdevy"
+    )
     send.assert_awaited_once()
-    sent_text = send.await_args.kwargs["text"]
-    assert sent_text.startswith("📝 Поняла, имя —")
-    assert "«Анна»" in sent_text
-    assert "фамилию" in sent_text.lower()
+    assert send.await_args.kwargs["text"] == "Готово, теперь меня зовут Анна."
 
 
 def test_persona_natural_trigger_without_preposition_applies_oneshot(monkeypatch):
@@ -441,99 +465,273 @@ def test_persona_natural_trigger_extra_tokens_use_first_two(monkeypatch):
     )
 
 
-# --- Partial reply (surname-only) -------------------------------------------
+# --- Observability: structured logs at every persona-handler outcome --------
 
 
-def test_persona_partial_reply_completes_one_shot(monkeypatch):
-    """Operator answered the partial prompt with the surname only → apply."""
-    set_persona = AsyncMock(
-        return_value={"first_name": "Анна", "last_name": "Иванова"}
+def test_persona_unauthorized_logs_warning(monkeypatch, caplog):
+    monkeypatch.setattr(api_client, "set_persona", AsyncMock())
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=42))
+    caplog.set_level(logging.WARNING, logger=_BOT_GATEWAY_LOGGER)
+
+    client = TestClient(bot_app)
+    client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="/persona Анна Иванова", username="random_user"),
     )
-    monkeypatch.setattr(api_client, "set_persona", set_persona)
+
+    records = [r for r in caplog.records if r.message == "persona_unauthorized"]
+    assert len(records) == 1, [r.message for r in caplog.records]
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert record.username == "@random_user"
+    assert record.expected_operator == "@ajdevy"
+
+
+def test_persona_natural_oneshot_with_only_first_logs(monkeypatch, caplog):
+    """`переименуй в Анна` (single token after the trigger) now applies in one
+    shot — and emits the same `persona_natural_oneshot` event as the two-token
+    case, with `last_name` empty."""
+    monkeypatch.setattr(
+        api_client,
+        "set_persona",
+        AsyncMock(return_value={"first_name": "Анна", "last_name": ""}),
+    )
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=42))
+    caplog.set_level(logging.INFO, logger=_BOT_GATEWAY_LOGGER)
+
+    client = TestClient(bot_app)
+    client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="переименуй в Анна"),
+    )
+
+    records = [r for r in caplog.records if r.message == "persona_natural_oneshot"]
+    assert len(records) == 1
+    assert records[0].first_name == "Анна"
+    assert records[0].last_name == ""
+    assert records[0].trigger == "переименуй"
+    assert records[0].token_count == 1
+
+
+def test_persona_slash_oneshot_with_only_first_logs(monkeypatch, caplog):
+    monkeypatch.setattr(
+        api_client,
+        "set_persona",
+        AsyncMock(return_value={"first_name": "Анна", "last_name": ""}),
+    )
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=42))
+    caplog.set_level(logging.INFO, logger=_BOT_GATEWAY_LOGGER)
+
+    client = TestClient(bot_app)
+    client.post("/telegram/webhook", json=_operator_payload(text="/persona Анна"))
+
+    records = [r for r in caplog.records if r.message == "persona_slash_oneshot"]
+    assert len(records) == 1
+    assert records[0].first_name == "Анна"
+    assert records[0].last_name == ""
+    assert records[0].token_count == 1
+
+
+def test_persona_slash_full_prompt_logs(monkeypatch, caplog):
+    monkeypatch.setattr(api_client, "set_persona", AsyncMock())
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=42))
+    caplog.set_level(logging.INFO, logger=_BOT_GATEWAY_LOGGER)
+
+    client = TestClient(bot_app)
+    client.post("/telegram/webhook", json=_operator_payload(text="/persona"))
+
+    assert any(r.message == "persona_slash_full_prompt_sent" for r in caplog.records)
+
+
+def test_persona_natural_full_prompt_logs_trigger(monkeypatch, caplog):
+    monkeypatch.setattr(api_client, "set_persona", AsyncMock())
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=42))
+    caplog.set_level(logging.INFO, logger=_BOT_GATEWAY_LOGGER)
+
+    client = TestClient(bot_app)
+    client.post("/telegram/webhook", json=_operator_payload(text="смени имя"))
+
+    records = [r for r in caplog.records if r.message == "persona_natural_full_prompt_sent"]
+    assert len(records) == 1
+    assert records[0].trigger == "смени имя"
+
+
+def test_persona_slash_oneshot_logs(monkeypatch, caplog):
+    monkeypatch.setattr(
+        api_client,
+        "set_persona",
+        AsyncMock(return_value={"first_name": "Анна", "last_name": "Иванова"}),
+    )
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=42))
+    caplog.set_level(logging.INFO, logger=_BOT_GATEWAY_LOGGER)
+
+    client = TestClient(bot_app)
+    client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="/persona Анна Иванова"),
+    )
+
+    assert any(r.message == "persona_slash_oneshot" for r in caplog.records)
+    assert any(r.message == "persona_updated" for r in caplog.records)
+
+
+def test_persona_natural_oneshot_logs_trigger(monkeypatch, caplog):
+    monkeypatch.setattr(
+        api_client,
+        "set_persona",
+        AsyncMock(return_value={"first_name": "Анна", "last_name": "Иванова"}),
+    )
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=42))
+    caplog.set_level(logging.INFO, logger=_BOT_GATEWAY_LOGGER)
+
+    client = TestClient(bot_app)
+    client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="смени имя на Анна Иванова"),
+    )
+
+    records = [r for r in caplog.records if r.message == "persona_natural_oneshot"]
+    assert len(records) == 1
+    assert records[0].trigger == "смени имя"
+
+
+def test_persona_full_reply_accepted_logs(monkeypatch, caplog):
+    monkeypatch.setattr(
+        api_client,
+        "set_persona",
+        AsyncMock(return_value={"first_name": "Иван", "last_name": "Сидоров"}),
+    )
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=42))
+    caplog.set_level(logging.INFO, logger=_BOT_GATEWAY_LOGGER)
+
+    client = TestClient(bot_app)
+    client.post(
+        "/telegram/webhook",
+        json=_operator_payload(
+            text="Иван Сидоров",
+            reply_to_text=_PERSONA_PROMPT_FIXTURE,
+        ),
+    )
+
+    assert any(r.message == "persona_full_reply_accepted" for r in caplog.records)
+
+
+def test_persona_full_reply_with_two_tokens_logs(monkeypatch, caplog):
+    """Reply to the full prompt with two tokens applies and logs the count."""
+    monkeypatch.setattr(
+        api_client,
+        "set_persona",
+        AsyncMock(return_value={"first_name": "Иван", "last_name": "Сидоров"}),
+    )
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=42))
+    caplog.set_level(logging.INFO, logger=_BOT_GATEWAY_LOGGER)
+
+    client = TestClient(bot_app)
+    client.post(
+        "/telegram/webhook",
+        json=_operator_payload(
+            text="Иван Сидоров",
+            reply_to_text=_PERSONA_PROMPT_FIXTURE,
+        ),
+    )
+
+    records = [r for r in caplog.records if r.message == "persona_full_reply_accepted"]
+    assert len(records) == 1
+    assert records[0].first_name == "Иван"
+    assert records[0].last_name == "Сидоров"
+    assert records[0].token_count == 2
+
+
+def test_persona_update_failed_logs_remain(monkeypatch, caplog):
+    """The pre-existing `persona_update_failed` warning must still fire — these
+    new logs are additive, not replacements."""
+    monkeypatch.setattr(
+        api_client, "set_persona", AsyncMock(side_effect=RuntimeError("api down"))
+    )
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=42))
+    caplog.set_level(logging.WARNING, logger=_BOT_GATEWAY_LOGGER)
+
+    client = TestClient(bot_app)
+    client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="/persona Анна Иванова"),
+    )
+
+    assert any(r.message == "persona_update_failed" for r in caplog.records)
+
+
+# --- /whoami diagnostic ------------------------------------------------------
+
+
+def test_whoami_replies_with_match_when_sender_is_operator(monkeypatch):
     send = AsyncMock(return_value=42)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send)
 
     client = TestClient(bot_app)
     response = client.post(
         "/telegram/webhook",
-        json=_operator_payload(
-            text="Иванова",
-            reply_to_text=(
-                "📝 Поняла, имя — «Анна». Напишите фамилию в ответ на это сообщение."
-            ),
-        ),
-    )
-    assert response.json()["status"] == "persona_updated"
-    set_persona.assert_awaited_once_with(
-        first_name="Анна", last_name="Иванова", updated_by="@ajdevy"
+        json=_operator_payload(text="/whoami"),
     )
 
-
-def test_persona_partial_reply_with_multiword_surname_is_reprompted(monkeypatch):
-    """If the operator answers with two tokens to the partial prompt, ask again —
-    don't guess which one is the surname."""
-    set_persona = AsyncMock()
-    monkeypatch.setattr(api_client, "set_persona", set_persona)
-    send = AsyncMock(return_value=42)
-    monkeypatch.setattr(telegram_bot_sender, "send_message", send)
-
-    client = TestClient(bot_app)
-    response = client.post(
-        "/telegram/webhook",
-        json=_operator_payload(
-            text="Иванова Петрова",
-            reply_to_text=(
-                "📝 Поняла, имя — «Анна». Напишите фамилию в ответ на это сообщение."
-            ),
-        ),
-    )
-    assert response.json()["status"] == "persona_invalid_partial_reply"
-    set_persona.assert_not_awaited()
+    assert response.json()["status"] == "whoami_sent"
     send.assert_awaited_once()
-    reprompt = send.await_args.kwargs["text"]
-    assert reprompt.startswith("📝 Поняла, имя —")
-    assert "«Анна»" in reprompt
+    sent_text = send.await_args.kwargs["text"]
+    assert "@ajdevy" in sent_text  # username
+    assert "✅" in sent_text  # match marker
+    assert "1" in sent_text  # chat_id from _operator_payload (chat.id == 1)
 
 
-def test_persona_partial_reply_with_empty_surname_is_reprompted(monkeypatch):
-    set_persona = AsyncMock()
-    monkeypatch.setattr(api_client, "set_persona", set_persona)
+def test_whoami_replies_with_mismatch_when_sender_is_not_operator(monkeypatch):
     send = AsyncMock(return_value=42)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send)
 
     client = TestClient(bot_app)
     response = client.post(
         "/telegram/webhook",
-        json=_operator_payload(
-            text="   ",
-            reply_to_text=(
-                "📝 Поняла, имя — «Анна». Напишите фамилию в ответ на это сообщение."
-            ),
-        ),
+        json=_operator_payload(text="/whoami", username="random_user"),
     )
-    # Whitespace-only text gets stripped to "" by normalize_update before the
-    # webhook reaches the persona handler — treated as attachment-only and
-    # ignored upstream.
-    assert response.json()["status"] == "ignored"
-    set_persona.assert_not_awaited()
+
+    assert response.json()["status"] == "whoami_sent"
+    send.assert_awaited_once()
+    sent_text = send.await_args.kwargs["text"]
+    assert "@random_user" in sent_text
+    assert "@ajdevy" in sent_text  # configured operator
+    assert "❌" in sent_text
 
 
-def test_persona_partial_reply_from_non_operator_is_ignored(monkeypatch):
-    set_persona = AsyncMock()
-    monkeypatch.setattr(api_client, "set_persona", set_persona)
+def test_whoami_handles_missing_username(monkeypatch):
     send = AsyncMock(return_value=42)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send)
+
+    payload = _operator_payload(text="/whoami")
+    payload["message"]["from"].pop("username")
+
+    client = TestClient(bot_app)
+    response = client.post("/telegram/webhook", json=payload)
+
+    assert response.json()["status"] == "whoami_sent"
+    send.assert_awaited_once()
+    sent_text = send.await_args.kwargs["text"]
+    assert "(без username)" in sent_text
+    assert "❌" in sent_text
+
+
+def test_whoami_does_not_intercept_other_text(monkeypatch):
+    """Make sure /whoami trigger only matches the slash command itself, not
+    arbitrary text mentioning 'whoami'."""
+    send = AsyncMock(return_value=42)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send)
+    monkeypatch.setattr(
+        api_client,
+        "forward_inbound",
+        AsyncMock(return_value={"status": "ok"}),
+    )
 
     client = TestClient(bot_app)
     response = client.post(
         "/telegram/webhook",
-        json=_operator_payload(
-            text="Иванова",
-            reply_to_text=(
-                "📝 Поняла, имя — «Анна». Напишите фамилию в ответ на это сообщение."
-            ),
-            username="random_user",
-        ),
+        json=_operator_payload(text="how do i whoami", username="random_user"),
     )
-    assert response.json()["reason"] == "unauthorized_persona"
-    set_persona.assert_not_awaited()
+
+    body = response.json()
+    assert body.get("status") != "whoami_sent"
