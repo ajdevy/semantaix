@@ -154,6 +154,54 @@ def test_schema_initialised_on_construction(tmp_path: Path) -> None:
     assert "operator_media_group_buffer" in names
 
 
+def test_latest_received_at_returns_max_across_adds(tmp_path: Path) -> None:
+    buf = _make_buffer(tmp_path)
+    buf.add(
+        media_group_id="MG1",
+        chat_id=10,
+        username="@op",
+        update_id=1,
+        source_message_id=1,
+        attachment=_attachment("a"),
+        is_confidential=False,
+    )
+    first_latest = buf.latest_received_at(media_group_id="MG1")
+    assert first_latest is not None
+
+    buf.add(
+        media_group_id="MG1",
+        chat_id=10,
+        username="@op",
+        update_id=2,
+        source_message_id=2,
+        attachment=_attachment("b"),
+        is_confidential=False,
+    )
+    second_latest = buf.latest_received_at(media_group_id="MG1")
+    assert second_latest is not None
+    assert second_latest >= first_latest
+
+
+def test_latest_received_at_none_for_unknown_group(tmp_path: Path) -> None:
+    buf = _make_buffer(tmp_path)
+    assert buf.latest_received_at(media_group_id="NOPE") is None
+
+
+def test_latest_received_at_none_after_drain(tmp_path: Path) -> None:
+    buf = _make_buffer(tmp_path)
+    buf.add(
+        media_group_id="MG1",
+        chat_id=10,
+        username="@op",
+        update_id=1,
+        source_message_id=1,
+        attachment=_attachment("a"),
+        is_confidential=False,
+    )
+    buf.drain(media_group_id="MG1")
+    assert buf.latest_received_at(media_group_id="MG1") is None
+
+
 @pytest.mark.asyncio
 async def test_concurrent_add_only_one_returns_true(tmp_path: Path) -> None:
     import asyncio

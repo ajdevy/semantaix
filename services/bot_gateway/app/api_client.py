@@ -141,6 +141,45 @@ class ApiClient:
             payload["short_description"] = short_description
         return await self._post("/hitl/runtime-config/persona", payload)
 
+    async def fetch_file_inspect(
+        self,
+        *,
+        short_id: str,
+        requester_username: str,
+        internal_token: str,
+    ) -> dict | None:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.get(
+                f"{self._base_url}/admin/files/{short_id}",
+                params={"as_user": requester_username},
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    async def search_files(
+        self,
+        *,
+        query: str,
+        requester_username: str,
+        internal_token: str,
+        limit: int = 10,
+    ) -> dict:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.get(
+                f"{self._base_url}/admin/files/search",
+                params={
+                    "q": query,
+                    "as_user": requester_username,
+                    "limit": limit,
+                },
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        response.raise_for_status()
+        return response.json()
+
     async def _post(
         self,
         path: str,
