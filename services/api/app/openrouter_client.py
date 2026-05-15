@@ -9,7 +9,7 @@ from platform_common.settings import get_settings
 from services.api.app.rag import RagChunk
 
 _GROUNDING_SYSTEM_PROMPT_TEMPLATE = (
-    "Ты — {first_name} {last_name}, сотрудник поддержки, отвечающий клиенту "
+    "Ты — {name}, сотрудник поддержки, отвечающий клиенту "
     "от первого лица. Никогда не пиши, что ты бот, ассистент, AI, ИИ, "
     "нейросеть или языковая модель. Если спросят, отвечай как обычный "
     "человек на работе. Отвечай на том же языке, что и вопрос пользователя; "
@@ -44,9 +44,8 @@ def _format_snippets(snippets: list[RagChunk]) -> str:
 def _build_grounding_system_prompt(
     *, first_name: str, last_name: str, today_iso: str
 ) -> str:
-    return _GROUNDING_SYSTEM_PROMPT_TEMPLATE.format(
-        first_name=first_name, last_name=last_name, today_iso=today_iso
-    )
+    name = f"{first_name} {last_name}".strip()
+    return _GROUNDING_SYSTEM_PROMPT_TEMPLATE.format(name=name, today_iso=today_iso)
 
 
 class OpenRouterClient:

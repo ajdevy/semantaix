@@ -33,22 +33,15 @@ telegram_bot_sender = TelegramBotSender(bot_token=settings.telegram_bot_token)
 
 _TICKET_REF = re.compile(r"HITL\s+ticket\s+#(\d+)", re.IGNORECASE)
 
-# Persona dialog: marker prefix on the prompt + same prefix on the parse-fail
-# nudge so the operator's reply to either lands in the dialog branch.
+# Persona dialog: when the operator types `/persona` with no arguments we send
+# the prompt below; their reply becomes the new persona. The marker prefix is
+# what `_handle_persona_command` matches on `reply_to_text` to know it's our
+# own prompt and not just any operator message.
 _PERSONA_MARKER = "📝 Как нас будут звать?"
 _PERSONA_PROMPT = (
-    "📝 Как нас будут звать? Ответьте на это сообщение в формате: "
-    "«Имя Фамилия»"
+    "📝 Как нас будут звать? Ответьте на это сообщение в формате «Имя» "
+    "или «Имя Фамилия»."
 )
-_PERSONA_REPROMPT = (
-    "📝 Как нас будут звать? Не разобрал — пришлите Имя и Фамилию "
-    "через пробел, например: Анна Иванова"
-)
-# Partial dialog: when only a first name is given, we ask for the surname and
-# encode the captured first name in the prompt text itself. The reply chain
-# is the only state carrier, just like _PERSONA_MARKER for the full dialog.
-_PERSONA_PARTIAL_MARKER = "📝 Поняла, имя —"
-_PERSONA_PARTIAL_FIRST_RE = re.compile(r"^📝 Поняла, имя — «([^»]+)»")
 _PERSONA_TRIGGER_RE = re.compile(
     r"^/persona(\b|$)"
     r"|^переименуй\b"
@@ -62,21 +55,8 @@ _PERSONA_TRIGGER_RE = re.compile(
 # precede the actual name — strip it before tokenising.
 _PERSONA_PREPOSITION_RE = re.compile(r"^\s*(?:на|в)\s+", re.IGNORECASE)
 
-
-def _persona_partial_prompt(first_name: str) -> str:
-    return (
-        f"📝 Поняла, имя — «{first_name}». "
-        "Напишите фамилию в ответ на это сообщение."
-    )
-
-
-def _persona_partial_reprompt(first_name: str) -> str:
-    return (
-        f"📝 Поняла, имя — «{first_name}». "
-        "Не разобрала — напишите только фамилию, одним словом."
-    )
-
 _HELP_TRIGGER_RE = re.compile(r"^\s*/help\b", re.IGNORECASE)
+_WHOAMI_TRIGGER_RE = re.compile(r"^\s*/whoami\b", re.IGNORECASE)
 
 _HELP_TEXT = (
     "🤖 Команды оператора:\n"
@@ -90,9 +70,10 @@ _HELP_TEXT = (
     "«запомни это для базы знаний …» — то же, что /kb_add.\n"
     "\n"
     "👤 Имя бота\n"
-    "• /persona Имя Фамилия — переименовать бота.\n"
-    "• /persona Имя — спросит только фамилию.\n"
-    "• /persona или «смени имя на …» — переименовать одной фразой.\n"
+    "• /persona Имя — переименовать бота (фамилия не обязательна).\n"
+    "• /persona Имя Фамилия — переименовать бота с фамилией.\n"
+    "• «смени имя на Анна» / «переименуй в Анна» — то же одной фразой.\n"
+    "• /persona без аргументов — задать имя через диалог.\n"
     "\n"
     "⚙️ Маршрутизация HITL (админ)\n"
     "• /hitl_config @username chat_id — назначить оператора "
@@ -102,6 +83,9 @@ _HELP_TEXT = (
     "• Просто ответьте на сообщение бота, в котором указан "
     "«HITL ticket #N» — реплика уйдёт клиенту и закроет тикет. "
     "Если у вас один открытый тикет, ответ можно отправить и без цитирования.\n"
+    "\n"
+    "🩺 Диагностика\n"
+    "• /whoami — показать @username отправителя, назначенного оператора и chat_id.\n"
     "\n"
     "ℹ️ /help — показать эту справку."
 )
@@ -159,19 +143,26 @@ def _handle_admin_hitl_command(*, username: str | None, text: str) -> dict[str, 
     }
 
 
-async def _safe_send_text(*, chat_id: int, text: str) -> None:
+async def _safe_send_text(*, chat_id: int, text: str, purpose: str = "unspecified") -> None:
     """Send a Telegram reply to the operator; swallow missing-token errors.
 
     The bot_gateway needs to talk back to operators for the persona dialog,
     but unit tests run without a real bot token. We log + drop instead of
     failing the webhook (Telegram would retry it).
+
+    `purpose` tags the call site (e.g. "persona_partial_prompt") so a failed
+    outbound surfaces in logs as exactly which user-visible message was lost,
+    not just "something failed somewhere". The original silent-failure bug was
+    invisible because every persona-related send went through this one helper
+    with no caller distinction.
     """
     try:
         await telegram_bot_sender.send_message(chat_id=chat_id, text=text)
     except Exception as exc:  # broad: best-effort outbound message
         logger.warning(
             "bot_gateway_outbound_failed",
-            extra={"chat_id": chat_id, "error": str(exc)},
+            extra={"chat_id": chat_id, "purpose": purpose, "error": str(exc)},
+            exc_info=True,
         )
 
 
@@ -192,20 +183,29 @@ async def _apply_persona(
         await _safe_send_text(
             chat_id=chat_id,
             text="Не получилось обновить имя — попробуйте чуть позже.",
+            purpose="persona_apply_fail_notice",
         )
         return {"status": "persona_update_failed"}
+    applied_first = str(result.get("first_name", first_name))
+    applied_last = str(result.get("last_name", last_name))
+    full_name = f"{applied_first} {applied_last}".strip()
     await _safe_send_text(
         chat_id=chat_id,
-        text=(
-            f"Готово, теперь меня зовут "
-            f"{result.get('first_name', first_name)} "
-            f"{result.get('last_name', last_name)}."
-        ),
+        text=f"Готово, теперь меня зовут {full_name}.",
+        purpose="persona_apply_ok_confirmation",
+    )
+    logger.info(
+        "persona_updated",
+        extra={
+            "username": username,
+            "first_name": applied_first,
+            "last_name": applied_last,
+        },
     )
     return {
         "status": "persona_updated",
-        "first_name": str(result.get("first_name", first_name)),
-        "last_name": str(result.get("last_name", last_name)),
+        "first_name": applied_first,
+        "last_name": applied_last,
     }
 
 
@@ -215,100 +215,122 @@ async def _handle_persona_command(
     username = normalized.username
     text = normalized.text
     reply_to = normalized.reply_to_text
-    is_persona_partial_reply = (
-        reply_to is not None and reply_to.startswith(_PERSONA_PARTIAL_MARKER)
-    )
-    # Full prompt and partial prompt both start with the 📝 emoji, but their
-    # full prefixes are disjoint, so startswith checks unambiguously route.
-    is_persona_reply = (
-        reply_to is not None
-        and reply_to.startswith(_PERSONA_MARKER)
-        and not is_persona_partial_reply
-    )
+    is_persona_reply = reply_to is not None and reply_to.startswith(_PERSONA_MARKER)
     trigger_match = _PERSONA_TRIGGER_RE.match(text)
 
-    if not is_persona_reply and not is_persona_partial_reply and trigger_match is None:
+    if not is_persona_reply and trigger_match is None:
         return None
 
-    if username != _effective_operator_username():
+    expected_operator = _effective_operator_username()
+    if username != expected_operator:
+        # Visible self-diagnosing reply: the original silent "ignored" response
+        # was the source of the "ничего не происходит" bug — the operator had
+        # no way to tell whether the bot disagreed about who they were.
+        await _safe_send_text(
+            chat_id=normalized.chat_id,
+            text=(
+                "⚠️ Сменить имя бота может только назначенный оператор. "
+                f"Сейчас оператор — {expected_operator}. "
+                f"Ваш аккаунт — {username or '(без username)'}. "
+                "Попросите администратора назначить вас через /hitl_config."
+            ),
+            purpose="persona_unauthorized_notice",
+        )
+        logger.warning(
+            "persona_unauthorized",
+            extra={"username": username, "expected_operator": expected_operator},
+        )
         return {"status": "ignored", "reason": "unauthorized_persona"}
 
-    if is_persona_partial_reply:
-        first_match = _PERSONA_PARTIAL_FIRST_RE.match(reply_to or "")
-        if first_match is None:  # pragma: no cover - marker matched, regex must too
-            await _safe_send_text(chat_id=normalized.chat_id, text=_PERSONA_REPROMPT)
-            return {"status": "persona_invalid_partial_reply"}
-        first_name = first_match.group(1)
-        surname_tokens = text.split()
-        if len(surname_tokens) != 1:
-            await _safe_send_text(
-                chat_id=normalized.chat_id,
-                text=_persona_partial_reprompt(first_name),
-            )
-            return {"status": "persona_invalid_partial_reply"}
+    if is_persona_reply:
+        # Reply to the full prompt: take up to 2 tokens. Single-token replies
+        # apply with an empty surname (the surname is optional). 0 tokens is
+        # already filtered upstream as `attachment_only`.
+        parts = text.split()
+        first_name = parts[0]
+        last_name = parts[1] if len(parts) >= 2 else ""
+        logger.info(
+            "persona_full_reply_accepted",
+            extra={
+                "username": username,
+                "first_name": first_name,
+                "last_name": last_name,
+                "token_count": len(parts),
+            },
+        )
         return await _apply_persona(
             chat_id=normalized.chat_id,
             username=username,
             first_name=first_name,
-            last_name=surname_tokens[0],
-        )
-
-    if is_persona_reply:
-        parts = text.split()
-        if len(parts) != 2:
-            await _safe_send_text(chat_id=normalized.chat_id, text=_PERSONA_REPROMPT)
-            return {"status": "persona_invalid_reply"}
-        return await _apply_persona(
-            chat_id=normalized.chat_id,
-            username=username,
-            first_name=parts[0],
-            last_name=parts[1],
+            last_name=last_name,
         )
 
     # Slash command takes its name tokens directly (no preposition stripping).
     if text.lower().startswith("/persona"):
         parts = text.split()
-        if len(parts) >= 3:
+        if len(parts) >= 2:
+            first_name = parts[1]
+            last_name = parts[2] if len(parts) >= 3 else ""
+            logger.info(
+                "persona_slash_oneshot",
+                extra={
+                    "username": username,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "token_count": len(parts) - 1,
+                },
+            )
             return await _apply_persona(
                 chat_id=normalized.chat_id,
                 username=username,
-                first_name=parts[1],
-                last_name=parts[2],
+                first_name=first_name,
+                last_name=last_name,
             )
-        if len(parts) == 2:
-            await _safe_send_text(
-                chat_id=normalized.chat_id,
-                text=_persona_partial_prompt(parts[1]),
-            )
-            return {"status": "persona_partial_first_name", "first_name": parts[1]}
-        await _safe_send_text(chat_id=normalized.chat_id, text=_PERSONA_PROMPT)
+        await _safe_send_text(
+            chat_id=normalized.chat_id,
+            text=_PERSONA_PROMPT,
+            purpose="persona_slash_full_prompt",
+        )
+        logger.info("persona_slash_full_prompt_sent", extra={"username": username})
         return {"status": "persona_prompt_sent"}
 
     # Natural-language trigger ("смени имя …", "переименуй …", "новое имя …").
     # Extract the tail after the matched trigger; strip an optional Russian
     # preposition («на» / «в»); take up to two tokens as first/last name.
     assert trigger_match is not None  # narrowed by the early-return above
+    matched_trigger = trigger_match.group(0).strip().lower()
     tail = text[trigger_match.end():]
     tail = _PERSONA_PREPOSITION_RE.sub("", tail, count=1)
     name_tokens = tail.split()
-    if len(name_tokens) >= 2:
+    if name_tokens:
+        first_name = name_tokens[0]
+        last_name = name_tokens[1] if len(name_tokens) >= 2 else ""
+        logger.info(
+            "persona_natural_oneshot",
+            extra={
+                "username": username,
+                "first_name": first_name,
+                "last_name": last_name,
+                "trigger": matched_trigger,
+                "token_count": len(name_tokens),
+            },
+        )
         return await _apply_persona(
             chat_id=normalized.chat_id,
             username=username,
-            first_name=name_tokens[0],
-            last_name=name_tokens[1],
+            first_name=first_name,
+            last_name=last_name,
         )
-    if len(name_tokens) == 1:
-        await _safe_send_text(
-            chat_id=normalized.chat_id,
-            text=_persona_partial_prompt(name_tokens[0]),
-        )
-        return {
-            "status": "persona_partial_first_name",
-            "first_name": name_tokens[0],
-        }
 
-    await _safe_send_text(chat_id=normalized.chat_id, text=_PERSONA_PROMPT)
+    await _safe_send_text(
+        chat_id=normalized.chat_id,
+        text=_PERSONA_PROMPT,
+        purpose="persona_natural_full_prompt",
+    )
+    logger.info(
+        "persona_natural_full_prompt_sent",
+        extra={"username": username, "trigger": matched_trigger},
+    )
     return {"status": "persona_prompt_sent"}
 
 
@@ -322,6 +344,39 @@ async def _handle_help_command(
         return None
     await _send_dm(normalized.chat_id, _HELP_TEXT)
     return {"status": "help_sent"}
+
+
+async def _handle_whoami_command(
+    *, normalized: NormalizedTelegramMessage
+) -> dict[str, str] | None:
+    """Diagnostic: tell any sender what @username the bot sees and which
+    operator it's configured to recognise. Intentionally open to all senders
+    so that someone hitting a silent "unauthorized" can self-diagnose without
+    server logs."""
+    if not _WHOAMI_TRIGGER_RE.match(normalized.text or ""):
+        return None
+    expected = _effective_operator_username()
+    sender = normalized.username or "(без username)"
+    match_line = "✅ совпадает" if normalized.username == expected else "❌ не совпадает"
+    text = (
+        f"🪪 username: {sender}\n"
+        f"🛡️ оператор: {expected}\n"
+        f"📨 chat_id: {normalized.chat_id}\n"
+        f"{match_line}"
+    )
+    await _safe_send_text(
+        chat_id=normalized.chat_id, text=text, purpose="whoami_diagnostic"
+    )
+    logger.info(
+        "whoami_sent",
+        extra={
+            "username": normalized.username,
+            "expected_operator": expected,
+            "chat_id": normalized.chat_id,
+            "match": normalized.username == expected,
+        },
+    )
+    return {"status": "whoami_sent"}
 
 
 def _extract_ticket_id(reply_to_text: str | None) -> int | None:
@@ -724,6 +779,12 @@ async def _process_telegram_update(
     if admin_command_result is not None:
         response = {"trace_id": trace_id}
         response.update(admin_command_result)
+        return response
+
+    whoami_result = await _handle_whoami_command(normalized=normalized)
+    if whoami_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(whoami_result)
         return response
 
     persona_result = await _handle_persona_command(normalized=normalized)

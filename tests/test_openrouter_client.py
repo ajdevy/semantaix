@@ -113,6 +113,26 @@ async def test_answer_grounded_injects_persona_name_into_system_prompt(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_answer_grounded_strips_persona_when_last_name_is_empty(monkeypatch):
+    """Last name is optional — the system prompt must render `Ты — Анна,` (no
+    trailing space before the comma) so it reads naturally to the LLM."""
+    http_client = _http_mock(monkeypatch, content="ok")
+    client = OpenRouterClient()
+    client.api_key = "token"
+    await client.answer_grounded(
+        question="q",
+        snippets=[_snippet()],
+        today_iso="2026-05-11",
+        persona_first_name="Анна",
+        persona_last_name="",
+    )
+    system_prompt = http_client.post.call_args.kwargs["json"]["messages"][0]["content"]
+    assert "Ты — Анна, сотрудник" in system_prompt
+    assert "Ты — Анна , сотрудник" not in system_prompt
+    assert "Ты —  Анна" not in system_prompt
+
+
+@pytest.mark.asyncio
 async def test_verify_grounding_parses_grounded(monkeypatch):
     _http_mock(monkeypatch, content="GROUNDED: matches the snippet exactly.")
     client = OpenRouterClient()

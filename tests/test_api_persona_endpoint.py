@@ -387,3 +387,48 @@ def test_persona_endpoint_uses_async_send_methods(monkeypatch):
     name_mock.assert_awaited_once()
     desc_mock.assert_awaited_once()
     short_mock.assert_awaited_once()
+
+
+def test_persona_endpoint_accepts_omitted_last_name(monkeypatch):
+    """Last name is optional — the operator can rename the bot to a single
+    given name (e.g. just «Анна»). Stored as empty string; full_name and the
+    Telegram setMyName call must not have a trailing space."""
+    captured = _patch_identity_calls(monkeypatch)
+    client = TestClient(api_app)
+    response = client.post(
+        "/hitl/runtime-config/persona",
+        json={
+            "first_name": "Анна",
+            "updated_by": settings.hitl_config_admin_username,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["first_name"] == "Анна"
+    assert body["last_name"] == ""
+    assert body["full_name"] == "Анна"
+    assert (
+        hitl_ticket_repository.get_runtime_config("bot_persona_first_name") == "Анна"
+    )
+    assert (
+        hitl_ticket_repository.get_runtime_config("bot_persona_last_name") == ""
+    )
+    assert captured["set_my_name"] == [{"name": "Анна"}]
+
+
+def test_persona_endpoint_accepts_empty_last_name(monkeypatch):
+    """Same as omitted: explicit empty string is also accepted (clearing a
+    previously-set surname)."""
+    captured = _patch_identity_calls(monkeypatch)
+    client = TestClient(api_app)
+    response = client.post(
+        "/hitl/runtime-config/persona",
+        json={
+            "first_name": "Анна",
+            "last_name": "   ",
+            "updated_by": settings.hitl_config_admin_username,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["full_name"] == "Анна"
+    assert captured["set_my_name"] == [{"name": "Анна"}]
