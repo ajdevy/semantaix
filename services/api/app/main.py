@@ -466,6 +466,29 @@ def patch_operator(
     return _operator_to_dict(operator)
 
 
+@app.get("/knowledge/candidates/by-operator-file/{short_id}")
+def get_candidate_by_operator_short_id(short_id: str) -> dict[str, object]:
+    """Internal endpoint used by bot_gateway admin commands.
+
+    Finds the knowledge candidate that was uploaded via the operator file
+    with the given short_id. Returns 404 when the upload predates the
+    operator_short_id plumbing or did not originate from an operator
+    upload.
+    """
+    candidate = knowledge_moderation_repository.find_by_operator_short_id(
+        short_id
+    )
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="candidate_not_found")
+    return {
+        "candidate_id": candidate.id,
+        "operator_short_id": candidate.operator_short_id,
+        "project_id": candidate.project_id,
+        "source_file_name": candidate.source_file_name,
+        "uploaded_by_operator_username": candidate.uploaded_by_operator_username,
+    }
+
+
 @app.post("/knowledge/candidates/{candidate_id}/reassign")
 def reassign_candidate(
     candidate_id: int,
@@ -566,6 +589,7 @@ class OperatorUploadRequest(BaseModel):
     stored_binary_path: str | None = None
     is_confidential: bool = False
     inline_text: str | None = None
+    operator_short_id: str | None = None
 
 
 class BotPersonaRequest(BaseModel):
@@ -1624,6 +1648,7 @@ async def _perform_operator_upload(request: OperatorUploadRequest) -> dict[str, 
         source_file_type=request.source_file_type,
         stored_binary_path=request.stored_binary_path,
         binary_sha256=sha,
+        operator_short_id=request.operator_short_id,
     )
     source_id = f"knowledge_candidate:{candidate.id}"
     inserted_chunks = rag_repository.ingest(

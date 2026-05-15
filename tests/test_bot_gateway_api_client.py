@@ -85,6 +85,7 @@ async def test_submit_operator_upload_posts_to_correct_endpoint(monkeypatch):
         "stored_binary_path": "/data/x.pdf",
         "is_confidential": True,
         "inline_text": None,
+        "operator_short_id": None,
     }
 
 
