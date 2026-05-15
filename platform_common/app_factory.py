@@ -1,9 +1,11 @@
 from fastapi import FastAPI
 
+from platform_common.logging_config import configure_logging
 from platform_common.settings import get_settings
 
 
 def create_service_app(service_name: str) -> FastAPI:
+    configure_logging(service_name)
     settings = get_settings()
     app = FastAPI(title=f"semantaix-{service_name}")
 

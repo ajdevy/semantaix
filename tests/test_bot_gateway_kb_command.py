@@ -1220,10 +1220,23 @@ def test_kb_media_group_flush_empty_buffer_is_noop(
     assert not any("Принял" in t for _, t in isolated_bot["dms"])
 
 
-def test_kb_media_group_flush_sleeps_when_debounce_positive(monkeypatch):
-    """A positive debounce must sleep before draining, so Telegram has time
-    to deliver every update in the group."""
+def test_kb_media_group_flush_polls_until_group_is_quiet(
+    isolated_bot, monkeypatch
+):
+    """With a positive debounce, the flusher polls at `poll_interval` and
+    keeps looping while the group still has fresh writes. Once
+    `now - latest_received_at >= debounce_seconds`, it drains."""
     import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from services.bot_gateway.app.telegram_update import TelegramAttachment
+
+    monkeypatch.setattr(
+        bot_main.settings, "operator_media_group_poll_interval_seconds", 0.1
+    )
+    monkeypatch.setattr(
+        bot_main.settings, "operator_media_group_settling_cap_seconds", 30.0
+    )
 
     sleep_calls: list[float] = []
 
@@ -1231,12 +1244,360 @@ def test_kb_media_group_flush_sleeps_when_debounce_positive(monkeypatch):
         sleep_calls.append(seconds)
 
     monkeypatch.setattr(bot_main.asyncio, "sleep", fake_sleep)
+
+    # Pre-populate the buffer so drain has something to find when the
+    # quiet-for window is finally satisfied.
+    isolated_bot["media_group_buffer"].add(
+        media_group_id="POLL",
+        chat_id=100,
+        username="@ajdevy",
+        update_id=1,
+        source_message_id=1,
+        attachment=TelegramAttachment(file_id="x", kind="document"),
+        is_confidential=False,
+    )
+
+    # Two latest_received_at readings: first reading reports a recent write
+    # (not quiet yet → poll), second reading reports an old write (drain).
+    base = datetime.now(UTC)
+    readings = iter([base, base - timedelta(seconds=10)])
+
+    def fake_latest(*, media_group_id):
+        return next(readings)
+
+    monkeypatch.setattr(
+        bot_main.media_group_buffer,
+        "latest_received_at",
+        fake_latest,
+    )
+
+    async def fake_submit(**kwargs):
+        return {"inserted_chunks": 1, "is_confidential": False, "deduplicated": False}
+
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+
     asyncio.run(
         bot_main._flush_media_group_after_debounce(
-            media_group_id="UNKNOWN_DEBOUNCED", debounce_seconds=2.5
+            media_group_id="POLL", debounce_seconds=2.5
         )
     )
-    assert sleep_calls == [2.5]
+
+    # Slept exactly once at the poll interval (one not-yet-quiet reading).
+    assert sleep_calls == [0.1]
+    # Drained: buffer is now empty.
+    assert isolated_bot["media_group_buffer"].drain(media_group_id="POLL") == []
+
+
+def test_kb_media_group_settling_cap_forces_drain(
+    isolated_bot, monkeypatch, caplog
+):
+    """A pathological stream of writes that keeps `quiet_for` under threshold
+    must still be drained once `elapsed >= cap`, with a WARNING log."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from services.bot_gateway.app.telegram_update import TelegramAttachment
+
+    monkeypatch.setattr(
+        bot_main.settings, "operator_media_group_poll_interval_seconds", 0.05
+    )
+    monkeypatch.setattr(
+        bot_main.settings, "operator_media_group_settling_cap_seconds", 0.5
+    )
+
+    # latest_received_at always returns "now" so quiet_for stays at ~0.
+    def fake_latest(*, media_group_id):
+        return datetime.now(UTC)
+
+    monkeypatch.setattr(
+        bot_main.media_group_buffer,
+        "latest_received_at",
+        fake_latest,
+    )
+
+    pdf = isolated_bot["tmp_path"] / "cap.pdf"
+    pdf.write_bytes(b"PDF")
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        return DownloadedFile(path=pdf, byte_size=3, mime_type=mime_type)
+
+    monkeypatch.setattr(bot_main.TelegramFileDownloader, "download", fake_download)
+
+    isolated_bot["media_group_buffer"].add(
+        media_group_id="CAP",
+        chat_id=100,
+        username="@ajdevy",
+        update_id=1,
+        source_message_id=1,
+        attachment=TelegramAttachment(
+            file_id="x",
+            kind="document",
+            mime_type="application/pdf",
+            file_size=3,
+            file_name="cap.pdf",
+        ),
+        is_confidential=False,
+    )
+
+    submit_calls: list[dict] = []
+
+    async def fake_submit(**kwargs):
+        submit_calls.append(kwargs)
+        return {"inserted_chunks": 0, "is_confidential": False, "deduplicated": False}
+
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(
+            bot_main._flush_media_group_after_debounce(
+                media_group_id="CAP", debounce_seconds=10.0
+            )
+        )
+    assert any(
+        "media_group_settling_cap_hit" in r.message for r in caplog.records
+    )
+    # The cap forced a drain → submit was called.
+    assert len(submit_calls) == 1
+
+
+def test_kb_media_group_flush_drains_empty_after_race(
+    isolated_bot, monkeypatch
+):
+    """Defensive: between `latest_received_at` (sees rows) and `drain()`,
+    another flusher may have raced ahead and emptied the buffer. The
+    second flusher must return without sending an ack/summary."""
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    # Patch latest_received_at to always claim "data was here 10s ago" so
+    # the polling loop breaks immediately. Real drain returns [] because
+    # the buffer is empty.
+    def fake_latest(*, media_group_id):
+        return datetime.now(UTC) - timedelta(seconds=10)
+
+    monkeypatch.setattr(
+        bot_main.media_group_buffer,
+        "latest_received_at",
+        fake_latest,
+    )
+
+    submit_calls: list[dict] = []
+
+    async def fake_submit(**kwargs):  # pragma: no cover - must not run
+        submit_calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+
+    asyncio.run(
+        bot_main._flush_media_group_after_debounce(
+            media_group_id="ALREADY_DRAINED", debounce_seconds=0
+        )
+    )
+
+    assert submit_calls == []
+    assert not any("Принял" in t for _, t in isolated_bot["dms"])
+
+
+def test_kb_media_group_concurrent_flushers_only_one_drains(
+    isolated_bot, monkeypatch
+):
+    """Each webhook now schedules its own flusher. The first one to win the
+    `drain()` race processes the batch; the others observe an empty buffer
+    and exit without sending a second ack or summary."""
+    import asyncio
+
+    from services.bot_gateway.app.telegram_update import TelegramAttachment
+
+    pdf = isolated_bot["tmp_path"] / "race.pdf"
+    pdf.write_bytes(b"PDF")
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        return DownloadedFile(path=pdf, byte_size=3, mime_type=mime_type)
+
+    monkeypatch.setattr(bot_main.TelegramFileDownloader, "download", fake_download)
+
+    for fid, uid in (("a", 1), ("b", 2)):
+        isolated_bot["media_group_buffer"].add(
+            media_group_id="RACE",
+            chat_id=100,
+            username="@ajdevy",
+            update_id=uid,
+            source_message_id=uid,
+            attachment=TelegramAttachment(
+                file_id=fid,
+                kind="document",
+                mime_type="application/pdf",
+                file_size=3,
+                file_name=f"{fid}.pdf",
+            ),
+            is_confidential=False,
+        )
+
+    submit_calls: list[dict] = []
+
+    async def fake_submit(**kwargs):
+        submit_calls.append(kwargs)
+        return {"inserted_chunks": 1, "is_confidential": False, "deduplicated": False}
+
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+
+    async def run_two_flushers():
+        await asyncio.gather(
+            bot_main._flush_media_group_after_debounce(
+                media_group_id="RACE", debounce_seconds=0
+            ),
+            bot_main._flush_media_group_after_debounce(
+                media_group_id="RACE", debounce_seconds=0
+            ),
+        )
+
+    asyncio.run(run_two_flushers())
+
+    # Exactly one ack and one summary regardless of two flushers running.
+    acks = [t for _, t in isolated_bot["dms"] if "Принял" in t]
+    summaries = [t for _, t in isolated_bot["dms"] if "Добавлено в базу" in t]
+    assert len(acks) == 1
+    assert len(summaries) == 1
+    # Submit ran once per attachment (2 attachments → 2 calls total across
+    # both flushers; the loser sees [] and no-ops, so only the winning
+    # flusher's loop made the calls).
+    assert len(submit_calls) == 2
+
+
+def test_kb_media_group_staggered_four_files_all_drained(
+    isolated_bot, monkeypatch
+):
+    """Regression: 4 webhooks for one album where webhook #1 carries the
+    caption and #2-#4 carry only attachments + media_group_id. With the
+    settling-window flusher, the buffer is fully drained on the first
+    flush — no files are lost. Mirrors the production bug pattern."""
+    import asyncio
+
+    pdfs = []
+    for name in ("a.pdf", "b.pdf", "c.pdf", "d.pdf"):
+        path = isolated_bot["tmp_path"] / name
+        path.write_bytes(b"PDF")
+        pdfs.append(path)
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        idx = {"MG-A": 0, "MG-B": 1, "MG-C": 2, "MG-D": 3}[file_id]
+        return DownloadedFile(path=pdfs[idx], byte_size=3, mime_type=mime_type)
+
+    submit_calls: list[dict] = []
+
+    async def fake_submit(**kwargs):
+        submit_calls.append(kwargs)
+        return {"inserted_chunks": 1, "is_confidential": False, "deduplicated": False}
+
+    monkeypatch.setattr(bot_main.TelegramFileDownloader, "download", fake_download)
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+
+    # Capture real flusher, replace with no-op during webhook delivery so we
+    # can run the real flush deterministically once all updates land.
+    real_flush = bot_main._flush_media_group_after_debounce
+
+    async def noop_flush(**kwargs):
+        return None
+
+    monkeypatch.setattr(bot_main, "_flush_media_group_after_debounce", noop_flush)
+
+    client = TestClient(bot_app)
+
+    files = [
+        ("MG-A", "a.pdf", True),    # first carries the trigger caption
+        ("MG-B", "b.pdf", False),
+        ("MG-C", "c.pdf", False),
+        ("MG-D", "d.pdf", False),
+    ]
+    for offset, (fid, name, with_caption) in enumerate(files):
+        msg = _operator_message(
+            caption="добавь в базу знаний" if with_caption else None,
+            attachments=[
+                {
+                    "document": {
+                        "file_id": fid,
+                        "file_name": name,
+                        "mime_type": "application/pdf",
+                        "file_size": 3,
+                    }
+                }
+            ],
+        )
+        msg["update_id"] = 7100 + offset
+        msg["message"]["message_id"] = 7100 + offset
+        msg["message"]["media_group_id"] = "MG_STAGGER"
+        response = client.post("/telegram/webhook", json=msg)
+        assert response.status_code == 200, response.text
+
+    isolated_bot["dms"].clear()
+    asyncio.run(real_flush(media_group_id="MG_STAGGER", debounce_seconds=0))
+
+    acks = [t for _, t in isolated_bot["dms"] if "Принял" in t]
+    summaries = [t for _, t in isolated_bot["dms"] if "Добавлено в базу" in t]
+    assert len(acks) == 1
+    assert "4" in acks[0]
+    assert "файла" in acks[0]
+    assert len(summaries) == 1
+    assert all(name in summaries[0] for name in ("a.pdf", "b.pdf", "c.pdf", "d.pdf"))
+    assert len(submit_calls) == 4
+
+
+def test_kb_media_group_caption_only_on_first_routes_via_session(
+    isolated_bot, monkeypatch
+):
+    """Real Telegram delivery: caption only on update #1. Updates #2-#4 hit
+    `_handle_kb_session_continuation` (no intent → no kb_command match),
+    which must route them into the same media-group buffer."""
+    scheduled: list[str] = []
+
+    async def fake_flush(*, media_group_id, debounce_seconds):
+        scheduled.append(media_group_id)
+
+    monkeypatch.setattr(bot_main, "_flush_media_group_after_debounce", fake_flush)
+
+    client = TestClient(bot_app)
+
+    files = [
+        ("MG-A", "a.pdf", True),
+        ("MG-B", "b.pdf", False),
+        ("MG-C", "c.pdf", False),
+        ("MG-D", "d.pdf", False),
+    ]
+    for offset, (fid, name, with_caption) in enumerate(files):
+        msg = _operator_message(
+            caption="добавь в базу знаний" if with_caption else None,
+            attachments=[
+                {
+                    "document": {
+                        "file_id": fid,
+                        "file_name": name,
+                        "mime_type": "application/pdf",
+                        "file_size": 3,
+                    }
+                }
+            ],
+        )
+        msg["update_id"] = 7200 + offset
+        msg["message"]["message_id"] = 7200 + offset
+        msg["message"]["media_group_id"] = "MG_CAP_ONLY"
+        response = client.post("/telegram/webhook", json=msg)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "accepted"
+        assert body["kb_mode"] == "media_group_buffered"
+
+    drained = isolated_bot["media_group_buffer"].drain(
+        media_group_id="MG_CAP_ONLY"
+    )
+    assert [d.attachment.file_id for d in drained] == [
+        "MG-A",
+        "MG-B",
+        "MG-C",
+        "MG-D",
+    ]
+    # Each webhook now schedules its own flusher (no `if first` gate).
+    assert scheduled == ["MG_CAP_ONLY"] * 4
 
 
 def test_kb_media_group_flush_swallows_internal_errors(

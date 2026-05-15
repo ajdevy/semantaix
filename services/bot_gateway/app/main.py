@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -929,15 +930,16 @@ def _buffer_attachments_for_media_group(
 ) -> None:
     """Buffer every attachment under `media_group_id` and arm the flush.
 
-    Only the first call for a given group schedules the debounced flush; later
-    calls just append to the buffer. The flush itself drains the buffer and
-    runs `_process_operator_upload` once with all attachments — one ack and
-    one summary instead of N each.
+    Each webhook schedules its own settling-window flusher. Whichever
+    flusher's wait completes first wins the `drain()`; the others observe
+    an empty buffer and return without side effects (covered by
+    `test_kb_media_group_flush_empty_buffer_is_noop`). The
+    `INSERT OR IGNORE` + (media_group_id, update_id) PK keeps `add()`
+    idempotent under Telegram retries.
     """
     assert normalized.media_group_id is not None
-    schedule_flush = False
     for attachment in normalized.attachments:
-        first = media_group_buffer.add(
+        media_group_buffer.add(
             media_group_id=normalized.media_group_id,
             chat_id=normalized.chat_id,
             username=normalized.username or "",
@@ -946,14 +948,11 @@ def _buffer_attachments_for_media_group(
             attachment=attachment,
             is_confidential=is_confidential,
         )
-        if first:
-            schedule_flush = True
-    if schedule_flush:
-        background_tasks.add_task(
-            _flush_media_group_after_debounce,
-            media_group_id=normalized.media_group_id,
-            debounce_seconds=settings.operator_media_group_debounce_seconds,
-        )
+    background_tasks.add_task(
+        _flush_media_group_after_debounce,
+        media_group_id=normalized.media_group_id,
+        debounce_seconds=settings.operator_media_group_debounce_seconds,
+    )
 
 
 async def _flush_media_group_after_debounce(
@@ -961,15 +960,46 @@ async def _flush_media_group_after_debounce(
     media_group_id: str,
     debounce_seconds: float,
 ) -> None:
-    """Wait for the media group to settle, then process its attachments.
+    """Wait until the group has been quiet for `debounce_seconds`, then drain.
 
-    `add` returns True only for the first attachment in a group, so this is
-    scheduled exactly once per group. The debounce gives Telegram time to
-    deliver every other update in the group before we drain.
+    Each new webhook scheduling this coroutine effectively extends the
+    wait, because the loop re-reads `latest_received_at()` on every poll.
+    A hard cap (`operator_media_group_settling_cap_seconds`) bounds total
+    wait so a pathological stream of files cannot delay a flush forever.
+
+    Multiple flushers may run for the same group; only one drains a
+    non-empty buffer. The others observe `[]` and return — same idempotency
+    contract as before.
     """
-    if debounce_seconds > 0:
-        await asyncio.sleep(debounce_seconds)
+    cap = settings.operator_media_group_settling_cap_seconds
+    poll = max(settings.operator_media_group_poll_interval_seconds, 0.05)
+    started = asyncio.get_event_loop().time()
+
     try:
+        while True:
+            latest = media_group_buffer.latest_received_at(
+                media_group_id=media_group_id,
+            )
+            if latest is None:
+                # Buffer is empty — either never had data, or another
+                # flusher already drained. Nothing to do.
+                return
+            quiet_for = (datetime.now(UTC) - latest).total_seconds()
+            elapsed = asyncio.get_event_loop().time() - started
+            if quiet_for >= debounce_seconds or elapsed >= cap:
+                if elapsed >= cap and quiet_for < debounce_seconds:
+                    logger.warning(
+                        "media_group_settling_cap_hit",
+                        extra={
+                            "media_group_id": media_group_id,
+                            "quiet_for_seconds": quiet_for,
+                            "elapsed_seconds": elapsed,
+                            "cap_seconds": cap,
+                        },
+                    )
+                break
+            await asyncio.sleep(poll)
+
         items = media_group_buffer.drain(media_group_id=media_group_id)
         if not items:
             return
@@ -994,6 +1024,13 @@ async def _flush_media_group_after_debounce(
             match_kind="literal",
         )
         n = len(attachments)
+        logger.info(
+            "media_group_flush_draining",
+            extra={
+                "media_group_id": media_group_id,
+                "attachment_count": n,
+            },
+        )
         await _send_dm(
             first.chat_id,
             f"Принял {n} {_kb_attachment_count_word(n)}, обрабатываю…",
