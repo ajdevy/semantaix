@@ -3,8 +3,10 @@ import re
 import time
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Annotated
 
-from fastapi import HTTPException
+from fastapi import File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from platform_common.app_factory import create_service_app
@@ -1130,10 +1132,7 @@ def _get_operator_transcriber() -> object:
     return _operator_transcriber
 
 
-@app.post("/knowledge/operator_upload")
-async def operator_upload(request: OperatorUploadRequest) -> dict[str, object]:
-    from pathlib import Path as _Path
-
+async def _perform_operator_upload(request: OperatorUploadRequest) -> dict[str, object]:
     from services.api.app.operator_uploads.extractors import (
         EXTRACTORS,
         ExtractionError,
@@ -1152,7 +1151,7 @@ async def operator_upload(request: OperatorUploadRequest) -> dict[str, object]:
     else:
         if not request.stored_binary_path:
             raise HTTPException(status_code=422, detail="missing_stored_binary_path")
-        binary_path = _Path(request.stored_binary_path)
+        binary_path = Path(request.stored_binary_path)
         if not binary_path.exists():
             raise HTTPException(status_code=404, detail="binary_not_found")
         sha = binary_sha256(binary_path)
@@ -1173,12 +1172,12 @@ async def operator_upload(request: OperatorUploadRequest) -> dict[str, object]:
         elif request.source_file_type in _OPERATOR_UPLOAD_MEDIA_TYPES:
             raw_text = await extract_media(
                 request.source_file_type,
-                _Path(request.stored_binary_path),  # type: ignore[arg-type]
+                Path(request.stored_binary_path),  # type: ignore[arg-type]
                 transcriber=_get_operator_transcriber(),  # type: ignore[arg-type]
             )
         else:
             extractor = EXTRACTORS[request.source_file_type]
-            raw_text = extractor(_Path(request.stored_binary_path))  # type: ignore[arg-type]
+            raw_text = extractor(Path(request.stored_binary_path))  # type: ignore[arg-type]
             if not raw_text or not raw_text.strip():
                 raise ExtractionError("empty_text")
     except ExtractionError as exc:
@@ -1230,6 +1229,92 @@ async def operator_upload(request: OperatorUploadRequest) -> dict[str, object]:
         "is_confidential": request.is_confidential,
         "deduplicated": False,
     }
+
+
+@app.post("/knowledge/operator_upload")
+async def operator_upload(request: OperatorUploadRequest) -> dict[str, object]:
+    return await _perform_operator_upload(request)
+
+
+_EXTENSION_TO_SOURCE_TYPE: dict[str, str] = {
+    ".pdf": "pdf",
+    ".docx": "docx",
+    ".pptx": "pptx",
+    ".txt": "txt",
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".gif": "image",
+    ".bmp": "image",
+    ".webp": "image",
+    ".tiff": "image",
+    ".mp3": "audio",
+    ".wav": "audio",
+    ".ogg": "audio",
+    ".oga": "audio",
+    ".m4a": "audio",
+    ".flac": "audio",
+    ".mp4": "video",
+    ".mov": "video",
+    ".mkv": "video",
+    ".webm": "video",
+    ".avi": "video",
+}
+
+
+def _infer_source_file_type(filename: str | None) -> str | None:
+    if not filename:
+        return None
+    suffix = Path(filename).suffix.lower()
+    return _EXTENSION_TO_SOURCE_TYPE.get(suffix)
+
+
+@app.post("/knowledge/operator_upload_multipart")
+async def operator_upload_multipart(
+    operator_username: Annotated[str, Form()],
+    is_confidential: Annotated[bool, Form()] = False,
+    source_file_type: Annotated[str | None, Form()] = None,
+    inline_text: Annotated[str | None, Form()] = None,
+    upload: Annotated[UploadFile | None, File()] = None,
+) -> dict[str, object]:
+    has_file = upload is not None
+    has_inline = inline_text is not None and inline_text.strip() != ""
+    if has_file and has_inline:
+        raise HTTPException(status_code=422, detail="file_and_inline_text_both_set")
+    if not has_file and not has_inline:
+        raise HTTPException(status_code=422, detail="file_or_inline_text_required")
+
+    if has_inline:
+        request = OperatorUploadRequest(
+            operator_username=operator_username,
+            source_file_type="inline_text",
+            inline_text=inline_text,
+            is_confidential=is_confidential,
+        )
+        return await _perform_operator_upload(request)
+
+    assert upload is not None
+    inferred_type = source_file_type or _infer_source_file_type(upload.filename)
+    if inferred_type is None:
+        raise HTTPException(status_code=422, detail="unknown_source_file_type")
+
+    storage_dir = Path(settings.operator_upload_storage_dir)
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(upload.filename or "").suffix
+    stored_path = storage_dir / f"{uuid.uuid4().hex}{suffix}"
+    contents = await upload.read()
+    if len(contents) > settings.operator_upload_max_bytes:
+        raise HTTPException(status_code=413, detail="upload_too_large")
+    stored_path.write_bytes(contents)
+
+    request = OperatorUploadRequest(
+        operator_username=operator_username,
+        source_file_type=inferred_type,
+        source_file_name=upload.filename,
+        stored_binary_path=str(stored_path),
+        is_confidential=is_confidential,
+    )
+    return await _perform_operator_upload(request)
 
 
 def _serialize_nl_session(session: object) -> dict[str, object]:
