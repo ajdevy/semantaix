@@ -36,8 +36,15 @@ class _FakeRag:
         self._items = items
         self.calls: list[str] = []
 
-    def retrieve(self, *, query: str, limit: int = 3) -> list[RagChunk]:
+    def retrieve(
+        self,
+        *,
+        query: str,
+        limit: int = 3,
+        project_id: int | None = None,
+    ) -> list[RagChunk]:
         self.calls.append(query)
+        self.last_project_id = project_id
         return list(self._items)
 
 

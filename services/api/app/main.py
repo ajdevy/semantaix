@@ -763,6 +763,8 @@ class OperatorUploadRequest(BaseModel):
     is_confidential: bool = False
     inline_text: str | None = None
     operator_short_id: str | None = None
+    project_id: int | None = None
+    project_slug: str | None = None
 
 
 class BotPersonaRequest(BaseModel):
@@ -844,6 +846,58 @@ def _effective_grounding_threshold() -> float:
         return settings.rag_grounding_score_threshold
 
 
+def _resolve_inbound_project_id(chat_id: int | None) -> int | None:
+    """Resolve the project_id for an incoming customer message.
+
+    Looks at the most recent HITL ticket assigned to the chat; if it
+    has an `operator_username` that maps to a registered operator with
+    a project binding, that project scopes RAG retrieval. Falls back
+    to the default project (id from `ensure_default_project`) so
+    pre-Epic-10 deployments behave identically.
+    """
+    if chat_id is None:
+        return _default_project_id()
+    try:
+        ticket = hitl_ticket_repository.latest_for_chat(chat_id)
+    except AttributeError:
+        ticket = None
+    if ticket is not None and ticket.operator_username:
+        operator = operator_repository.find_by_username(
+            ticket.operator_username
+        )
+        if operator is not None:
+            return operator.project_id
+    return _default_project_id()
+
+
+def _default_project_id() -> int | None:
+    default = project_repository.get_by_slug("default")
+    return default.id if default is not None else None
+
+
+def _resolve_upload_project_id(
+    *,
+    operator_username: str,
+    project_id: int | None,
+    project_slug: str | None,
+) -> int | None:
+    """Resolve project_id for an operator upload.
+
+    Precedence: explicit project_id > project_slug > operator's
+    project_id (from the operators registry) > default project.
+    """
+    if project_id is not None:
+        return project_id
+    if project_slug:
+        project = project_repository.get_by_slug(project_slug)
+        if project is not None:
+            return project.id
+    operator = operator_repository.find_by_username(operator_username)
+    if operator is not None:
+        return operator.project_id
+    return _default_project_id()
+
+
 def _build_answer_context(
     *,
     chat_id: int | None,
@@ -861,6 +915,7 @@ def _build_answer_context(
         timezone=_effective_default_timezone(),
         location=_effective_default_location(),
         grounding_threshold=_effective_grounding_threshold(),
+        project_id=_resolve_inbound_project_id(chat_id),
     )
 
 
@@ -1812,6 +1867,11 @@ async def _perform_operator_upload(request: OperatorUploadRequest) -> dict[str, 
     if not wrapped.strip():
         raise HTTPException(status_code=422, detail="empty_text")
 
+    resolved_project_id = _resolve_upload_project_id(
+        operator_username=request.operator_username,
+        project_id=request.project_id,
+        project_slug=request.project_slug,
+    )
     candidate = knowledge_moderation_repository.create_approved_operator_upload(
         candidate_text=raw_text,
         published_text=wrapped,
@@ -1823,11 +1883,16 @@ async def _perform_operator_upload(request: OperatorUploadRequest) -> dict[str, 
         binary_sha256=sha,
         operator_short_id=request.operator_short_id,
     )
+    if resolved_project_id is not None:
+        knowledge_moderation_repository.set_project_id(
+            candidate_id=candidate.id, project_id=resolved_project_id
+        )
     source_id = f"knowledge_candidate:{candidate.id}"
     inserted_chunks = rag_repository.ingest(
         source_id=source_id,
         text=wrapped,
         is_confidential=request.is_confidential,
+        project_id=resolved_project_id,
     )
     return {
         "candidate_id": candidate.id,

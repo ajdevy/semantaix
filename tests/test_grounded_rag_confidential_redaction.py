@@ -25,7 +25,13 @@ class _FakeRag:
     def __init__(self, items: list[RagChunk]) -> None:
         self._items = items
 
-    def retrieve(self, *, query: str, limit: int = 3) -> list[RagChunk]:
+    def retrieve(
+        self,
+        *,
+        query: str,
+        limit: int = 3,
+        project_id: int | None = None,
+    ) -> list[RagChunk]:
         return list(self._items)
 
 

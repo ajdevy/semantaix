@@ -224,6 +224,28 @@ class HitlTicketRepository:
             assert row is not None
             return self._row_to_ticket(row)
 
+    def latest_for_chat(self, chat_id: int) -> HitlTicket | None:
+        """Return the most recent ticket whose target chat matches.
+
+        Used by Epic 10 story 10.06 to scope RAG retrieval by the
+        operator-on-record for a conversation. The lookup is best-effort:
+        deployments without HITL tickets simply get `None`.
+        """
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT id, conversation_ref, reason, status, operator_username,
+                       target_chat_id, created_at, updated_at, resolved_at
+                FROM hitl_tickets
+                WHERE target_chat_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (chat_id,),
+            ).fetchone()
+        return self._row_to_ticket(row) if row is not None else None
+
     def set_runtime_config(self, *, key: str, value: str, updated_by: str) -> None:
         init_schema(self.db_path)
         with _connect(self.db_path) as connection:
