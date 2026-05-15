@@ -94,6 +94,8 @@ class AppSettings(BaseSettings):
     admin_telegram_username: str = "@ajdevy"
     admin_login_code_ttl_seconds: int = 300
     admin_session_ttl_seconds: int = 86400
+    admin_internal_token: str = ""
+    web_ui_admin_cookie_secure: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

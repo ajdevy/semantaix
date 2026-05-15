@@ -89,12 +89,14 @@ class KnowledgeCandidateRow:
     source_file_type: str | None = None
     stored_binary_path: str | None = None
     binary_sha256: str | None = None
+    project_id: int | None = None
 
 
 _SELECT_COLUMNS = (
     "id, candidate_text, published_text, status, created_at, updated_at, "
     "source_extraction_candidate_id, uploaded_by_operator_username, is_confidential, "
-    "source_file_name, source_file_type, stored_binary_path, binary_sha256"
+    "source_file_name, source_file_type, stored_binary_path, binary_sha256, "
+    "project_id"
 )
 
 
@@ -274,6 +276,21 @@ class KnowledgeModerationRepository:
                 (published_text, now, candidate_id),
             )
 
+    def set_project_id(self, *, candidate_id: int, project_id: int) -> None:
+        init_schema(self.db_path)
+        now = _now()
+        with _connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE knowledge_moderation_candidates
+                SET project_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (project_id, now, candidate_id),
+            )
+            if cursor.rowcount == 0:
+                raise LookupError("candidate_not_found")
+
     def reject(self, *, candidate_id: int) -> None:
         init_schema(self.db_path)
         now = _now()
@@ -321,4 +338,7 @@ class KnowledgeModerationRepository:
                 str(row["stored_binary_path"]) if row["stored_binary_path"] else None
             ),
             binary_sha256=str(row["binary_sha256"]) if row["binary_sha256"] else None,
+            project_id=(
+                int(row["project_id"]) if row["project_id"] is not None else None
+            ),
         )
