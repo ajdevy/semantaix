@@ -65,7 +65,9 @@ class AppSettings(BaseSettings):
         ".data/semantaix_incidents.db,"
         ".data/semantaix_hitl.db,"
         ".data/semantaix_rag.db,"
-        ".data/semantaix_knowledge.db"
+        ".data/semantaix_knowledge.db,"
+        ".data/semantaix_web_auth.db,"
+        ".data/semantaix_operator_files.db"
     )
     operator_upload_max_bytes: int = 20 * 1024 * 1024
     operator_upload_max_audio_seconds: int = 900
