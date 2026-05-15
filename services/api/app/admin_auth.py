@@ -190,6 +190,23 @@ class AdminAuthService:
         self.web_auth_repository.touch_session(session_id=cookie)
         return SessionPrincipal(username=session.username, role=session.role)
 
+    def require_session_or_internal(
+        self, request: Request, as_user: str | None
+    ) -> SessionPrincipal:
+        token = self.settings.internal_service_token
+        header = request.headers.get("authorization", "")
+        if token and header.startswith("Bearer ") and header.removeprefix("Bearer ") == token:
+            if not as_user:
+                raise HTTPException(
+                    status_code=400, detail="missing_as_user"
+                )
+            username = _normalize_username(as_user)
+            role = self.resolve_role(username)
+            if role is None:
+                raise HTTPException(status_code=403, detail="not_allowed")
+            return SessionPrincipal(username=username, role=role)
+        return self.require_session(request)
+
 
 def wire_admin_auth_routes(app: FastAPI, *, service: AdminAuthService) -> None:
     @app.post("/admin/auth/request_code")
