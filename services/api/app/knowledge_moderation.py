@@ -36,6 +36,7 @@ _OPERATOR_UPLOAD_COLUMNS: tuple[tuple[str, str], ...] = (
 
 def init_schema(db_path: str) -> None:
     with _connect(db_path) as connection:
+        connection.execute("PRAGMA journal_mode = WAL")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS knowledge_moderation_candidates (

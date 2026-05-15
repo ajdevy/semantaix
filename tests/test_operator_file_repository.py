@@ -319,3 +319,112 @@ def test_record_upload_accepts_missing_size_and_mime(tmp_path: Path) -> None:
     assert record.file_size_bytes is None
     assert record.mime_type is None
     assert record.source_file_name is None
+
+
+def test_knowledge_candidate_id_is_none_on_insert(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    record = repo.record_upload(
+        chat_id=1,
+        username="@op",
+        source_message_id=1,
+        attachment=_attachment(file_id="f1"),
+        is_confidential=False,
+        stored_binary_path=None,
+        download_status="ok",
+        source_file_type="pdf",
+    )
+    assert record.knowledge_candidate_id is None
+    fetched = repo.get(short_id=record.short_id)
+    assert fetched is not None
+    assert fetched.knowledge_candidate_id is None
+
+
+def test_set_candidate_id_round_trip(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    record = repo.record_upload(
+        chat_id=1,
+        username="@op",
+        source_message_id=1,
+        attachment=_attachment(file_id="f1"),
+        is_confidential=False,
+        stored_binary_path=None,
+        download_status="ok",
+        source_file_type="pdf",
+    )
+    repo.set_candidate_id(short_id=record.short_id, knowledge_candidate_id=42)
+    fetched = repo.get(short_id=record.short_id)
+    assert fetched is not None
+    assert fetched.knowledge_candidate_id == 42
+
+
+def test_set_candidate_id_unknown_short_id_is_noop(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    repo.set_candidate_id(short_id="UNKNOWN1", knowledge_candidate_id=99)
+
+
+def test_init_schema_migrates_existing_db_without_candidate_id_column(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE operator_files (
+                short_id TEXT PRIMARY KEY,
+                telegram_file_id TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                source_message_id INTEGER NOT NULL,
+                source_file_name TEXT,
+                source_file_type TEXT,
+                mime_type TEXT,
+                file_size_bytes INTEGER,
+                is_confidential INTEGER NOT NULL,
+                stored_binary_path TEXT,
+                download_status TEXT NOT NULL,
+                kb_ingest_status TEXT NOT NULL,
+                kb_inserted_chunks INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO operator_files (
+                short_id, telegram_file_id, chat_id, username,
+                source_message_id, is_confidential,
+                download_status, kb_ingest_status,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "LEGACY01",
+                "tg-legacy",
+                10,
+                "@legacy",
+                1,
+                0,
+                "ok",
+                "ok",
+                "2025-01-01T00:00:00+00:00",
+                "2025-01-01T00:00:00+00:00",
+            ),
+        )
+
+    repo = OperatorFileRepository(db_path=str(db_path))
+    fetched = repo.get(short_id="LEGACY01")
+    assert fetched is not None
+    assert fetched.knowledge_candidate_id is None
+    repo.set_candidate_id(short_id="LEGACY01", knowledge_candidate_id=7)
+    fetched = repo.get(short_id="LEGACY01")
+    assert fetched is not None
+    assert fetched.knowledge_candidate_id == 7
+
+
+def test_wal_journal_mode_enabled(tmp_path: Path) -> None:
+    db_path = tmp_path / "wal.db"
+    OperatorFileRepository(db_path=str(db_path))
+    with sqlite3.connect(db_path) as connection:
+        mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+    assert str(mode).lower() == "wal"

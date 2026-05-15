@@ -1,8 +1,25 @@
-"""Admin authentication repository.
+"""Admin/operator auth — schema + session-cookie routes + Epic 10 login flow.
 
-Owns the schema and lifecycle for short-lived login codes and opaque
-session tokens used by the admin login flow. Codes and tokens are stored
-as sha256 hashes; plaintext is returned to the caller exactly once.
+Three complementary pieces live here:
+
+- ``AdminAuthRepository`` owns the schema PLUS the full Epic 10 story
+  10.02 login-code lifecycle: request_code / consume_code /
+  validate_session / revoke_session / purge_expired. Codes are 6-digit
+  numeric, session tokens are ``secrets.token_urlsafe(32)`` — both
+  sha256-hashed before storage; plaintext returned exactly once.
+- ``AdminAuthService`` + ``wire_admin_auth_routes`` implement the
+  inspect-extracted-text feature's auth surface: four endpoints
+  (request_code, verify, me, logout) plus a ``require_session`` FastAPI
+  dependency that returns a ``SessionPrincipal``. A second dependency
+  ``require_session_or_internal`` lets internal services (currently the
+  bot_gateway) bypass the cookie by passing
+  ``Authorization: Bearer <internal_service_token>`` with an ``as_user``
+  query parameter, so bot commands can scope ``/admin/files`` to the
+  requesting user.
+- Epic 10 endpoints in ``services/api/app/main.py`` use
+  ``AdminAuthRepository`` directly via ``require_admin_session``; the
+  ``AdminAuthService`` path uses ``WebAuthRepository`` for code/session
+  state and is owned by the inspect-files feature.
 """
 
 from __future__ import annotations
@@ -14,6 +31,12 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request, Response
+from pydantic import BaseModel
+
+from services.api.app.operator_chat_lookup import resolve_chat_id_for_username
+from services.api.app.web_auth import WebAuthRepository
 
 _CODE_DIGITS = "0123456789"
 _CODE_LENGTH = 6
@@ -208,3 +231,161 @@ class AdminAuthRepository:
             )
             removed = (codes_cursor.rowcount or 0) + (sessions_cursor.rowcount or 0)
         return removed
+
+
+class RequestCodeBody(BaseModel):
+    username: str
+
+
+class VerifyBody(BaseModel):
+    username: str
+    code: str
+
+
+@dataclass(frozen=True)
+class SessionPrincipal:
+    username: str
+    role: str
+
+
+def _normalize_username(name: str) -> str:
+    candidate = (name or "").strip()
+    if not candidate:
+        return ""
+    if not candidate.startswith("@"):
+        candidate = "@" + candidate
+    return candidate
+
+
+class AdminAuthService:
+    def __init__(
+        self,
+        *,
+        web_auth_repository: WebAuthRepository,
+        hitl_repository,
+        telegram_bot_sender,
+        settings,
+    ) -> None:
+        self.web_auth_repository = web_auth_repository
+        self.hitl_repository = hitl_repository
+        self.telegram_bot_sender = telegram_bot_sender
+        self.settings = settings
+
+    def _resolve_chat_id(self, username: str) -> int | None:
+        return resolve_chat_id_for_username(
+            username=username,
+            operator_files_db_path=self.settings.operator_files_db_path,
+            hitl_repository=self.hitl_repository,
+            primary_operator_username=self.settings.hitl_primary_operator_username,
+        )
+
+    def resolve_role(self, username: str) -> str | None:
+        if username == self.settings.hitl_config_admin_username:
+            return "admin"
+        if username == self.settings.hitl_primary_operator_username:
+            return "operator"
+        # Anyone with at least one operator_files row counts as operator.
+        if self._resolve_chat_id(username) is not None:
+            return "operator"
+        return None
+
+    async def request_code(self, raw_username: str) -> dict:
+        username = _normalize_username(raw_username)
+        if not username:
+            raise HTTPException(status_code=404, detail="username_unknown_or_chat_id_missing")
+        chat_id = self._resolve_chat_id(username)
+        if chat_id is None:
+            raise HTTPException(
+                status_code=404, detail="username_unknown_or_chat_id_missing"
+            )
+        code = self.web_auth_repository.create_code(
+            username=username, chat_id=chat_id
+        )
+        await self.telegram_bot_sender.send_message(
+            chat_id=chat_id,
+            text=f"Код входа в админку: {code} (действует 5 минут).",
+        )
+        return {"sent": True}
+
+    def verify(
+        self, raw_username: str, code: str, response: Response
+    ) -> dict:
+        username = _normalize_username(raw_username)
+        outcome = self.web_auth_repository.consume_code(
+            username=username, code=code
+        )
+        if not outcome.ok:
+            if outcome.reason == "expired":
+                raise HTTPException(status_code=410, detail="expired")
+            if outcome.reason == "too_many_attempts":
+                raise HTTPException(status_code=429, detail="too_many_attempts")
+            raise HTTPException(status_code=401, detail="invalid")
+        role = self.resolve_role(username)
+        if role is None:
+            raise HTTPException(status_code=403, detail="not_allowed")
+        # Rotate sessions for this user — old cookies become invalid.
+        self.web_auth_repository.revoke_all_for_username(username=username)
+        session_id = self.web_auth_repository.create_session(
+            username=username, role=role
+        )
+        response.set_cookie(
+            key=self.settings.web_session_cookie_name,
+            value=session_id,
+            httponly=True,
+            samesite="lax",
+            secure=self.settings.web_session_cookie_secure,
+            path="/",
+        )
+        return {"username": username, "role": role}
+
+    def require_session(self, request: Request) -> SessionPrincipal:
+        cookie = request.cookies.get(self.settings.web_session_cookie_name)
+        if not cookie:
+            raise HTTPException(status_code=401, detail="no_session")
+        session = self.web_auth_repository.get_session(session_id=cookie)
+        if session is None:
+            raise HTTPException(status_code=401, detail="invalid_session")
+        self.web_auth_repository.touch_session(session_id=cookie)
+        return SessionPrincipal(username=session.username, role=session.role)
+
+    def require_session_or_internal(
+        self, request: Request, as_user: str | None
+    ) -> SessionPrincipal:
+        token = self.settings.internal_service_token
+        header = request.headers.get("authorization", "")
+        if token and header.startswith("Bearer ") and header.removeprefix("Bearer ") == token:
+            if not as_user:
+                raise HTTPException(
+                    status_code=400, detail="missing_as_user"
+                )
+            username = _normalize_username(as_user)
+            role = self.resolve_role(username)
+            if role is None:
+                raise HTTPException(status_code=403, detail="not_allowed")
+            return SessionPrincipal(username=username, role=role)
+        return self.require_session(request)
+
+
+def wire_admin_auth_routes(app: FastAPI, *, service: AdminAuthService) -> None:
+    @app.post("/admin/auth/request_code")
+    async def _request_code(payload: RequestCodeBody) -> dict:
+        return await service.request_code(payload.username)
+
+    @app.post("/admin/auth/verify")
+    def _verify(payload: VerifyBody, response: Response) -> dict:
+        return service.verify(payload.username, payload.code, response)
+
+    @app.get("/admin/auth/me")
+    def _me(request: Request) -> dict:
+        principal = service.require_session(request)
+        return {"username": principal.username, "role": principal.role}
+
+    @app.post("/admin/auth/logout")
+    def _logout(request: Request, response: Response) -> dict:
+        cookie = request.cookies.get(service.settings.web_session_cookie_name)
+        if cookie:
+            service.web_auth_repository.revoke_session(session_id=cookie)
+        response.delete_cookie(
+            key=service.settings.web_session_cookie_name, path="/"
+        )
+        return {"ok": True}

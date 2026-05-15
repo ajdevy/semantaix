@@ -120,6 +120,76 @@ async def test_set_persona_posts_minimal_payload(monkeypatch):
     }
 
 
+def _http_get_mock(monkeypatch, *, status_code: int, response_json: dict | None):
+    response = Mock()
+    response.status_code = status_code
+    response.json.return_value = response_json
+    response.raise_for_status = Mock()
+
+    http_client = AsyncMock()
+    http_client.get = AsyncMock(return_value=response)
+
+    cm = AsyncMock()
+    cm.__aenter__.return_value = http_client
+    cm.__aexit__.return_value = None
+    monkeypatch.setattr(
+        "services.bot_gateway.app.api_client.httpx.AsyncClient",
+        lambda timeout: cm,
+    )
+    return http_client
+
+
+@pytest.mark.asyncio
+async def test_fetch_file_inspect_passes_bearer_and_as_user(monkeypatch):
+    http = _http_get_mock(
+        monkeypatch,
+        status_code=200,
+        response_json={"short_id": "X", "candidate_text": "t"},
+    )
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.fetch_file_inspect(
+        short_id="X", requester_username="@alice", internal_token="bot-token"
+    )
+    assert result == {"short_id": "X", "candidate_text": "t"}
+    args = http.get.await_args
+    assert args.args[0] == "http://api:8000/admin/files/X"
+    assert args.kwargs["params"] == {"as_user": "@alice"}
+    assert args.kwargs["headers"] == {"Authorization": "Bearer bot-token"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_file_inspect_returns_none_on_404(monkeypatch):
+    _http_get_mock(monkeypatch, status_code=404, response_json=None)
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.fetch_file_inspect(
+        short_id="MISSING", requester_username="@alice", internal_token="t"
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_search_files_passes_query_and_limit(monkeypatch):
+    http = _http_get_mock(
+        monkeypatch, status_code=200, response_json={"total": 0, "items": []}
+    )
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.search_files(
+        query="договор",
+        requester_username="@alice",
+        internal_token="bot-token",
+        limit=5,
+    )
+    assert result == {"total": 0, "items": []}
+    args = http.get.await_args
+    assert args.args[0] == "http://api:8000/admin/files/search"
+    assert args.kwargs["params"] == {
+        "q": "договор",
+        "as_user": "@alice",
+        "limit": 5,
+    }
+    assert args.kwargs["headers"] == {"Authorization": "Bearer bot-token"}
+
+
 @pytest.mark.asyncio
 async def test_set_persona_includes_optional_description_fields(monkeypatch):
     http = _http_mock(monkeypatch, response_json={"first_name": "x", "last_name": "y"})

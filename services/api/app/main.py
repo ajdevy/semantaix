@@ -14,9 +14,12 @@ from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
 from services.api.app.admin_auth import (
     AdminAuthRepository,
+    AdminAuthService,
     AdminSession,
     InvalidLoginCode,
+    wire_admin_auth_routes,
 )
+from services.api.app.admin_files import wire_admin_files_routes
 from services.api.app.admin_nl_ops import AdminNlOpsRepository
 from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.answerers import AnswerContext, AnswerPipeline
@@ -35,6 +38,7 @@ from services.api.app.nl_knowledge_ops import (
     NlKnowledgeOpsRepository,
 )
 from services.api.app.openrouter_client import OpenRouterClient
+from services.api.app.operator_files_view import OperatorFilesView
 from services.api.app.operators import (
     Operator,
     OperatorRepository,
@@ -55,6 +59,7 @@ from services.api.app.trace_corrections import (
     TraceCorrectionError,
     TraceCorrectionRepository,
 )
+from services.api.app.web_auth import WebAuthRepository
 
 app = create_service_app("api")
 logger = logging.getLogger(__name__)
@@ -97,6 +102,21 @@ project_repository = ProjectRepository(settings.projects_db_path)
 operator_repository = OperatorRepository(settings.operators_db_path)
 admin_auth_repository = AdminAuthRepository(settings.admin_session_db_path)
 admin_nl_ops_repository = AdminNlOpsRepository(settings.nl_ops_db_path)
+web_auth_repository = WebAuthRepository(db_path=settings.web_auth_db_path)
+admin_auth_service = AdminAuthService(
+    web_auth_repository=web_auth_repository,
+    hitl_repository=hitl_ticket_repository,
+    telegram_bot_sender=telegram_bot_sender,
+    settings=settings,
+)
+operator_files_view = OperatorFilesView(
+    operator_files_db_path=settings.operator_files_db_path,
+    knowledge_db_path=settings.knowledge_db_path,
+)
+wire_admin_auth_routes(app, service=admin_auth_service)
+wire_admin_files_routes(
+    app, auth_service=admin_auth_service, files_view=operator_files_view
+)
 
 
 def _bootstrap_default_entities() -> None:
@@ -1491,7 +1511,23 @@ def reject_knowledge_candidate(candidate_id: int) -> dict[str, object]:
 
 
 _OPERATOR_UPLOAD_TYPES = frozenset(
-    {"pdf", "docx", "pptx", "txt", "image", "audio", "video", "inline_text"}
+    {
+        "pdf",
+        "docx",
+        "pptx",
+        "txt",
+        "image",
+        "audio",
+        "video",
+        "inline_text",
+        "xlsx",
+        "csv",
+        "html",
+        "md",
+        "rtf",
+        "epub",
+        "zip",
+    }
 )
 _OPERATOR_UPLOAD_MEDIA_TYPES = frozenset({"audio", "video"})
 _operator_transcriber: object | None = None
@@ -1633,6 +1669,15 @@ _EXTENSION_TO_SOURCE_TYPE: dict[str, str] = {
     ".mkv": "video",
     ".webm": "video",
     ".avi": "video",
+    ".xlsx": "xlsx",
+    ".csv": "csv",
+    ".html": "html",
+    ".htm": "html",
+    ".md": "md",
+    ".markdown": "md",
+    ".rtf": "rtf",
+    ".epub": "epub",
+    ".zip": "zip",
 }
 
 
