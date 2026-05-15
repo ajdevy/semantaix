@@ -154,6 +154,51 @@ def test_kb_slash_with_document(isolated_bot, monkeypatch):
     assert "confidential" in summary[0]
 
 
+def test_kb_slash_with_document_persists_candidate_id(isolated_bot, monkeypatch):
+    file_path_on_disk = isolated_bot["tmp_path"] / "deck.pdf"
+    file_path_on_disk.write_bytes(b"PDF")
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        return DownloadedFile(path=file_path_on_disk, byte_size=3, mime_type=mime_type)
+
+    async def fake_submit(**kwargs):
+        return {
+            "inserted_chunks": 5,
+            "is_confidential": False,
+            "deduplicated": False,
+            "candidate_id": 7777,
+        }
+
+    monkeypatch.setattr(
+        bot_main.TelegramFileDownloader,
+        "download",
+        fake_download,
+        raising=False,
+    )
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_message(
+            caption="/kb_add",
+            attachments=[
+                {
+                    "document": {
+                        "file_id": "DOC77",
+                        "file_name": "report.pdf",
+                        "mime_type": "application/pdf",
+                        "file_size": 100,
+                    },
+                }
+            ],
+        ),
+    )
+    assert response.status_code == 200
+    records = isolated_bot["files_repo"].list_recent(username="@ajdevy", limit=10)
+    assert len(records) == 1
+    assert records[0].knowledge_candidate_id == 7777
+
+
 def test_kb_command_from_non_operator_is_ignored(isolated_bot):
     client = TestClient(bot_app)
     payload = _operator_message(text="/kb_add")

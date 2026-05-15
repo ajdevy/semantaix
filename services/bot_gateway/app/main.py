@@ -724,6 +724,12 @@ async def _process_operator_upload(
                     kb_ingest_status="ok",
                     kb_inserted_chunks=int(result.get("inserted_chunks", 0) or 0),
                 )
+                candidate_id = result.get("candidate_id")
+                if candidate_id is not None:
+                    operator_file_repository.set_candidate_id(
+                        short_id=record.short_id,
+                        knowledge_candidate_id=int(candidate_id),
+                    )
             except Exception as exc:
                 redacted = _redact_token(str(exc))
                 operator_file_repository.update_kb_status(
