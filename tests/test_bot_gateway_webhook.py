@@ -10,8 +10,14 @@ from services.bot_gateway.app.main import hitl_ticket_repository
 from tests.e2e.db_seed import load_telegram_fixture as load_fixture
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def persistence_db(tmp_path, monkeypatch) -> Path:
+    """Isolate the bot_gateway persistence DB per test.
+
+    The webhook handler now short-circuits on duplicate source_message_id,
+    so tests that share message ids across runs (the fixtures all use
+    message_id=501) would see false-duplicate-detection without isolation.
+    Autouse keeps every test in this module on its own SQLite file."""
     db_path = tmp_path / "bot_gateway_test.sqlite3"
     monkeypatch.setenv("PERSISTENCE_DB_PATH", str(db_path))
     get_settings.cache_clear()
@@ -87,12 +93,20 @@ def test_webhook_ignores_non_text_message():
 
 
 def test_duplicate_update_fixture_is_idempotent_at_gateway_level():
+    """Telegram retries the same update_id when its webhook deadline lapses.
+    Before the messaging-loop fix, the gateway processed every retry and
+    every retry produced a fresh ack + HITL ticket — the customer saw
+    "Минутку, уточню..." three times for one question. The gateway now
+    short-circuits via the persistence layer's UNIQUE(source_message_id)
+    constraint: first call is accepted, subsequent calls return ignored
+    with reason=duplicate_source_message and never reach the api."""
     client = TestClient(bot_app)
     payload = load_fixture("update_duplicate_update_id.json")
     first = client.post("/telegram/webhook", json=payload)
     second = client.post("/telegram/webhook", json=payload)
     assert first.status_code == 200 and first.json()["status"] == "accepted"
-    assert second.status_code == 200 and second.json()["status"] == "accepted"
+    assert second.status_code == 200 and second.json()["status"] == "ignored"
+    assert second.json()["reason"] == "duplicate_source_message"
 
 
 def test_webhook_rejects_non_object_payload():

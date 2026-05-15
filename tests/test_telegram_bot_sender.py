@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from services.api.app import telegram_bot_sender as sender_module
@@ -99,6 +100,75 @@ async def test_set_my_short_description_posts_setMyShortDescription_payload(monk
     await sender.set_my_short_description(short_description="На связи.")
     assert client.calls[0][0].endswith("/botabc/setMyShortDescription")
     assert client.calls[0][1] == {"short_description": "На связи."}
+
+
+class _FlakyClient:
+    """Async client double whose first .post() raises and second succeeds."""
+
+    def __init__(self, *, first_error: Exception) -> None:
+        self._first_error = first_error
+        self.call_count = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, json):
+        self.call_count += 1
+        if self.call_count == 1:
+            raise self._first_error
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"result": {"message_id": 77}}
+
+        return _Resp()
+
+
+def _http_status_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://api.telegram.org/")
+    response = httpx.Response(status_code=status, request=request)
+    return httpx.HTTPStatusError("err", request=request, response=response)
+
+
+@pytest.mark.asyncio
+async def test_send_message_retries_once_on_5xx(monkeypatch):
+    """Telegram 5xx is the only thing the retry should mask. A second
+    attempt after a transient outage avoids spurious incident reports;
+    api-side idempotency (answer_traces.trace_id) prevents the second
+    attempt becoming a duplicate user-visible message even when the first
+    actually went through and the disconnect happened on the response."""
+    client = _FlakyClient(first_error=_http_status_error(503))
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
+    sender = TelegramBotSender(bot_token="token")
+    assert await sender.send_message(chat_id=10, text="hi") == 77
+    assert client.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_send_message_retries_once_on_transport_error(monkeypatch):
+    client = _FlakyClient(first_error=httpx.ConnectError("dns failed"))
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
+    sender = TelegramBotSender(bot_token="token")
+    assert await sender.send_message(chat_id=10, text="hi") == 77
+    assert client.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_send_message_does_not_retry_on_4xx(monkeypatch):
+    """4xx (bad chat_id, blocked bot, content too long) won't change on
+    retry — retrying would waste a request slot under rate limits."""
+    client = _FlakyClient(first_error=_http_status_error(400))
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
+    sender = TelegramBotSender(bot_token="token")
+    with pytest.raises(httpx.HTTPStatusError):
+        await sender.send_message(chat_id=10, text="hi")
+    assert client.call_count == 1
 
 
 @pytest.mark.asyncio

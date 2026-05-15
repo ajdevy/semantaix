@@ -244,6 +244,107 @@ def test_inbound_invalid_operator_chat_id_skips_notification(tmp_path, monkeypat
     settings.hitl_primary_operator_chat_id = None
 
 
+def test_inbound_replaying_same_trace_id_does_not_resend_ack_or_create_ticket(
+    tmp_path, monkeypatch
+):
+    """Three POSTs with the same trace_id must produce one ack, one HITL
+    ticket, one operator DM. This is the api-side defence in depth that
+    pairs with the bot_gateway dedup short-circuit — together they make
+    triple-ack impossible regardless of which layer the duplicate hits."""
+    _wire(tmp_path)
+    settings.hitl_primary_operator_username = "@op"
+    settings.hitl_primary_operator_chat_id = "555"
+    send_mock = AsyncMock(return_value=1)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
+    _stub_pipeline(monkeypatch, AnswerResult(handled=False))
+    client = TestClient(api_app)
+
+    payload = {
+        "text": "когда могу снять багги?",
+        "chat_id": 9001,
+        "customer_username": "@customer",
+        "trace_id": "tg-update-12345",
+    }
+    first = client.post("/conversations/inbound", json=payload).json()
+    second = client.post("/conversations/inbound", json=payload).json()
+    third = client.post("/conversations/inbound", json=payload).json()
+
+    # send_message is called twice on the first request only (ack to
+    # customer + operator DM). Replays return cached metadata without any
+    # outbound side effects.
+    assert send_mock.await_count == 2
+    chats_dialed = {call.kwargs["chat_id"] for call in send_mock.await_args_list}
+    assert chats_dialed == {9001, 555}
+
+    # All three responses point at the same trace and the same ticket id.
+    assert first["hitl_ticket_id"] == second["hitl_ticket_id"] == third["hitl_ticket_id"]
+    assert second.get("deduplicated") is True
+    assert third.get("deduplicated") is True
+
+    tickets = client.get("/hitl/tickets").json()["items"]
+    assert len(tickets) == 1
+    settings.hitl_primary_operator_chat_id = None
+
+
+def test_inbound_followup_question_coalesces_to_active_ticket(tmp_path, monkeypatch):
+    """A customer's second unhandled question (different trace_id) while
+    they already have an active ticket must NOT spawn a second ticket and
+    must NOT re-ack the customer. The operator gets a follow-up DM tagged
+    with the existing ticket id."""
+    _wire(tmp_path)
+    settings.hitl_primary_operator_username = "@op"
+    settings.hitl_primary_operator_chat_id = "555"
+    send_mock = AsyncMock(return_value=1)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
+    _stub_pipeline(monkeypatch, AnswerResult(handled=False))
+    client = TestClient(api_app)
+
+    first = client.post(
+        "/conversations/inbound",
+        json={
+            "text": "когда могу снять багги?",
+            "chat_id": 9001,
+            "customer_username": "@customer",
+            "trace_id": "tg-update-1",
+        },
+    ).json()
+    second = client.post(
+        "/conversations/inbound",
+        json={
+            "text": "алло?",
+            "chat_id": 9001,
+            "customer_username": "@customer",
+            "trace_id": "tg-update-2",
+        },
+    ).json()
+
+    assert first["hitl_ticket_id"] == second["hitl_ticket_id"]
+    assert second.get("coalesced") is True
+
+    # Acks: only the first message gets one. The customer should not see
+    # the "Минутку, уточню..." line twice.
+    customer_calls = [
+        c for c in send_mock.await_args_list if c.kwargs["chat_id"] == 9001
+    ]
+    assert len(customer_calls) == 1
+    assert "уточню" in customer_calls[0].kwargs["text"].lower()
+
+    # Operator gets two DMs (original + follow-up) but they share the
+    # same HITL ticket id so the operator sees one conversation.
+    operator_calls = [
+        c for c in send_mock.await_args_list if c.kwargs["chat_id"] == 555
+    ]
+    assert len(operator_calls) == 2
+    ticket_id = first["hitl_ticket_id"]
+    assert all(f"HITL ticket #{ticket_id}" in c.kwargs["text"] for c in operator_calls)
+    assert "[follow-up]" in operator_calls[1].kwargs["text"]
+
+    # And of course exactly one HITL ticket exists.
+    tickets = client.get("/hitl/tickets").json()["items"]
+    assert len(tickets) == 1
+    settings.hitl_primary_operator_chat_id = None
+
+
 def test_inbound_runtime_config_overrides_ack_message(tmp_path, monkeypatch):
     _wire(tmp_path)
     hitl_ticket_repository.set_runtime_config(
