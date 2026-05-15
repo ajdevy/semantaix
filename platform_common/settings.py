@@ -74,6 +74,8 @@ class AppSettings(BaseSettings):
     operator_upload_api_timeout_seconds: int = 120
     operator_kb_session_ttl_seconds: int = 600
     operator_media_group_debounce_seconds: float = 3.0
+    operator_media_group_settling_cap_seconds: float = 30.0
+    operator_media_group_poll_interval_seconds: float = 0.5
     operator_files_db_path: str = ".data/semantaix_operator_files.db"
     operator_files_list_default_limit: int = 10
     operator_files_list_max_limit: int = 50
