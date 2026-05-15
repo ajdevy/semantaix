@@ -16,8 +16,11 @@ from services.api.app.main import (
 
 
 @pytest.fixture(autouse=True)
-def _isolated_runtime_config(tmp_path):
+def _isolated_runtime_config(tmp_path, monkeypatch):
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
+    # Other test files (test_api_hitl_contract, test_api_conversations_inbound)
+    # mutate this global; pin it for this file so the authz contract is stable.
+    monkeypatch.setattr(settings, "hitl_primary_operator_username", "@ajdevy")
     yield
 
 
@@ -191,6 +194,49 @@ def test_persona_endpoint_rejects_unauthorized_caller(monkeypatch):
             "first_name": "Анна",
             "last_name": "Иванова",
             "updated_by": "@someone_else",
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "not_authorized"
+
+
+def test_persona_endpoint_accepts_runtime_configured_operator(monkeypatch):
+    """When /hitl_config has moved the operator to @support_b, the persona
+    endpoint must accept calls signed as @support_b (and only @support_b)."""
+    _patch_identity_calls(monkeypatch)
+    hitl_ticket_repository.set_runtime_config(
+        key="hitl_primary_operator_username",
+        value="@support_b",
+        updated_by="@ajdevy",
+    )
+    client = TestClient(api_app)
+    response = client.post(
+        "/hitl/runtime-config/persona",
+        json={
+            "first_name": "Анна",
+            "last_name": "Иванова",
+            "updated_by": "@support_b",
+        },
+    )
+    assert response.status_code == 200
+
+
+def test_persona_endpoint_rejects_default_operator_when_overridden(monkeypatch):
+    """Symmetric guard: once the runtime operator is @support_b, the original
+    default @ajdevy is no longer authorized."""
+    _patch_identity_calls(monkeypatch)
+    hitl_ticket_repository.set_runtime_config(
+        key="hitl_primary_operator_username",
+        value="@support_b",
+        updated_by="@ajdevy",
+    )
+    client = TestClient(api_app)
+    response = client.post(
+        "/hitl/runtime-config/persona",
+        json={
+            "first_name": "Анна",
+            "last_name": "Иванова",
+            "updated_by": settings.hitl_primary_operator_username,
         },
     )
     assert response.status_code == 403

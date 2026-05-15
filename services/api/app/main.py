@@ -784,7 +784,11 @@ def resolve_hitl_ticket(ticket_id: int) -> dict[str, object]:
 
 @app.post("/hitl/runtime-config/persona")
 async def update_bot_persona(request: BotPersonaRequest) -> dict[str, object]:
-    if request.updated_by != settings.hitl_config_admin_username:
+    effective_operator = (
+        hitl_ticket_repository.get_runtime_config("hitl_primary_operator_username")
+        or settings.hitl_primary_operator_username
+    )
+    if request.updated_by != effective_operator:
         raise HTTPException(status_code=403, detail="not_authorized")
 
     first_name = _validate_persona_name(request.first_name)

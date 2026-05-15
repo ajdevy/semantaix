@@ -9,6 +9,7 @@ from platform_common.settings import get_settings
 from services.bot_gateway.app.main import (
     api_client,
     hitl_ticket_repository,
+    settings,
     telegram_bot_sender,
 )
 from services.bot_gateway.app.main import app as bot_app
@@ -24,6 +25,9 @@ def _isolated_bot_gateway(tmp_path, monkeypatch):
     hitl_ticket_repository.db_path = str(tmp_path / "hitl.sqlite3")
     persistence_path = tmp_path / "persistence.sqlite3"
     monkeypatch.setenv("PERSISTENCE_DB_PATH", str(persistence_path))
+    # Other test files mutate this global; pin it so the persona authz
+    # contract (effective operator = @ajdevy by default) is stable.
+    monkeypatch.setattr(settings, "hitl_primary_operator_username", "@ajdevy")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -90,7 +94,8 @@ def test_persona_command_without_args_sends_dialog_prompt(monkeypatch):
     assert "Как нас будут звать?" in send.await_args.kwargs["text"]
 
 
-def test_persona_natural_trigger_sends_dialog_prompt(monkeypatch):
+def test_persona_natural_trigger_without_name_sends_dialog_prompt(monkeypatch):
+    """Bare natural triggers (no name in the same line) still open the full dialog."""
     set_persona = AsyncMock()
     monkeypatch.setattr(api_client, "set_persona", set_persona)
     send = AsyncMock(return_value=42)
@@ -153,7 +158,9 @@ def test_persona_reply_with_malformed_answer_reprompts(monkeypatch):
     assert "Не разобрал" in send.await_args.kwargs["text"]
 
 
-def test_persona_non_admin_caller_is_ignored(monkeypatch):
+def test_persona_caller_other_than_effective_operator_is_ignored(monkeypatch):
+    """A non-operator user trying to rename the bot is silently ignored
+    (the gateway should not engage in dialog with random customers)."""
     set_persona = AsyncMock()
     monkeypatch.setattr(api_client, "set_persona", set_persona)
     send = AsyncMock(return_value=42)
@@ -170,7 +177,57 @@ def test_persona_non_admin_caller_is_ignored(monkeypatch):
     send.assert_not_awaited()
 
 
-def test_persona_non_admin_replying_to_prompt_is_ignored(monkeypatch):
+def test_persona_runtime_configured_operator_can_rename(monkeypatch):
+    """When /hitl_config sets a different operator, that operator (not the
+    default admin) is authorized to rename the bot — this is the regression
+    fix for 'смени имя на …' silently failing for non-admin operators."""
+    hitl_ticket_repository.set_runtime_config(
+        key="hitl_primary_operator_username",
+        value="@support_b",
+        updated_by="@ajdevy",
+    )
+    set_persona = AsyncMock(
+        return_value={"first_name": "Анна", "last_name": "Иванова"}
+    )
+    monkeypatch.setattr(api_client, "set_persona", set_persona)
+    send = AsyncMock(return_value=42)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="/persona Анна Иванова", username="support_b"),
+    )
+    assert response.json()["status"] == "persona_updated"
+    set_persona.assert_awaited_once_with(
+        first_name="Анна", last_name="Иванова", updated_by="@support_b"
+    )
+
+
+def test_persona_default_admin_is_no_longer_special_when_operator_overridden(monkeypatch):
+    """If the runtime operator is @support_b, then @ajdevy is just an ex-operator —
+    persona commands from @ajdevy must be ignored. This guards against the
+    inverse regression of leaving an admin backdoor."""
+    hitl_ticket_repository.set_runtime_config(
+        key="hitl_primary_operator_username",
+        value="@support_b",
+        updated_by="@ajdevy",
+    )
+    set_persona = AsyncMock()
+    monkeypatch.setattr(api_client, "set_persona", set_persona)
+    send = AsyncMock(return_value=42)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="/persona Анна Иванова", username="ajdevy"),
+    )
+    assert response.json()["reason"] == "unauthorized_persona"
+    set_persona.assert_not_awaited()
+
+
+def test_persona_reply_from_non_operator_is_ignored(monkeypatch):
     set_persona = AsyncMock()
     monkeypatch.setattr(api_client, "set_persona", set_persona)
     send = AsyncMock(return_value=42)
@@ -208,8 +265,9 @@ def test_persona_api_failure_reports_status_to_operator(monkeypatch):
     assert "не получилось" in send.await_args.kwargs["text"].lower()
 
 
-def test_persona_command_with_partial_args_falls_to_dialog(monkeypatch):
-    """/persona OnlyOneArg → prompt dialog (we don't try to guess)."""
+def test_persona_slash_with_only_first_name_asks_for_surname(monkeypatch):
+    """/persona Анна → ask only for the surname, embedding the captured first
+    name in the prompt text so the Telegram reply can recover it."""
     set_persona = AsyncMock()
     monkeypatch.setattr(api_client, "set_persona", set_persona)
     send = AsyncMock(return_value=42)
@@ -220,8 +278,14 @@ def test_persona_command_with_partial_args_falls_to_dialog(monkeypatch):
         "/telegram/webhook",
         json=_operator_payload(text="/persona Анна"),
     )
-    assert response.json()["status"] == "persona_prompt_sent"
+    body = response.json()
+    assert body["status"] == "persona_partial_first_name"
+    assert body["first_name"] == "Анна"
     set_persona.assert_not_awaited()
+    send.assert_awaited_once()
+    sent_text = send.await_args.kwargs["text"]
+    assert sent_text.startswith("📝 Поняла, имя —")
+    assert "«Анна»" in sent_text
 
 
 def test_persona_send_swallows_missing_bot_token(monkeypatch):
@@ -267,4 +331,209 @@ def test_persona_trigger_does_not_hijack_unrelated_operator_reply(monkeypatch):
         ),
     )
     assert response.json()["status"] == "operator_reply_delivered"
+    set_persona.assert_not_awaited()
+
+
+# --- One-shot natural trigger ------------------------------------------------
+
+
+def test_persona_natural_trigger_with_first_and_last_applies_oneshot(monkeypatch):
+    """`смени имя на Анна Иванова` must rename in one shot, no dialog."""
+    set_persona = AsyncMock(
+        return_value={"first_name": "Анна", "last_name": "Иванова"}
+    )
+    monkeypatch.setattr(api_client, "set_persona", set_persona)
+    send = AsyncMock(return_value=42)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="смени имя на Анна Иванова"),
+    )
+    assert response.json()["status"] == "persona_updated"
+    set_persona.assert_awaited_once_with(
+        first_name="Анна", last_name="Иванова", updated_by="@ajdevy"
+    )
+    send.assert_awaited_once()
+    assert "Анна Иванова" in send.await_args.kwargs["text"]
+
+
+def test_persona_natural_trigger_with_only_first_asks_for_surname(monkeypatch):
+    """`смени имя на Анна` (no surname) → partial prompt that asks only for the
+    surname, with the captured first name encoded in the prompt text."""
+    set_persona = AsyncMock()
+    monkeypatch.setattr(api_client, "set_persona", set_persona)
+    send = AsyncMock(return_value=42)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="смени имя на Анна"),
+    )
+    body = response.json()
+    assert body["status"] == "persona_partial_first_name"
+    assert body["first_name"] == "Анна"
+    set_persona.assert_not_awaited()
+    send.assert_awaited_once()
+    sent_text = send.await_args.kwargs["text"]
+    assert sent_text.startswith("📝 Поняла, имя —")
+    assert "«Анна»" in sent_text
+    assert "фамилию" in sent_text.lower()
+
+
+def test_persona_natural_trigger_without_preposition_applies_oneshot(monkeypatch):
+    """`новое имя Анна Иванова` (no «на» / «в») also one-shot renames."""
+    set_persona = AsyncMock(
+        return_value={"first_name": "Анна", "last_name": "Иванова"}
+    )
+    monkeypatch.setattr(api_client, "set_persona", set_persona)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="новое имя Анна Иванова"),
+    )
+    assert response.json()["status"] == "persona_updated"
+    set_persona.assert_awaited_once_with(
+        first_name="Анна", last_name="Иванова", updated_by="@ajdevy"
+    )
+
+
+def test_persona_natural_trigger_with_inflected_preposition_v(monkeypatch):
+    """`переименуй в Анну Иванову` (genitive after «в») applies as-is —
+    declension is the operator's responsibility."""
+    set_persona = AsyncMock(
+        return_value={"first_name": "Анну", "last_name": "Иванову"}
+    )
+    monkeypatch.setattr(api_client, "set_persona", set_persona)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="переименуй в Анну Иванову"),
+    )
+    assert response.json()["status"] == "persona_updated"
+    set_persona.assert_awaited_once_with(
+        first_name="Анну", last_name="Иванову", updated_by="@ajdevy"
+    )
+
+
+def test_persona_natural_trigger_extra_tokens_use_first_two(monkeypatch):
+    """`смени имя на Анна Иванова Петрова` — extra tokens are ignored."""
+    set_persona = AsyncMock(
+        return_value={"first_name": "Анна", "last_name": "Иванова"}
+    )
+    monkeypatch.setattr(api_client, "set_persona", set_persona)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(text="смени имя на Анна Иванова Петрова"),
+    )
+    assert response.json()["status"] == "persona_updated"
+    set_persona.assert_awaited_once_with(
+        first_name="Анна", last_name="Иванова", updated_by="@ajdevy"
+    )
+
+
+# --- Partial reply (surname-only) -------------------------------------------
+
+
+def test_persona_partial_reply_completes_one_shot(monkeypatch):
+    """Operator answered the partial prompt with the surname only → apply."""
+    set_persona = AsyncMock(
+        return_value={"first_name": "Анна", "last_name": "Иванова"}
+    )
+    monkeypatch.setattr(api_client, "set_persona", set_persona)
+    send = AsyncMock(return_value=42)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(
+            text="Иванова",
+            reply_to_text=(
+                "📝 Поняла, имя — «Анна». Напишите фамилию в ответ на это сообщение."
+            ),
+        ),
+    )
+    assert response.json()["status"] == "persona_updated"
+    set_persona.assert_awaited_once_with(
+        first_name="Анна", last_name="Иванова", updated_by="@ajdevy"
+    )
+
+
+def test_persona_partial_reply_with_multiword_surname_is_reprompted(monkeypatch):
+    """If the operator answers with two tokens to the partial prompt, ask again —
+    don't guess which one is the surname."""
+    set_persona = AsyncMock()
+    monkeypatch.setattr(api_client, "set_persona", set_persona)
+    send = AsyncMock(return_value=42)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(
+            text="Иванова Петрова",
+            reply_to_text=(
+                "📝 Поняла, имя — «Анна». Напишите фамилию в ответ на это сообщение."
+            ),
+        ),
+    )
+    assert response.json()["status"] == "persona_invalid_partial_reply"
+    set_persona.assert_not_awaited()
+    send.assert_awaited_once()
+    reprompt = send.await_args.kwargs["text"]
+    assert reprompt.startswith("📝 Поняла, имя —")
+    assert "«Анна»" in reprompt
+
+
+def test_persona_partial_reply_with_empty_surname_is_reprompted(monkeypatch):
+    set_persona = AsyncMock()
+    monkeypatch.setattr(api_client, "set_persona", set_persona)
+    send = AsyncMock(return_value=42)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(
+            text="   ",
+            reply_to_text=(
+                "📝 Поняла, имя — «Анна». Напишите фамилию в ответ на это сообщение."
+            ),
+        ),
+    )
+    # Whitespace-only text gets stripped to "" by normalize_update before the
+    # webhook reaches the persona handler — treated as attachment-only and
+    # ignored upstream.
+    assert response.json()["status"] == "ignored"
+    set_persona.assert_not_awaited()
+
+
+def test_persona_partial_reply_from_non_operator_is_ignored(monkeypatch):
+    set_persona = AsyncMock()
+    monkeypatch.setattr(api_client, "set_persona", set_persona)
+    send = AsyncMock(return_value=42)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_payload(
+            text="Иванова",
+            reply_to_text=(
+                "📝 Поняла, имя — «Анна». Напишите фамилию в ответ на это сообщение."
+            ),
+            username="random_user",
+        ),
+    )
+    assert response.json()["reason"] == "unauthorized_persona"
     set_persona.assert_not_awaited()

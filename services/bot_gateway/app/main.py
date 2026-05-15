@@ -44,6 +44,11 @@ _PERSONA_REPROMPT = (
     "📝 Как нас будут звать? Не разобрал — пришлите Имя и Фамилию "
     "через пробел, например: Анна Иванова"
 )
+# Partial dialog: when only a first name is given, we ask for the surname and
+# encode the captured first name in the prompt text itself. The reply chain
+# is the only state carrier, just like _PERSONA_MARKER for the full dialog.
+_PERSONA_PARTIAL_MARKER = "📝 Поняла, имя —"
+_PERSONA_PARTIAL_FIRST_RE = re.compile(r"^📝 Поняла, имя — «([^»]+)»")
 _PERSONA_TRIGGER_RE = re.compile(
     r"^/persona(\b|$)"
     r"|^переименуй\b"
@@ -53,6 +58,23 @@ _PERSONA_TRIGGER_RE = re.compile(
     r"|^новое\s+имя\b",
     re.IGNORECASE,
 )
+# After a natural trigger, an optional Russian preposition («на» / «в») may
+# precede the actual name — strip it before tokenising.
+_PERSONA_PREPOSITION_RE = re.compile(r"^\s*(?:на|в)\s+", re.IGNORECASE)
+
+
+def _persona_partial_prompt(first_name: str) -> str:
+    return (
+        f"📝 Поняла, имя — «{first_name}». "
+        "Напишите фамилию в ответ на это сообщение."
+    )
+
+
+def _persona_partial_reprompt(first_name: str) -> str:
+    return (
+        f"📝 Поняла, имя — «{first_name}». "
+        "Не разобрала — напишите только фамилию, одним словом."
+    )
 
 _HELP_TRIGGER_RE = re.compile(r"^\s*/help\b", re.IGNORECASE)
 
@@ -67,9 +89,10 @@ _HELP_TEXT = (
     "• Свободный текст: «добавь в базу …», «сохрани в kb …», "
     "«запомни это для базы знаний …» — то же, что /kb_add.\n"
     "\n"
-    "👤 Имя бота (админ)\n"
+    "👤 Имя бота\n"
     "• /persona Имя Фамилия — переименовать бота.\n"
-    "• /persona — открыть диалог переименования.\n"
+    "• /persona Имя — спросит только фамилию.\n"
+    "• /persona или «смени имя на …» — переименовать одной фразой.\n"
     "\n"
     "⚙️ Маршрутизация HITL (админ)\n"
     "• /hitl_config @username chat_id — назначить оператора "
@@ -191,17 +214,44 @@ async def _handle_persona_command(
 ) -> dict[str, str] | None:
     username = normalized.username
     text = normalized.text
+    reply_to = normalized.reply_to_text
+    is_persona_partial_reply = (
+        reply_to is not None and reply_to.startswith(_PERSONA_PARTIAL_MARKER)
+    )
+    # Full prompt and partial prompt both start with the 📝 emoji, but their
+    # full prefixes are disjoint, so startswith checks unambiguously route.
     is_persona_reply = (
-        normalized.reply_to_text is not None
-        and normalized.reply_to_text.startswith(_PERSONA_MARKER)
+        reply_to is not None
+        and reply_to.startswith(_PERSONA_MARKER)
+        and not is_persona_partial_reply
     )
     trigger_match = _PERSONA_TRIGGER_RE.match(text)
 
-    if not is_persona_reply and trigger_match is None:
+    if not is_persona_reply and not is_persona_partial_reply and trigger_match is None:
         return None
 
-    if username != settings.hitl_config_admin_username:
+    if username != _effective_operator_username():
         return {"status": "ignored", "reason": "unauthorized_persona"}
+
+    if is_persona_partial_reply:
+        first_match = _PERSONA_PARTIAL_FIRST_RE.match(reply_to or "")
+        if first_match is None:  # pragma: no cover - marker matched, regex must too
+            await _safe_send_text(chat_id=normalized.chat_id, text=_PERSONA_REPROMPT)
+            return {"status": "persona_invalid_partial_reply"}
+        first_name = first_match.group(1)
+        surname_tokens = text.split()
+        if len(surname_tokens) != 1:
+            await _safe_send_text(
+                chat_id=normalized.chat_id,
+                text=_persona_partial_reprompt(first_name),
+            )
+            return {"status": "persona_invalid_partial_reply"}
+        return await _apply_persona(
+            chat_id=normalized.chat_id,
+            username=username,
+            first_name=first_name,
+            last_name=surname_tokens[0],
+        )
 
     if is_persona_reply:
         parts = text.split()
@@ -215,16 +265,48 @@ async def _handle_persona_command(
             last_name=parts[1],
         )
 
-    # Slash command or natural trigger. /persona Имя Фамилия → one-shot.
+    # Slash command takes its name tokens directly (no preposition stripping).
     if text.lower().startswith("/persona"):
         parts = text.split()
-        if len(parts) == 3:
+        if len(parts) >= 3:
             return await _apply_persona(
                 chat_id=normalized.chat_id,
                 username=username,
                 first_name=parts[1],
                 last_name=parts[2],
             )
+        if len(parts) == 2:
+            await _safe_send_text(
+                chat_id=normalized.chat_id,
+                text=_persona_partial_prompt(parts[1]),
+            )
+            return {"status": "persona_partial_first_name", "first_name": parts[1]}
+        await _safe_send_text(chat_id=normalized.chat_id, text=_PERSONA_PROMPT)
+        return {"status": "persona_prompt_sent"}
+
+    # Natural-language trigger ("смени имя …", "переименуй …", "новое имя …").
+    # Extract the tail after the matched trigger; strip an optional Russian
+    # preposition («на» / «в»); take up to two tokens as first/last name.
+    assert trigger_match is not None  # narrowed by the early-return above
+    tail = text[trigger_match.end():]
+    tail = _PERSONA_PREPOSITION_RE.sub("", tail, count=1)
+    name_tokens = tail.split()
+    if len(name_tokens) >= 2:
+        return await _apply_persona(
+            chat_id=normalized.chat_id,
+            username=username,
+            first_name=name_tokens[0],
+            last_name=name_tokens[1],
+        )
+    if len(name_tokens) == 1:
+        await _safe_send_text(
+            chat_id=normalized.chat_id,
+            text=_persona_partial_prompt(name_tokens[0]),
+        )
+        return {
+            "status": "persona_partial_first_name",
+            "first_name": name_tokens[0],
+        }
 
     await _safe_send_text(chat_id=normalized.chat_id, text=_PERSONA_PROMPT)
     return {"status": "persona_prompt_sent"}
