@@ -12,7 +12,13 @@ _SENTINEL = "ESCALATE_TO_HUMAN"
 
 
 class _RagReader(Protocol):
-    def retrieve(self, *, query: str, limit: int = 3) -> list[RagChunk]: ...
+    def retrieve(
+        self,
+        *,
+        query: str,
+        limit: int = 3,
+        project_id: int | None = None,
+    ) -> list[RagChunk]: ...
 
 
 class _PersonaReader(Protocol):
@@ -36,7 +42,9 @@ class GroundedRagAnswerer:
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
-        chunks = self._rag.retrieve(query=question, limit=3)
+        chunks = self._rag.retrieve(
+            query=question, limit=3, project_id=ctx.project_id
+        )
         if not chunks or chunks[0].score < ctx.grounding_threshold:
             return AnswerResult(handled=False)
 

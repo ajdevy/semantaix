@@ -65,6 +65,7 @@ class RagChunk:
     chunk_text: str
     score: float
     is_confidential: bool = False
+    project_id: int | None = None
 
 
 class RagRepository:
@@ -72,7 +73,14 @@ class RagRepository:
         self.db_path = db_path
         init_schema(db_path)
 
-    def ingest(self, *, source_id: str, text: str, is_confidential: bool = False) -> int:
+    def ingest(
+        self,
+        *,
+        source_id: str,
+        text: str,
+        is_confidential: bool = False,
+        project_id: int | None = None,
+    ) -> int:
         init_schema(self.db_path)
         inserted = 0
         chunks = split_into_chunks(text)
@@ -83,10 +91,17 @@ class RagRepository:
                 cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO rag_chunks
-                        (source_id, chunk_hash, chunk_text, is_confidential)
-                    VALUES (?, ?, ?, ?)
+                        (source_id, chunk_hash, chunk_text,
+                         is_confidential, project_id)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (source_id, digest, chunk, confidential_flag),
+                    (
+                        source_id,
+                        digest,
+                        chunk,
+                        confidential_flag,
+                        project_id,
+                    ),
                 )
                 if cursor.rowcount > 0:
                     inserted += 1
@@ -103,16 +118,31 @@ class RagRepository:
             )
             return int(cursor.rowcount or 0)
 
-    def retrieve(self, *, query: str, limit: int = 3) -> list[RagChunk]:
+    def retrieve(
+        self,
+        *,
+        query: str,
+        limit: int = 3,
+        project_id: int | None = None,
+    ) -> list[RagChunk]:
         init_schema(self.db_path)
         query_tokens = _tokenize(query)
         if not query_tokens:
             return []
 
         with _connect(self.db_path) as connection:
-            rows = connection.execute(
-                "SELECT id, source_id, chunk_text, is_confidential FROM rag_chunks"
-            ).fetchall()
+            if project_id is None:
+                rows = connection.execute(
+                    "SELECT id, source_id, chunk_text, is_confidential, "
+                    "project_id FROM rag_chunks"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT id, source_id, chunk_text, is_confidential, "
+                    "project_id FROM rag_chunks "
+                    "WHERE project_id = ? OR project_id IS NULL",
+                    (project_id,),
+                ).fetchall()
 
         scored: list[RagChunk] = []
         for row in rows:
@@ -122,6 +152,9 @@ class RagRepository:
             if overlap <= 0:
                 continue
             score = overlap / max(len(query_tokens), 1)
+            chunk_project_id = (
+                int(row["project_id"]) if row["project_id"] is not None else None
+            )
             scored.append(
                 RagChunk(
                     id=int(row["id"]),
@@ -129,6 +162,7 @@ class RagRepository:
                     chunk_text=chunk_text,
                     score=score,
                     is_confidential=bool(row["is_confidential"]),
+                    project_id=chunk_project_id,
                 )
             )
 

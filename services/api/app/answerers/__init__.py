@@ -24,6 +24,7 @@ class AnswerContext:
     timezone: str = "Europe/Moscow"
     location: str = "Moscow"
     grounding_threshold: float = 0.6
+    project_id: int | None = None
 
 
 class Answerer(Protocol):
