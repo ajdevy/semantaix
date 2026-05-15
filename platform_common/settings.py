@@ -79,6 +79,10 @@ class AppSettings(BaseSettings):
     operator_files_db_path: str = ".data/semantaix_operator_files.db"
     operator_files_list_default_limit: int = 10
     operator_files_list_max_limit: int = 50
+    web_auth_db_path: str = ".data/semantaix_web_auth.db"
+    web_session_cookie_name: str = "semantaix_session"
+    web_session_cookie_secure: bool = True
+    internal_service_token: str | None = None
     faster_whisper_model_size: str = "base"
     faster_whisper_compute_type: str = "int8"
     faster_whisper_cache_dir: str = "/app/.cache/whisper"
