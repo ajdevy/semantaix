@@ -2,8 +2,8 @@ from html import escape as _esc
 from typing import Annotated
 
 import httpx
-from fastapi import File, Form, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi import File, Form, Request, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
@@ -78,6 +78,7 @@ def admin_shell() -> str:
         <h1>Semantaix Admin</h1>
         <p>Bootstrap admin shell is running.</p>
         <ul>
+          <li><a href='/files'>Files (inspect extracted text)</a></li>
           <li><a href='/knowledge-upload'>Upload to knowledge base</a></li>
           <li><a href='/answer-traces'>Answer traces</a></li>
           <li><a href='/backups'>Backups</a></li>
@@ -330,6 +331,338 @@ def answer_trace_detail(trace_id: str) -> str:
       </body>
     </html>
     """
+
+
+async def _api_get(
+    request: Request, path: str, *, params: dict | None = None
+) -> tuple[int, dict]:
+    cookie = request.cookies.get(_settings.web_session_cookie_name)
+    headers: dict[str, str] = {}
+    if cookie:
+        headers["Cookie"] = f"{_settings.web_session_cookie_name}={cookie}"
+    url = f"{_settings.api_internal_base_url.rstrip('/')}{path}"
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(url, params=params or {}, headers=headers)
+    try:
+        body = response.json()
+    except ValueError:
+        body = {"detail": response.text or "api_returned_non_json"}
+    return response.status_code, body
+
+
+async def _resolve_principal(request: Request) -> dict | None:
+    status, body = await _api_get(request, "/admin/auth/me")
+    if status == 200:
+        return body
+    return None
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_form(error: str | None = None) -> str:
+    note = ""
+    if error:
+        note = f"<p style='color:#a00'>{_esc(error)}</p>"
+    return f"""
+    <!doctype html>
+    <html>
+      <head><title>Semantaix · Sign in</title></head>
+      <body>
+        <h1>Sign in to Semantaix</h1>
+        <p>Enter your Telegram username and we will DM you a one-time code.</p>
+        {note}
+        <form action='/login/request_code' method='post'>
+          <p>
+            <label>Telegram username
+              <input type='text' name='username' placeholder='@alice' required />
+            </label>
+          </p>
+          <p><button type='submit'>Send code</button></p>
+        </form>
+      </body>
+    </html>
+    """
+
+
+def _render_verify_form(*, username: str, error: str | None = None) -> str:
+    note = ""
+    if error:
+        note = f"<p style='color:#a00'>{_esc(error)}</p>"
+    return f"""
+    <!doctype html>
+    <html>
+      <head><title>Semantaix · Enter code</title></head>
+      <body>
+        <h1>Enter the code from Telegram</h1>
+        <p>A 6-digit code was sent to <code>{_esc(username)}</code>.</p>
+        {note}
+        <form action='/login/verify' method='post'>
+          <input type='hidden' name='username' value='{_esc(username)}' />
+          <p>
+            <label>Code
+              <input type='text' name='code' inputmode='numeric'
+                     pattern='\\d{{6}}' maxlength='6' required />
+            </label>
+          </p>
+          <p><button type='submit'>Sign in</button></p>
+        </form>
+        <p><a href='/login'>Send a new code</a></p>
+      </body>
+    </html>
+    """
+
+
+@app.post("/login/request_code", response_class=HTMLResponse)
+async def login_request_code(username: Annotated[str, Form()]) -> HTMLResponse:
+    url = f"{_settings.api_internal_base_url.rstrip('/')}/admin/auth/request_code"
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(url, json={"username": username})
+    if response.status_code == 404:
+        return HTMLResponse(
+            login_form(error=f"Этот @username не зарегистрирован: {username}")
+        )
+    if response.status_code != 200:
+        return HTMLResponse(
+            login_form(error=f"Не удалось отправить код (HTTP {response.status_code})")
+        )
+    return HTMLResponse(_render_verify_form(username=username))
+
+
+@app.post("/login/verify")
+async def login_verify(
+    username: Annotated[str, Form()], code: Annotated[str, Form()]
+) -> Response:
+    url = f"{_settings.api_internal_base_url.rstrip('/')}/admin/auth/verify"
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(
+            url, json={"username": username, "code": code}
+        )
+    if response.status_code == 200:
+        redirect = RedirectResponse(url="/files", status_code=303)
+        set_cookie = response.headers.get("set-cookie")
+        if set_cookie:
+            redirect.raw_headers.append(
+                (b"set-cookie", set_cookie.encode("latin-1"))
+            )
+        return redirect
+    if response.status_code == 410:
+        return HTMLResponse(
+            _render_verify_form(
+                username=username,
+                error="Код устарел. Запросите новый.",
+            )
+        )
+    if response.status_code == 429:
+        return HTMLResponse(
+            _render_verify_form(
+                username=username,
+                error="Слишком много неверных попыток. Запросите новый код.",
+            )
+        )
+    return HTMLResponse(
+        _render_verify_form(username=username, error="Неверный код.")
+    )
+
+
+@app.post("/logout")
+async def logout_submit(request: Request) -> Response:
+    cookie = request.cookies.get(_settings.web_session_cookie_name)
+    if cookie:
+        headers = {"Cookie": f"{_settings.web_session_cookie_name}={cookie}"}
+        url = f"{_settings.api_internal_base_url.rstrip('/')}/admin/auth/logout"
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(url, headers=headers)
+    redirect = RedirectResponse(url="/login", status_code=303)
+    redirect.delete_cookie(
+        key=_settings.web_session_cookie_name, path="/"
+    )
+    return redirect
+
+
+def _format_file_size(byte_count: int | None) -> str:
+    if byte_count is None:
+        return "—"
+    if byte_count >= 1024 * 1024:
+        return f"{byte_count // (1024 * 1024)} MB"
+    if byte_count >= 1024:
+        return f"{byte_count // 1024} KB"
+    return f"{byte_count} B"
+
+
+def _render_file_list_row(item: dict) -> str:
+    short_id = _esc(str(item.get("short_id", "")))
+    name = _esc(str(item.get("source_file_name") or ""))
+    uploader = _esc(str(item.get("uploaded_by") or ""))
+    uploaded_at = _esc(str(item.get("uploaded_at") or ""))
+    size = _format_file_size(item.get("file_size_bytes"))
+    confidential = "🔒" if item.get("is_confidential") else ""
+    kb_status = _esc(str(item.get("kb_ingest_status") or ""))
+    chunks = item.get("kb_inserted_chunks")
+    chunks_str = str(chunks) if chunks is not None else "—"
+    chars = _esc(str(item.get("extracted_chars", 0)))
+    return (
+        f"<tr>"
+        f"<td><a href='/files/{short_id}'>{short_id}</a></td>"
+        f"<td>{name}</td>"
+        f"<td>{uploader}</td>"
+        f"<td>{uploaded_at}</td>"
+        f"<td>{size}</td>"
+        f"<td>{confidential}</td>"
+        f"<td>{kb_status} · {chunks_str}</td>"
+        f"<td>{chars}</td>"
+        f"</tr>"
+    )
+
+
+def _render_search_hit_row(item: dict) -> str:
+    short_id = _esc(str(item.get("short_id", "")))
+    name = _esc(str(item.get("source_file_name") or ""))
+    uploader = _esc(str(item.get("uploaded_by") or ""))
+    uploaded_at = _esc(str(item.get("uploaded_at") or ""))
+    snippet = _esc(str(item.get("snippet") or ""))
+    return (
+        f"<tr>"
+        f"<td><a href='/files/{short_id}'>{short_id}</a></td>"
+        f"<td>{name}</td>"
+        f"<td>{uploader}</td>"
+        f"<td>{uploaded_at}</td>"
+        f"<td>{snippet}</td>"
+        f"</tr>"
+    )
+
+
+@app.get("/files", response_class=HTMLResponse)
+async def files_list(
+    request: Request, q: str | None = None, owner: str | None = None
+) -> Response:
+    principal = await _resolve_principal(request)
+    if principal is None:
+        return RedirectResponse(url="/login", status_code=303)
+    if q and len(q.strip()) >= 2:
+        status, body = await _api_get(
+            request, "/admin/files/search", params={"q": q.strip()}
+        )
+        rows = "".join(
+            _render_search_hit_row(item) for item in body.get("items", [])
+        )
+        table = (
+            "<table border='1' cellpadding='6'>"
+            "<thead><tr><th>ID</th><th>File</th><th>Uploader</th>"
+            "<th>Uploaded</th><th>Snippet</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+            if rows
+            else "<p>Ничего не найдено.</p>"
+        )
+        section_title = f"Search results for «{_esc(q.strip())}»"
+    else:
+        params: dict = {}
+        if owner and principal.get("role") == "admin":
+            params["owner"] = owner
+        status, body = await _api_get(request, "/admin/files", params=params)
+        rows = "".join(
+            _render_file_list_row(item) for item in body.get("items", [])
+        )
+        table = (
+            "<table border='1' cellpadding='6'>"
+            "<thead><tr><th>ID</th><th>File</th><th>Uploader</th>"
+            "<th>Uploaded</th><th>Size</th><th>🔒</th>"
+            "<th>KB status</th><th>Chars</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table>"
+            if rows
+            else "<p>Файлов пока нет.</p>"
+        )
+        section_title = "All files" if principal.get("role") == "admin" else "Your files"
+    username = _esc(str(principal.get("username", "")))
+    role = _esc(str(principal.get("role", "")))
+    owner_form = ""
+    if principal.get("role") == "admin":
+        owner_form = (
+            "<input type='text' name='owner' placeholder='filter by @owner' "
+            f"value='{_esc(owner or '')}' />"
+        )
+    return HTMLResponse(
+        f"""
+        <!doctype html>
+        <html>
+          <head><title>Semantaix · Files</title></head>
+          <body>
+            <p style='float:right'>
+              Signed in as <strong>{username}</strong> ({role}) ·
+              <form action='/logout' method='post' style='display:inline'>
+                <button type='submit'>Logout</button>
+              </form>
+            </p>
+            <h1>Files</h1>
+            <form action='/files' method='get'>
+              <input type='text' name='q' placeholder='Search extracted text'
+                     value='{_esc(q or "")}' />
+              {owner_form}
+              <button type='submit'>Search</button>
+            </form>
+            <h2>{section_title}</h2>
+            {table}
+          </body>
+        </html>
+        """
+    )
+
+
+@app.get("/files/{short_id}", response_class=HTMLResponse)
+async def files_detail(request: Request, short_id: str) -> Response:
+    principal = await _resolve_principal(request)
+    if principal is None:
+        return RedirectResponse(url="/login", status_code=303)
+    status, body = await _api_get(request, f"/admin/files/{short_id}")
+    if status == 404:
+        return HTMLResponse(
+            f"""
+            <!doctype html>
+            <html>
+              <head><title>Файл не найден</title></head>
+              <body>
+                <h1>Файл #{_esc(short_id)} не найден</h1>
+                <p><a href='/files'>Назад к списку</a></p>
+              </body>
+            </html>
+            """
+        )
+    candidate = body.get("candidate_text")
+    text_block = (
+        f"<pre style='white-space:pre-wrap'>{_esc(candidate)}</pre>"
+        if candidate
+        else (
+            "<p><em>Extracted text not available for this upload.</em></p>"
+            f"<p>KB status: <code>{_esc(str(body.get('kb_ingest_status', '—')))}</code></p>"
+        )
+    )
+    confidential_badge = "🔒 confidential" if body.get("is_confidential") else ""
+    chunks = body.get("kb_inserted_chunks")
+    kb_status = body.get("kb_ingest_status") or "—"
+    kb_line = f"{kb_status}"
+    if chunks is not None:
+        kb_line = f"{kb_status} · {chunks} chunks"
+    return HTMLResponse(
+        f"""
+        <!doctype html>
+        <html>
+          <head><title>{_esc(str(body.get('source_file_name', short_id)))}</title></head>
+          <body>
+            <p><a href='/files'>← Files</a></p>
+            <h1>📄 {_esc(str(body.get('source_file_name') or short_id))}</h1>
+            <dl>
+              <dt>Short ID</dt><dd><code>{_esc(short_id)}</code></dd>
+              <dt>Uploaded by</dt><dd>{_esc(str(body.get('uploaded_by', '—')))}</dd>
+              <dt>Uploaded at</dt><dd>{_esc(str(body.get('uploaded_at', '—')))}</dd>
+              <dt>Size</dt><dd>{_format_file_size(body.get('file_size_bytes'))}</dd>
+              <dt>Type</dt><dd>{_esc(str(body.get('source_file_type') or '—'))}</dd>
+              <dt>Confidential</dt><dd>{confidential_badge or 'no'}</dd>
+              <dt>KB</dt><dd>{_esc(kb_line)}</dd>
+            </dl>
+            <h2>Extracted text</h2>
+            {text_block}
+          </body>
+        </html>
+        """
+    )
 
 
 @app.get("/backups", response_class=HTMLResponse)
