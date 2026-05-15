@@ -482,6 +482,20 @@ def _kb_source_file_type(attachment: TelegramAttachment) -> str | None:
         return "docx"
     if name.endswith(".pptx"):
         return "pptx"
+    if name.endswith(".xlsx"):
+        return "xlsx"
+    if name.endswith(".csv"):
+        return "csv"
+    if name.endswith(".html") or name.endswith(".htm"):
+        return "html"
+    if name.endswith(".md") or name.endswith(".markdown"):
+        return "md"
+    if name.endswith(".rtf"):
+        return "rtf"
+    if name.endswith(".epub"):
+        return "epub"
+    if name.endswith(".zip"):
+        return "zip"
     if name.endswith(".txt"):
         return "txt"
     mime = (attachment.mime_type or "").lower()
@@ -497,6 +511,23 @@ def _kb_source_file_type(attachment: TelegramAttachment) -> str | None:
         "application/vnd.ms-powerpoint",
     }:
         return "pptx"
+    if mime in {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    }:
+        return "xlsx"
+    if mime == "text/csv":
+        return "csv"
+    if mime == "text/html":
+        return "html"
+    if mime == "text/markdown":
+        return "md"
+    if mime in {"application/rtf", "text/rtf"}:
+        return "rtf"
+    if mime == "application/epub+zip":
+        return "epub"
+    if mime in {"application/zip", "application/x-zip-compressed"}:
+        return "zip"
     if mime.startswith("text/"):
         return "txt"
     if mime.startswith("image/"):
@@ -519,6 +550,13 @@ def _kb_extension_for(attachment: TelegramAttachment, source_file_type: str) -> 
         "image": "jpg",
         "audio": "ogg",
         "video": "mp4",
+        "xlsx": "xlsx",
+        "csv": "csv",
+        "html": "html",
+        "md": "md",
+        "rtf": "rtf",
+        "epub": "epub",
+        "zip": "zip",
     }
     return fallback.get(source_file_type, "bin")
 
