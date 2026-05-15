@@ -1,3 +1,4 @@
+import hmac
 import logging
 import re
 import time
@@ -34,8 +35,17 @@ from services.api.app.nl_knowledge_ops import (
     NlKnowledgeOpsRepository,
 )
 from services.api.app.openrouter_client import OpenRouterClient
-from services.api.app.operators import OperatorRepository
-from services.api.app.projects import ProjectRepository
+from services.api.app.operators import (
+    Operator,
+    OperatorRepository,
+    OperatorUsernameConflict,
+)
+from services.api.app.projects import (
+    Project,
+    ProjectReferenced,
+    ProjectRepository,
+    ProjectSlugConflict,
+)
 from services.api.app.rag import RagRepository
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
@@ -165,6 +175,52 @@ def require_admin_session(
     return session
 
 
+def require_admin_or_internal(
+    x_admin_session: Annotated[str | None, Header()] = None,
+    x_internal_token: Annotated[str | None, Header()] = None,
+) -> str:
+    """Accept either an admin session token or the configured internal token.
+
+    Returns the principal identifier (admin username, or "internal" for
+    bot-to-api server-to-server calls). Raises 401 if neither credential
+    is presented.
+    """
+    expected = settings.admin_internal_token
+    if x_internal_token and expected and hmac.compare_digest(
+        x_internal_token, expected
+    ):
+        return "internal"
+    if x_admin_session:
+        session = admin_auth_repository.validate_session(x_admin_session)
+        if session is not None:
+            return session.admin_username
+    raise HTTPException(status_code=401, detail="admin_auth_required")
+
+
+def _project_to_dict(project: Project) -> dict[str, object]:
+    return {
+        "id": project.id,
+        "slug": project.slug,
+        "name": project.name,
+        "description": project.description,
+        "created_at": project.created_at,
+        "updated_at": project.updated_at,
+    }
+
+
+def _operator_to_dict(operator: Operator) -> dict[str, object]:
+    return {
+        "id": operator.id,
+        "username": operator.username,
+        "chat_id": operator.chat_id,
+        "project_id": operator.project_id,
+        "display_name": operator.display_name,
+        "is_active": operator.is_active,
+        "created_at": operator.created_at,
+        "updated_at": operator.updated_at,
+    }
+
+
 @app.post("/admin/login/request")
 async def admin_login_request(request: AdminLoginRequestModel) -> dict[str, object]:
     _ensure_admin_username(request.admin_username)
@@ -223,6 +279,193 @@ def admin_session_check(
         "admin_username": session.admin_username,
         "expires_at": session.expires_at,
     }
+
+
+class ProjectCreateRequest(BaseModel):
+    slug: str
+    name: str
+    description: str | None = None
+
+
+class ProjectUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class OperatorCreateRequest(BaseModel):
+    username: str
+    project_id: int
+    chat_id: int | None = None
+    display_name: str | None = None
+
+
+class OperatorUpdateRequest(BaseModel):
+    project_id: int | None = None
+    chat_id: int | None = None
+    display_name: str | None = None
+    is_active: bool | None = None
+
+
+class FileReassignRequest(BaseModel):
+    project_id: int
+
+
+@app.get("/projects")
+def list_projects(
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    items = [_project_to_dict(p) for p in project_repository.list_all()]
+    return {"items": items}
+
+
+@app.post("/projects")
+def create_project(
+    request: ProjectCreateRequest,
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    try:
+        project = project_repository.create(
+            slug=request.slug,
+            name=request.name,
+            description=request.description,
+        )
+    except ProjectSlugConflict as exc:
+        raise HTTPException(status_code=409, detail="project_slug_conflict") from exc
+    return _project_to_dict(project)
+
+
+@app.get("/projects/{slug}")
+def get_project(
+    slug: str,
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    project = project_repository.get_by_slug(slug)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project_not_found")
+    operators = operator_repository.list_by_project_id(project.id)
+    payload = _project_to_dict(project)
+    payload["operator_count"] = len(operators)
+    payload["operators"] = [_operator_to_dict(op) for op in operators]
+    return payload
+
+
+@app.patch("/projects/{slug}")
+def patch_project(
+    slug: str,
+    request: ProjectUpdateRequest,
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    try:
+        project = project_repository.update(
+            slug=slug, name=request.name, description=request.description
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="project_not_found") from exc
+    return _project_to_dict(project)
+
+
+@app.delete("/projects/{slug}")
+def delete_project(
+    slug: str,
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, bool]:
+    try:
+        project_repository.delete(
+            slug, is_referenced=operator_repository.any_referencing_project
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="project_not_found") from exc
+    except ProjectReferenced as exc:
+        raise HTTPException(status_code=409, detail="project_referenced") from exc
+    return {"ok": True}
+
+
+@app.get("/operators")
+def list_operators(
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    items = [_operator_to_dict(op) for op in operator_repository.list_all()]
+    return {"items": items}
+
+
+@app.post("/operators")
+def create_operator(
+    request: OperatorCreateRequest,
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    if project_repository.get(request.project_id) is None:
+        raise HTTPException(status_code=400, detail="project_not_found")
+    try:
+        operator = operator_repository.create(
+            username=request.username,
+            project_id=request.project_id,
+            chat_id=request.chat_id,
+            display_name=request.display_name,
+        )
+    except OperatorUsernameConflict as exc:
+        raise HTTPException(
+            status_code=409, detail="operator_username_conflict"
+        ) from exc
+    return _operator_to_dict(operator)
+
+
+@app.get("/operators/by-username/{username:path}")
+def get_operator_by_username(username: str) -> dict[str, object]:
+    """Internal endpoint used by bot_gateway; intentionally unauthenticated.
+
+    Returns 404 when the operator does not exist. The bot_gateway treats
+    404 as "non-operator sender" and 5xx as "fall back to primary".
+    """
+    operator = operator_repository.find_by_username(username)
+    if operator is None:
+        raise HTTPException(status_code=404, detail="operator_not_found")
+    return _operator_to_dict(operator)
+
+
+@app.patch("/operators/{username:path}")
+def patch_operator(
+    username: str,
+    request: OperatorUpdateRequest,
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    if (
+        request.project_id is not None
+        and project_repository.get(request.project_id) is None
+    ):
+        raise HTTPException(status_code=400, detail="project_not_found")
+    try:
+        operator = operator_repository.update(
+            username=username,
+            project_id=request.project_id,
+            chat_id=request.chat_id,
+            display_name=request.display_name,
+            is_active=request.is_active,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="operator_not_found") from exc
+    return _operator_to_dict(operator)
+
+
+@app.post("/knowledge/candidates/{candidate_id}/reassign")
+def reassign_candidate(
+    candidate_id: int,
+    request: FileReassignRequest,
+    _principal: Annotated[str, Depends(require_admin_or_internal)],
+) -> dict[str, object]:
+    if project_repository.get(request.project_id) is None:
+        raise HTTPException(status_code=400, detail="project_not_found")
+    try:
+        knowledge_moderation_repository.get(candidate_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="candidate_not_found") from exc
+    knowledge_moderation_repository.set_project_id(
+        candidate_id=candidate_id, project_id=request.project_id
+    )
+    rag_repository.update_project_id_for_source(
+        source_id=f"knowledge_candidate:{candidate_id}",
+        project_id=request.project_id,
+    )
+    return {"candidate_id": candidate_id, "project_id": request.project_id}
 
 
 class InboundMessageRequest(BaseModel):

@@ -10,8 +10,10 @@ from platform_common.settings import get_settings
 from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.backups import BackupRepository
 from services.api.app.hitl import HitlTicketRepository
+from services.web_ui.app.admin import router as admin_router
 
 app = create_service_app("web_ui")
+app.include_router(admin_router)
 _settings = get_settings()
 backup_repository = BackupRepository(
     db_path=_settings.backup_db_path,
@@ -78,6 +80,7 @@ def admin_shell() -> str:
         <h1>Semantaix Admin</h1>
         <p>Bootstrap admin shell is running.</p>
         <ul>
+          <li><a href='/admin/login'>Admin panel (login required)</a></li>
           <li><a href='/knowledge-upload'>Upload to knowledge base</a></li>
           <li><a href='/answer-traces'>Answer traces</a></li>
           <li><a href='/backups'>Backups</a></li>

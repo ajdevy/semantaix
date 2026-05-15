@@ -92,6 +92,17 @@ class RagRepository:
                     inserted += 1
         return inserted
 
+    def update_project_id_for_source(
+        self, *, source_id: str, project_id: int
+    ) -> int:
+        init_schema(self.db_path)
+        with _connect(self.db_path) as connection:
+            cursor = connection.execute(
+                "UPDATE rag_chunks SET project_id = ? WHERE source_id = ?",
+                (project_id, source_id),
+            )
+            return int(cursor.rowcount or 0)
+
     def retrieve(self, *, query: str, limit: int = 3) -> list[RagChunk]:
         init_schema(self.db_path)
         query_tokens = _tokenize(query)
