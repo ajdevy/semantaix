@@ -1126,7 +1126,23 @@ def reject_knowledge_candidate(candidate_id: int) -> dict[str, object]:
 
 
 _OPERATOR_UPLOAD_TYPES = frozenset(
-    {"pdf", "docx", "pptx", "txt", "image", "audio", "video", "inline_text"}
+    {
+        "pdf",
+        "docx",
+        "pptx",
+        "txt",
+        "image",
+        "audio",
+        "video",
+        "inline_text",
+        "xlsx",
+        "csv",
+        "html",
+        "md",
+        "rtf",
+        "epub",
+        "zip",
+    }
 )
 _OPERATOR_UPLOAD_MEDIA_TYPES = frozenset({"audio", "video"})
 _operator_transcriber: object | None = None
@@ -1268,6 +1284,15 @@ _EXTENSION_TO_SOURCE_TYPE: dict[str, str] = {
     ".mkv": "video",
     ".webm": "video",
     ".avi": "video",
+    ".xlsx": "xlsx",
+    ".csv": "csv",
+    ".html": "html",
+    ".htm": "html",
+    ".md": "md",
+    ".markdown": "md",
+    ".rtf": "rtf",
+    ".epub": "epub",
+    ".zip": "zip",
 }
 
 

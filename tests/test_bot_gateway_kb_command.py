@@ -424,6 +424,47 @@ def test_kb_source_file_type_unrecognized_returns_none(isolated_bot):
     assert _kb_source_file_type(attachment) is None
 
 
+def test_kb_source_file_type_via_filename_new_formats(isolated_bot):
+    from services.bot_gateway.app.main import _kb_source_file_type
+    from services.bot_gateway.app.telegram_update import TelegramAttachment
+
+    cases = {
+        "table.xlsx": "xlsx",
+        "data.csv": "csv",
+        "page.html": "html",
+        "page.htm": "html",
+        "notes.md": "md",
+        "notes.markdown": "md",
+        "memo.rtf": "rtf",
+        "book.epub": "epub",
+        "bundle.zip": "zip",
+    }
+    for name, expected in cases.items():
+        attachment = TelegramAttachment(file_id="x", kind="document", file_name=name)
+        assert _kb_source_file_type(attachment) == expected
+
+
+def test_kb_source_file_type_via_mime_new_formats(isolated_bot):
+    from services.bot_gateway.app.main import _kb_source_file_type
+    from services.bot_gateway.app.telegram_update import TelegramAttachment
+
+    pairs = {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+        "application/vnd.ms-excel": "xlsx",
+        "text/csv": "csv",
+        "text/html": "html",
+        "text/markdown": "md",
+        "application/rtf": "rtf",
+        "text/rtf": "rtf",
+        "application/epub+zip": "epub",
+        "application/zip": "zip",
+        "application/x-zip-compressed": "zip",
+    }
+    for mime, expected in pairs.items():
+        attachment = TelegramAttachment(file_id="x", kind="document", mime_type=mime)
+        assert _kb_source_file_type(attachment) == expected
+
+
 def test_kb_extension_for_uses_file_name(isolated_bot):
     from services.bot_gateway.app.main import _kb_extension_for
     from services.bot_gateway.app.telegram_update import TelegramAttachment
@@ -440,6 +481,24 @@ def test_kb_extension_for_uses_fallback(isolated_bot):
     assert _kb_extension_for(attachment, "audio") == "ogg"
     attachment_unknown = TelegramAttachment(file_id="x", kind="document")
     assert _kb_extension_for(attachment_unknown, "weird") == "bin"
+
+
+def test_kb_extension_for_uses_fallback_new_formats(isolated_bot):
+    from services.bot_gateway.app.main import _kb_extension_for
+    from services.bot_gateway.app.telegram_update import TelegramAttachment
+
+    attachment = TelegramAttachment(file_id="x", kind="document")
+    cases = {
+        "xlsx": "xlsx",
+        "csv": "csv",
+        "html": "html",
+        "md": "md",
+        "rtf": "rtf",
+        "epub": "epub",
+        "zip": "zip",
+    }
+    for source_type, expected_ext in cases.items():
+        assert _kb_extension_for(attachment, source_type) == expected_ext
 
 
 def test_kb_attachment_count_word_variants():
