@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import File, Form, HTTPException, UploadFile
+from fastapi import Depends, File, Form, Header, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from platform_common.app_factory import create_service_app
@@ -14,6 +14,8 @@ from platform_common.settings import get_settings
 from services.api.app.admin_auth import (
     AdminAuthRepository,
     AdminAuthService,
+    AdminSession,
+    InvalidLoginCode,
     wire_admin_auth_routes,
 )
 from services.api.app.admin_files import wire_admin_files_routes
@@ -156,6 +158,91 @@ answer_pipeline = AnswerPipeline(
 @app.get("/")
 def root() -> dict[str, str]:
     return {"service": "api", "message": "Semantaix API"}
+
+
+class AdminLoginRequestModel(BaseModel):
+    admin_username: str
+
+
+class AdminLoginVerifyRequest(BaseModel):
+    admin_username: str
+    code: str
+
+
+def _ensure_admin_username(admin_username: str) -> None:
+    if admin_username != settings.admin_telegram_username:
+        raise HTTPException(status_code=403, detail="not_admin")
+
+
+def require_admin_session(
+    x_admin_session: Annotated[str | None, Header()] = None,
+) -> AdminSession:
+    if not x_admin_session:
+        raise HTTPException(status_code=401, detail="missing_admin_session")
+    session = admin_auth_repository.validate_session(x_admin_session)
+    if session is None:
+        raise HTTPException(status_code=401, detail="invalid_admin_session")
+    return session
+
+
+@app.post("/admin/login/request")
+async def admin_login_request(request: AdminLoginRequestModel) -> dict[str, object]:
+    _ensure_admin_username(request.admin_username)
+    admin_operator = operator_repository.find_by_username(request.admin_username)
+    if admin_operator is None or admin_operator.chat_id is None:
+        raise HTTPException(status_code=400, detail="admin_operator_chat_id_missing")
+    code = admin_auth_repository.request_code(
+        admin_username=request.admin_username,
+        ttl_seconds=settings.admin_login_code_ttl_seconds,
+    )
+    minutes = max(1, settings.admin_login_code_ttl_seconds // 60)
+    message = f"Ваш код входа: {code} (действителен {minutes} мин)"
+    try:
+        await telegram_bot_sender.send_message(
+            chat_id=admin_operator.chat_id, text=message
+        )
+    except Exception as exc:  # broad: any DM failure surfaces as 502
+        logger.warning("admin_login_code_dm_failed: %s", exc)
+        raise HTTPException(
+            status_code=502, detail="telegram_dm_failed"
+        ) from exc
+    return {"requested": True}
+
+
+@app.post("/admin/login/verify")
+def admin_login_verify(request: AdminLoginVerifyRequest) -> dict[str, object]:
+    _ensure_admin_username(request.admin_username)
+    try:
+        session = admin_auth_repository.consume_code(
+            admin_username=request.admin_username,
+            code=request.code,
+            ttl_seconds=settings.admin_session_ttl_seconds,
+        )
+    except InvalidLoginCode as exc:
+        raise HTTPException(status_code=401, detail="invalid_login_code") from exc
+    return {
+        "session_token": session.token,
+        "expires_at": session.expires_at,
+        "admin_username": session.admin_username,
+    }
+
+
+@app.post("/admin/logout")
+def admin_logout(
+    session: Annotated[AdminSession, Depends(require_admin_session)],
+) -> dict[str, bool]:
+    admin_auth_repository.revoke_session(session.token)
+    return {"ok": True}
+
+
+@app.get("/admin/session/check")
+def admin_session_check(
+    session: Annotated[AdminSession, Depends(require_admin_session)],
+) -> dict[str, str]:
+    return {
+        "admin_username": session.admin_username,
+        "expires_at": session.expires_at,
+    }
 
 
 class InboundMessageRequest(BaseModel):
