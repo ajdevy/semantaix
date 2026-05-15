@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -487,6 +488,20 @@ def _kb_source_file_type(attachment: TelegramAttachment) -> str | None:
         return "docx"
     if name.endswith(".pptx"):
         return "pptx"
+    if name.endswith(".xlsx"):
+        return "xlsx"
+    if name.endswith(".csv"):
+        return "csv"
+    if name.endswith(".html") or name.endswith(".htm"):
+        return "html"
+    if name.endswith(".md") or name.endswith(".markdown"):
+        return "md"
+    if name.endswith(".rtf"):
+        return "rtf"
+    if name.endswith(".epub"):
+        return "epub"
+    if name.endswith(".zip"):
+        return "zip"
     if name.endswith(".txt"):
         return "txt"
     mime = (attachment.mime_type or "").lower()
@@ -502,6 +517,23 @@ def _kb_source_file_type(attachment: TelegramAttachment) -> str | None:
         "application/vnd.ms-powerpoint",
     }:
         return "pptx"
+    if mime in {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    }:
+        return "xlsx"
+    if mime == "text/csv":
+        return "csv"
+    if mime == "text/html":
+        return "html"
+    if mime == "text/markdown":
+        return "md"
+    if mime in {"application/rtf", "text/rtf"}:
+        return "rtf"
+    if mime == "application/epub+zip":
+        return "epub"
+    if mime in {"application/zip", "application/x-zip-compressed"}:
+        return "zip"
     if mime.startswith("text/"):
         return "txt"
     if mime.startswith("image/"):
@@ -524,6 +556,13 @@ def _kb_extension_for(attachment: TelegramAttachment, source_file_type: str) -> 
         "image": "jpg",
         "audio": "ogg",
         "video": "mp4",
+        "xlsx": "xlsx",
+        "csv": "csv",
+        "html": "html",
+        "md": "md",
+        "rtf": "rtf",
+        "epub": "epub",
+        "zip": "zip",
     }
     return fallback.get(source_file_type, "bin")
 
@@ -691,6 +730,12 @@ async def _process_operator_upload(
                     kb_ingest_status="ok",
                     kb_inserted_chunks=int(result.get("inserted_chunks", 0) or 0),
                 )
+                candidate_id = result.get("candidate_id")
+                if candidate_id is not None:
+                    operator_file_repository.set_candidate_id(
+                        short_id=record.short_id,
+                        knowledge_candidate_id=int(candidate_id),
+                    )
             except Exception as exc:
                 redacted = _redact_token(str(exc))
                 operator_file_repository.update_kb_status(
@@ -935,15 +980,16 @@ def _buffer_attachments_for_media_group(
 ) -> None:
     """Buffer every attachment under `media_group_id` and arm the flush.
 
-    Only the first call for a given group schedules the debounced flush; later
-    calls just append to the buffer. The flush itself drains the buffer and
-    runs `_process_operator_upload` once with all attachments — one ack and
-    one summary instead of N each.
+    Each webhook schedules its own settling-window flusher. Whichever
+    flusher's wait completes first wins the `drain()`; the others observe
+    an empty buffer and return without side effects (covered by
+    `test_kb_media_group_flush_empty_buffer_is_noop`). The
+    `INSERT OR IGNORE` + (media_group_id, update_id) PK keeps `add()`
+    idempotent under Telegram retries.
     """
     assert normalized.media_group_id is not None
-    schedule_flush = False
     for attachment in normalized.attachments:
-        first = media_group_buffer.add(
+        media_group_buffer.add(
             media_group_id=normalized.media_group_id,
             chat_id=normalized.chat_id,
             username=normalized.username or "",
@@ -952,14 +998,11 @@ def _buffer_attachments_for_media_group(
             attachment=attachment,
             is_confidential=is_confidential,
         )
-        if first:
-            schedule_flush = True
-    if schedule_flush:
-        background_tasks.add_task(
-            _flush_media_group_after_debounce,
-            media_group_id=normalized.media_group_id,
-            debounce_seconds=settings.operator_media_group_debounce_seconds,
-        )
+    background_tasks.add_task(
+        _flush_media_group_after_debounce,
+        media_group_id=normalized.media_group_id,
+        debounce_seconds=settings.operator_media_group_debounce_seconds,
+    )
 
 
 async def _flush_media_group_after_debounce(
@@ -967,15 +1010,46 @@ async def _flush_media_group_after_debounce(
     media_group_id: str,
     debounce_seconds: float,
 ) -> None:
-    """Wait for the media group to settle, then process its attachments.
+    """Wait until the group has been quiet for `debounce_seconds`, then drain.
 
-    `add` returns True only for the first attachment in a group, so this is
-    scheduled exactly once per group. The debounce gives Telegram time to
-    deliver every other update in the group before we drain.
+    Each new webhook scheduling this coroutine effectively extends the
+    wait, because the loop re-reads `latest_received_at()` on every poll.
+    A hard cap (`operator_media_group_settling_cap_seconds`) bounds total
+    wait so a pathological stream of files cannot delay a flush forever.
+
+    Multiple flushers may run for the same group; only one drains a
+    non-empty buffer. The others observe `[]` and return — same idempotency
+    contract as before.
     """
-    if debounce_seconds > 0:
-        await asyncio.sleep(debounce_seconds)
+    cap = settings.operator_media_group_settling_cap_seconds
+    poll = max(settings.operator_media_group_poll_interval_seconds, 0.05)
+    started = asyncio.get_event_loop().time()
+
     try:
+        while True:
+            latest = media_group_buffer.latest_received_at(
+                media_group_id=media_group_id,
+            )
+            if latest is None:
+                # Buffer is empty — either never had data, or another
+                # flusher already drained. Nothing to do.
+                return
+            quiet_for = (datetime.now(UTC) - latest).total_seconds()
+            elapsed = asyncio.get_event_loop().time() - started
+            if quiet_for >= debounce_seconds or elapsed >= cap:
+                if elapsed >= cap and quiet_for < debounce_seconds:
+                    logger.warning(
+                        "media_group_settling_cap_hit",
+                        extra={
+                            "media_group_id": media_group_id,
+                            "quiet_for_seconds": quiet_for,
+                            "elapsed_seconds": elapsed,
+                            "cap_seconds": cap,
+                        },
+                    )
+                break
+            await asyncio.sleep(poll)
+
         items = media_group_buffer.drain(media_group_id=media_group_id)
         if not items:
             return
@@ -1000,6 +1074,13 @@ async def _flush_media_group_after_debounce(
             match_kind="literal",
         )
         n = len(attachments)
+        logger.info(
+            "media_group_flush_draining",
+            extra={
+                "media_group_id": media_group_id,
+                "attachment_count": n,
+            },
+        )
         await _send_dm(
             first.chat_id,
             f"Принял {n} {_kb_attachment_count_word(n)}, обрабатываю…",
@@ -1017,6 +1098,158 @@ async def _flush_media_group_after_debounce(
 
 _FILES_TRIGGER_RE = re.compile(r"^\s*/files(\b|$)", re.IGNORECASE)
 _SEND_TRIGGER_RE = re.compile(r"^\s*/send(\b|$)", re.IGNORECASE)
+_FILE_INSPECT_TRIGGER_RE = re.compile(r"^\s*/file(\b|$)", re.IGNORECASE)
+_FILES_FIND_TRIGGER_RE = re.compile(r"^\s*/files_find(\b|$)", re.IGNORECASE)
+_FILE_INSPECT_HEAD_CHARS = 3072
+_FILES_FIND_MIN_QUERY = 2
+_FILE_INSPECT_USAGE = "Использование: /file <short_id>"
+_FILES_FIND_USAGE = "Использование: /files_find <запрос>"
+
+
+async def _handle_file_inspect_command(
+    *,
+    normalized: NormalizedTelegramMessage,
+) -> dict[str, str] | None:
+    """Dispatch `/file <short_id>` and `/files_find <query>` for operator/admin.
+
+    Returns None for non-matching commands or unauthorised senders so the
+    normal routing continues.
+    """
+    if not normalized.username:
+        return None
+    is_operator = normalized.username == _effective_operator_username()
+    is_admin = normalized.username == settings.hitl_config_admin_username
+    if not (is_operator or is_admin):
+        return None
+    text = normalized.text or ""
+    # files_find checked first since both /file and /files_find start with /file
+    # (the regex \b boundaries already make them mutually exclusive, but this
+    # keeps the dispatch order explicit).
+    if _FILES_FIND_TRIGGER_RE.match(text):
+        return await _handle_files_find_command(normalized=normalized, text=text)
+    if _FILE_INSPECT_TRIGGER_RE.match(text):
+        return await _handle_file_inspect_subcommand(
+            normalized=normalized, text=text
+        )
+    return None
+
+
+def _format_file_inspect_dm(detail: dict) -> str:
+    short_id = detail.get("short_id") or "?"
+    name = detail.get("source_file_name") or short_id
+    uploaded_by = detail.get("uploaded_by") or "?"
+    uploaded_at = detail.get("uploaded_at") or "?"
+    size = detail.get("file_size_bytes")
+    size_str = (
+        f"{size // 1024} KB" if isinstance(size, int) and size >= 1024 else f"{size or 0} B"
+    )
+    file_type = detail.get("source_file_type") or "?"
+    confidential = "🔒 конфиденциально" if detail.get("is_confidential") else ""
+    kb_status = detail.get("kb_ingest_status") or "?"
+    chunks = detail.get("kb_inserted_chunks")
+    kb_line = (
+        f"🧩 KB: {kb_status} · {chunks} фрагментов"
+        if isinstance(chunks, int)
+        else f"🧩 KB: {kb_status}"
+    )
+    badge_line = " · ".join(
+        part for part in [size_str, file_type, confidential] if part
+    )
+    candidate_text = detail.get("candidate_text") or ""
+    head = candidate_text[:_FILE_INSPECT_HEAD_CHARS]
+    lines = [
+        f"📄 #{short_id} · {name}",
+        f"👤 Загрузил: {uploaded_by}",
+        f"🕐 {uploaded_at}",
+        f"📦 {badge_line}",
+        kb_line,
+    ]
+    if head.strip():
+        lines.append("")
+        lines.append(
+            f"Извлечённый текст (первые {_FILE_INSPECT_HEAD_CHARS} символов):"
+        )
+        lines.append("─────────")
+        lines.append(head)
+        lines.append("─────────")
+    else:
+        lines.append("")
+        lines.append(
+            f"Извлечение текста недоступно (kb_ingest_status: {kb_status})."
+        )
+    return "\n".join(lines)
+
+
+def _format_files_find_dm(*, query: str, payload: dict) -> str:
+    total = int(payload.get("total", 0) or 0)
+    items = payload.get("items") or []
+    if total == 0 or not items:
+        return "Ничего не найдено."
+    lines = [f"🔎 По запросу «{query}» найдено ({total}):", ""]
+    for item in items:
+        short_id = item.get("short_id") or "?"
+        name = item.get("source_file_name") or short_id
+        uploaded_by = item.get("uploaded_by") or "?"
+        uploaded_at = item.get("uploaded_at") or "?"
+        snippet = item.get("snippet") or ""
+        lines.append(f"📄 #{short_id} · {name} · {uploaded_by} · {uploaded_at}")
+        if snippet:
+            lines.append(f"   {snippet}")
+    return "\n".join(lines)
+
+
+async def _handle_file_inspect_subcommand(
+    *, normalized: NormalizedTelegramMessage, text: str
+) -> dict[str, str]:
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await _send_dm(normalized.chat_id, _FILE_INSPECT_USAGE)
+        return {"status": "accepted", "route": "file_inspect", "decision": "usage"}
+    short_id = parts[1].strip().lstrip("#").upper()
+    token = settings.internal_service_token or ""
+    detail = await api_client.fetch_file_inspect(
+        short_id=short_id,
+        requester_username=normalized.username or "",
+        internal_token=token,
+    )
+    if detail is None:
+        await _send_dm(normalized.chat_id, f"Файл #{short_id} не найден.")
+        return {
+            "status": "accepted",
+            "route": "file_inspect",
+            "decision": "not_found",
+        }
+    await _send_dm(normalized.chat_id, _format_file_inspect_dm(detail))
+    return {
+        "status": "accepted",
+        "route": "file_inspect",
+        "decision": "shown",
+    }
+
+
+async def _handle_files_find_command(
+    *, normalized: NormalizedTelegramMessage, text: str
+) -> dict[str, str]:
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or len(parts[1].strip()) < _FILES_FIND_MIN_QUERY:
+        await _send_dm(normalized.chat_id, _FILES_FIND_USAGE)
+        return {"status": "accepted", "route": "files_find", "decision": "usage"}
+    query = parts[1].strip()
+    token = settings.internal_service_token or ""
+    payload = await api_client.search_files(
+        query=query,
+        requester_username=normalized.username or "",
+        internal_token=token,
+    )
+    await _send_dm(
+        normalized.chat_id, _format_files_find_dm(query=query, payload=payload)
+    )
+    return {
+        "status": "accepted",
+        "route": "files_find",
+        "decision": "shown",
+        "count": str(int(payload.get("total", 0) or 0)),
+    }
 
 
 async def _handle_operator_file_library_command(
@@ -1386,6 +1619,13 @@ async def _process_telegram_update(
             "attachment_sizes": [a.file_size for a in normalized.attachments],
         },
     )
+
+    inspect_result = await _handle_file_inspect_command(normalized=normalized)
+    if inspect_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(inspect_result)
+        _log_routed(trace_id=trace_id, result=inspect_result, fallback="file_inspect")
+        return response
 
     file_lib_result = await _handle_operator_file_library_command(
         normalized=normalized

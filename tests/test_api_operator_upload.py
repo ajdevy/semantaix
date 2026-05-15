@@ -365,3 +365,32 @@ def test_soft_wrap_collapsing_to_empty_returns_422(isolated_paths, monkeypatch):
     )
     assert response.status_code == 422
     assert response.json()["detail"] == "empty_text"
+
+
+@pytest.mark.parametrize(
+    "source_file_type",
+    ["xlsx", "csv", "html", "md", "rtf", "epub", "zip"],
+)
+def test_new_source_file_types_round_trip(
+    isolated_paths, monkeypatch, source_file_type: str
+):
+    binary = _make_file(isolated_paths / f"sample.{source_file_type}", b"opaque")
+    monkeypatch.setitem(
+        extractors.EXTRACTORS,
+        source_file_type,
+        lambda _path: f"Извлечённое содержимое {source_file_type}.",
+    )
+    client = TestClient(api_app)
+    response = client.post(
+        "/knowledge/operator_upload",
+        json={
+            "operator_username": "@op",
+            "source_file_type": source_file_type,
+            "stored_binary_path": str(binary),
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["inserted_chunks"] >= 1
+    candidate = knowledge_moderation_repository.get(body["candidate_id"])
+    assert candidate.source_file_type == source_file_type

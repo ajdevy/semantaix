@@ -120,6 +120,28 @@ class MediaGroupBuffer:
             connection.execute("COMMIT")
         return before == 0
 
+    def latest_received_at(self, *, media_group_id: str) -> datetime | None:
+        """Return MAX(received_at) for the group, or None if no rows exist
+        (group was never added or has already been drained).
+
+        The flusher uses this to detect "the group has been quiet for N
+        seconds, safe to drain". Keeping the policy out of the buffer keeps
+        the abstraction symmetrical with `kb_session_repository` (the repo
+        knows no TTL; the caller passes `ttl_seconds`).
+        """
+        with _connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT MAX(received_at) AS latest
+                FROM operator_media_group_buffer
+                WHERE media_group_id = ?
+                """,
+                (media_group_id,),
+            ).fetchone()
+        if row is None or row["latest"] is None:
+            return None
+        return datetime.fromisoformat(str(row["latest"]))
+
     def drain(self, *, media_group_id: str) -> list[BufferedAttachment]:
         """Atomically read + delete all attachments for a group.
 
