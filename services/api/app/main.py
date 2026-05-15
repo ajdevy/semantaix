@@ -16,6 +16,7 @@ from services.api.app.admin_auth import (
     AdminAuthService,
     wire_admin_auth_routes,
 )
+from services.api.app.admin_files import wire_admin_files_routes
 from services.api.app.admin_nl_ops import AdminNlOpsRepository
 from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.answerers import AnswerContext, AnswerPipeline
@@ -34,6 +35,7 @@ from services.api.app.nl_knowledge_ops import (
     NlKnowledgeOpsRepository,
 )
 from services.api.app.openrouter_client import OpenRouterClient
+from services.api.app.operator_files_view import OperatorFilesView
 from services.api.app.operators import OperatorRepository
 from services.api.app.projects import ProjectRepository
 from services.api.app.rag import RagRepository
@@ -95,7 +97,14 @@ admin_auth_service = AdminAuthService(
     telegram_bot_sender=telegram_bot_sender,
     settings=settings,
 )
+operator_files_view = OperatorFilesView(
+    operator_files_db_path=settings.operator_files_db_path,
+    knowledge_db_path=settings.knowledge_db_path,
+)
 wire_admin_auth_routes(app, service=admin_auth_service)
+wire_admin_files_routes(
+    app, auth_service=admin_auth_service, files_view=operator_files_view
+)
 
 
 def _bootstrap_default_entities() -> None:
