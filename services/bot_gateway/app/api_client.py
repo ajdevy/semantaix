@@ -155,6 +155,22 @@ class ApiClient:
             auth=True,
         )
 
+    async def find_operator_by_username(
+        self, *, username: str
+    ) -> dict | None:
+        """Look up an operator via the unauthenticated internal endpoint.
+
+        Returns None on 404 (not registered, or registered-but-inactive
+        is handled by the caller). Re-raises on 5xx so the caller can
+        decide whether to fall back to the primary operator.
+        """
+        try:
+            return await self._get(f"/operators/by-username/{username}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return None
+            raise
+
     async def set_persona(
         self,
         *,

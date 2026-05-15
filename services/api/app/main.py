@@ -826,6 +826,32 @@ def _effective_grounding_threshold() -> float:
         return settings.rag_grounding_score_threshold
 
 
+def _pick_assignee_for_chat(chat_id: int | None) -> str:
+    """Prefer the operator who already handles this chat; fall back to primary.
+
+    Sticky routing: if the customer's most recent ticket has an assigned
+    `operator_username` that maps to an active operator in the registry,
+    re-assign the new ticket to them. Otherwise fall back to the
+    primary operator configured in settings/runtime config. Pure
+    backwards-compat for single-operator deployments.
+    """
+    primary = _effective_hitl_operator_username()
+    if chat_id is None:
+        return primary
+    try:
+        latest = hitl_ticket_repository.latest_for_chat(chat_id)
+    except AttributeError:
+        latest = None
+    if latest is None or not latest.operator_username:
+        return primary
+    if latest.operator_username == primary:
+        return primary
+    operator = operator_repository.find_by_username(latest.operator_username)
+    if operator is not None and operator.is_active:
+        return operator.username
+    return primary
+
+
 def _resolve_inbound_project_id(chat_id: int | None) -> int | None:
     """Resolve the project_id for an incoming customer message.
 
@@ -1141,7 +1167,7 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
     )
     hitl_ticket_repository.assign(
         ticket_id=ticket.id,
-        operator_username=_effective_hitl_operator_username(),
+        operator_username=_pick_assignee_for_chat(request.chat_id),
     )
     await _notify_hitl_operator_with_question(
         ticket_id=ticket.id,

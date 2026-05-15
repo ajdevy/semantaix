@@ -197,3 +197,33 @@ async def test_internal_token_empty_omits_header(fake_client):
     await client.list_projects()
     headers = fake_client.calls[0]["headers"]
     assert headers is None or "X-Internal-Token" not in headers
+
+
+@pytest.mark.asyncio
+async def test_find_operator_by_username_404_returns_none(fake_client):
+    fake_client.routes[("GET", "/operators/by-username/@ghost")] = _FakeResponse(
+        404, {}
+    )
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.find_operator_by_username(username="@ghost")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_find_operator_by_username_500_reraises(fake_client):
+    fake_client.routes[("GET", "/operators/by-username/@boom")] = _FakeResponse(
+        500, {}
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.find_operator_by_username(username="@boom")
+
+
+@pytest.mark.asyncio
+async def test_find_operator_by_username_happy(fake_client):
+    fake_client.routes[("GET", "/operators/by-username/@op")] = _FakeResponse(
+        200, {"username": "@op", "is_active": True}
+    )
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.find_operator_by_username(username="@op")
+    assert result == {"username": "@op", "is_active": True}
