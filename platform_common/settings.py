@@ -80,6 +80,12 @@ class AppSettings(BaseSettings):
     faster_whisper_model_size: str = "base"
     faster_whisper_compute_type: str = "int8"
     faster_whisper_cache_dir: str = "/app/.cache/whisper"
+    projects_db_path: str = ".data/semantaix_projects.db"
+    operators_db_path: str = ".data/semantaix_operators.db"
+    admin_session_db_path: str = ".data/semantaix_admin_sessions.db"
+    admin_telegram_username: str = "@ajdevy"
+    admin_login_code_ttl_seconds: int = 300
+    admin_session_ttl_seconds: int = 86400
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

@@ -73,6 +73,16 @@ def init_schema(db_path: str) -> None:
                 ON operator_files (username, created_at DESC)
             """
         )
+        columns = {
+            str(r["name"])
+            for r in connection.execute(
+                "PRAGMA table_info(operator_files)"
+            ).fetchall()
+        }
+        if "project_id" not in columns:
+            connection.execute(
+                "ALTER TABLE operator_files ADD COLUMN project_id INTEGER"
+            )
 
 
 @dataclass(frozen=True)

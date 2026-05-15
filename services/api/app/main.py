@@ -11,6 +11,8 @@ from pydantic import BaseModel
 
 from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
+from services.api.app.admin_auth import AdminAuthRepository
+from services.api.app.admin_nl_ops import AdminNlOpsRepository
 from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.answerers import AnswerContext, AnswerPipeline
 from services.api.app.answerers.datetime_answerer import DateTimeAnswerer
@@ -28,6 +30,8 @@ from services.api.app.nl_knowledge_ops import (
     NlKnowledgeOpsRepository,
 )
 from services.api.app.openrouter_client import OpenRouterClient
+from services.api.app.operators import OperatorRepository
+from services.api.app.projects import ProjectRepository
 from services.api.app.rag import RagRepository
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
@@ -75,6 +79,35 @@ answer_trace_repository = AnswerTraceRepository(
 nl_knowledge_ops_repository = NlKnowledgeOpsRepository(db_path=settings.nl_ops_db_path)
 trace_correction_repository = TraceCorrectionRepository(db_path=settings.nl_ops_db_path)
 weather_client = WeatherClient(base_url=settings.weather_provider_base_url)
+project_repository = ProjectRepository(settings.projects_db_path)
+operator_repository = OperatorRepository(settings.operators_db_path)
+admin_auth_repository = AdminAuthRepository(settings.admin_session_db_path)
+admin_nl_ops_repository = AdminNlOpsRepository(settings.nl_ops_db_path)
+
+
+def _bootstrap_default_entities() -> None:
+    """Idempotently ensure a `default` project and a primary operator row exist.
+
+    Runs at module import so a fresh `docker compose up` always lands with the
+    schema rows the rest of Epic 10 depends on. Tests can re-run it after
+    rebinding repository db paths.
+    """
+    default_project = project_repository.ensure_default_project()
+    primary_chat_id_raw = settings.hitl_primary_operator_chat_id
+    primary_chat_id = None
+    if primary_chat_id_raw is not None:
+        try:
+            primary_chat_id = int(primary_chat_id_raw)
+        except (TypeError, ValueError):
+            primary_chat_id = None
+    operator_repository.ensure_default_operator(
+        username=settings.hitl_primary_operator_username,
+        project_id=default_project.id,
+        chat_id=primary_chat_id,
+    )
+
+
+_bootstrap_default_entities()
 
 
 def _effective_bot_persona() -> tuple[str, str]:
