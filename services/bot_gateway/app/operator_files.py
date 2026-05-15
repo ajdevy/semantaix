@@ -33,6 +33,13 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return connection
 
 
+def _column_names(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row["name"])
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -45,6 +52,7 @@ def _generate_short_id() -> str:
 
 def init_schema(db_path: str) -> None:
     with _connect(db_path) as connection:
+        connection.execute("PRAGMA journal_mode = WAL")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS operator_files (
@@ -62,27 +70,32 @@ def init_schema(db_path: str) -> None:
                 download_status TEXT NOT NULL,
                 kb_ingest_status TEXT NOT NULL,
                 kb_inserted_chunks INTEGER,
+                knowledge_candidate_id INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        if "knowledge_candidate_id" not in _column_names(connection, "operator_files"):
+            connection.execute(
+                "ALTER TABLE operator_files ADD COLUMN knowledge_candidate_id INTEGER"
+            )
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS operator_files_username_created_idx
                 ON operator_files (username, created_at DESC)
             """
         )
-        columns = {
-            str(r["name"])
-            for r in connection.execute(
-                "PRAGMA table_info(operator_files)"
-            ).fetchall()
-        }
-        if "project_id" not in columns:
+        if "project_id" not in _column_names(connection, "operator_files"):
             connection.execute(
                 "ALTER TABLE operator_files ADD COLUMN project_id INTEGER"
             )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS operator_files_knowledge_candidate_idx
+                ON operator_files (knowledge_candidate_id)
+            """
+        )
 
 
 @dataclass(frozen=True)
@@ -101,6 +114,7 @@ class OperatorFileRecord:
     download_status: str
     kb_ingest_status: str
     kb_inserted_chunks: int | None
+    knowledge_candidate_id: int | None
     created_at: str
     updated_at: str
 
@@ -176,6 +190,7 @@ class OperatorFileRepository:
                     download_status=download_status,
                     kb_ingest_status=kb_ingest_status,
                     kb_inserted_chunks=kb_inserted_chunks,
+                    knowledge_candidate_id=None,
                     created_at=created_at,
                     updated_at=updated_at,
                 )
@@ -203,6 +218,20 @@ class OperatorFileRepository:
                 WHERE short_id = ?
                 """,
                 (kb_ingest_status, kb_inserted_chunks, _now_iso(), short_id),
+            )
+
+    def set_candidate_id(
+        self, *, short_id: str, knowledge_candidate_id: int
+    ) -> None:
+        with _connect(self.db_path) as connection:
+            connection.execute(
+                """
+                UPDATE operator_files
+                SET knowledge_candidate_id = ?,
+                    updated_at = ?
+                WHERE short_id = ?
+                """,
+                (knowledge_candidate_id, _now_iso(), short_id),
             )
 
     def list_recent(
@@ -265,6 +294,11 @@ def _row_to_record(row: sqlite3.Row) -> OperatorFileRecord:
         kb_inserted_chunks=(
             int(row["kb_inserted_chunks"])
             if row["kb_inserted_chunks"] is not None
+            else None
+        ),
+        knowledge_candidate_id=(
+            int(row["knowledge_candidate_id"])
+            if row["knowledge_candidate_id"] is not None
             else None
         ),
         created_at=str(row["created_at"]),
