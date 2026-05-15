@@ -11,6 +11,7 @@ COPY platform_common ./platform_common
 COPY services/bot_gateway/app ./app
 COPY services ./services
 COPY data ./data
+RUN mkdir -p /app/.data/operator_uploads && chown -R appuser:appuser /app
 USER appuser
 EXPOSE 8002
 HEALTHCHECK --interval=15s --timeout=3s --retries=3 CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health/live')"
