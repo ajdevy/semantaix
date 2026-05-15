@@ -6,6 +6,7 @@ from pathlib import Path
 import pypdf
 import pytest
 from docx import Document
+from ebooklib import epub
 from PIL import Image
 from pptx import Presentation
 from pypdf.generic import (
@@ -368,3 +369,311 @@ def test_whisper_transcriber_uses_lazy_loaded_model(monkeypatch):
     # Second call reuses the same model
     transcriber.transcribe(Path("/tmp/y.mp3"), language="ru")
     assert len(fake_model.calls) == 2
+
+
+def test_extractors_registry_includes_new_formats():
+    for key in ("xlsx", "csv", "html", "md", "rtf", "epub", "zip"):
+        assert key in extractors.EXTRACTORS
+
+
+def _write_xlsx(path: Path) -> None:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Контакты"
+    sheet.append(["Город", "Телефон"])
+    sheet.append(["Москва", "+7-495-000-00-00"])
+    sheet.append([None, None])  # blank row should be skipped
+    second = workbook.create_sheet("Расписание")
+    second.append(["Понедельник", "9:00-18:00"])
+    workbook.save(str(path))
+
+
+def test_extract_xlsx_emits_sheet_headers_and_rows(tmp_path: Path):
+    xlsx_path = tmp_path / "sample.xlsx"
+    _write_xlsx(xlsx_path)
+    result = extractors.extract_xlsx(xlsx_path)
+    assert "# Sheet: Контакты" in result
+    assert "Москва\t+7-495-000-00-00" in result
+    assert "# Sheet: Расписание" in result
+    assert "Понедельник\t9:00-18:00" in result
+
+
+def test_extract_csv_handles_comma_and_pipe_join(tmp_path: Path):
+    csv_path = tmp_path / "table.csv"
+    csv_path.write_text("город,телефон\nМосква,+7-495-000\n", encoding="utf-8")
+    result = extractors.extract_csv(csv_path)
+    assert "город | телефон" in result
+    assert "Москва | +7-495-000" in result
+
+
+def test_extract_csv_handles_semicolon_delimiter(tmp_path: Path):
+    csv_path = tmp_path / "semi.csv"
+    csv_path.write_text("a;b;c\n1;2;3\n", encoding="utf-8")
+    result = extractors.extract_csv(csv_path)
+    assert "a | b | c" in result
+    assert "1 | 2 | 3" in result
+
+
+def test_extract_csv_falls_back_to_excel_dialect_on_sniff_error(tmp_path: Path):
+    csv_path = tmp_path / "tricky.csv"
+    csv_path.write_text("solo\n", encoding="utf-8")
+    result = extractors.extract_csv(csv_path)
+    assert result == "solo"
+
+
+def test_extract_csv_returns_empty_string_for_whitespace_only(tmp_path: Path):
+    csv_path = tmp_path / "blank.csv"
+    csv_path.write_text("   \n\n   ", encoding="utf-8")
+    assert extractors.extract_csv(csv_path) == ""
+
+
+def test_extract_html_strips_scripts_and_styles(tmp_path: Path):
+    html_path = tmp_path / "page.html"
+    html_path.write_text(
+        "<html><head><style>body{}</style><script>alert('xss')</script>"
+        "</head><body><p>Текст страницы</p><noscript>hidden</noscript></body></html>",
+        encoding="utf-8",
+    )
+    result = extractors.extract_html(html_path)
+    assert "Текст страницы" in result
+    assert "alert" not in result
+    assert "hidden" not in result
+
+
+def test_extract_md_strips_headings_bullets_and_links(tmp_path: Path):
+    md_path = tmp_path / "doc.md"
+    md_path.write_text(
+        "# Заголовок\n\n- пункт **один**\n- пункт _два_\n\n"
+        "Ссылка [сюда](https://example.com) и `код`.\n\n"
+        "```python\nprint('x')\n```\n",
+        encoding="utf-8",
+    )
+    result = extractors.extract_md(md_path)
+    assert "Заголовок" in result
+    assert "пункт один" in result
+    assert "пункт два" in result
+    assert "Ссылка сюда и код." in result
+    assert "https://example.com" not in result
+    assert "```" not in result
+
+
+def test_extract_rtf_returns_plain_text(tmp_path: Path):
+    rtf_path = tmp_path / "note.rtf"
+    rtf_path.write_text(
+        r"{\rtf1\ansi\ansicpg1251 Привет мир из RTF.}", encoding="utf-8"
+    )
+    result = extractors.extract_rtf(rtf_path)
+    assert "Привет мир из RTF" in result
+
+
+def _write_epub(path: Path) -> None:
+    book = epub.EpubBook()
+    book.set_identifier("test-id")
+    book.set_title("Тестовая книга")
+    book.set_language("ru")
+    chap1 = epub.EpubHtml(title="Глава 1", file_name="c1.xhtml", lang="ru")
+    chap1.content = (
+        "<html><body><h1>Глава 1</h1><p>Первая глава.</p></body></html>"
+    )
+    chap2 = epub.EpubHtml(title="Глава 2", file_name="c2.xhtml", lang="ru")
+    chap2.content = (
+        "<html><body><h1>Глава 2</h1><p>Вторая глава.</p></body></html>"
+    )
+    book.add_item(chap1)
+    book.add_item(chap2)
+    book.toc = (chap1, chap2)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.spine = ["nav", chap1, chap2]
+    epub.write_epub(str(path), book)
+
+
+def test_extract_epub_concatenates_chapters(tmp_path: Path):
+    epub_path = tmp_path / "book.epub"
+    _write_epub(epub_path)
+    result = extractors.extract_epub(epub_path)
+    assert "Первая глава." in result
+    assert "Вторая глава." in result
+
+
+def test_extract_zip_dispatches_to_member_extractors(tmp_path: Path):
+    import zipfile as zf
+
+    zip_path = tmp_path / "bundle.zip"
+    with zf.ZipFile(zip_path, "w") as archive:
+        archive.writestr("note.txt", "Содержимое заметки".encode("utf-8"))
+        archive.writestr("data.csv", "город,телефон\nМосква,+7-495\n".encode("utf-8"))
+        archive.writestr("ignore.exe", b"binary")  # unsupported, must be skipped
+    result = extractors.extract_zip(zip_path)
+    assert "--- note.txt ---" in result
+    assert "Содержимое заметки" in result
+    assert "--- data.csv ---" in result
+    assert "Москва | +7-495" in result
+    assert "binary" not in result
+
+
+def test_extract_zip_rejects_nested_archive(tmp_path: Path):
+    import zipfile as zf
+
+    zip_path = tmp_path / "outer.zip"
+    with zf.ZipFile(zip_path, "w") as archive:
+        archive.writestr("inner.zip", b"PK")
+    with pytest.raises(extractors.ExtractionError) as exc:
+        extractors.extract_zip(zip_path)
+    assert exc.value.reason == "nested_zip_not_supported"
+
+
+def test_extract_zip_rejects_too_many_members(monkeypatch, tmp_path: Path):
+    import zipfile as zf
+
+    zip_path = tmp_path / "many.zip"
+    monkeypatch.setattr(extractors, "_ZIP_MAX_MEMBERS", 2)
+    with zf.ZipFile(zip_path, "w") as archive:
+        for i in range(3):
+            archive.writestr(f"f{i}.txt", b"x")
+    with pytest.raises(extractors.ExtractionError) as exc:
+        extractors.extract_zip(zip_path)
+    assert exc.value.reason == "zip_too_many_members"
+
+
+def test_extract_zip_rejects_total_uncompressed_over_cap(monkeypatch, tmp_path: Path):
+    import zipfile as zf
+
+    zip_path = tmp_path / "big.zip"
+    monkeypatch.setattr(extractors, "_ZIP_MAX_TOTAL_UNCOMPRESSED", 10)
+    with zf.ZipFile(zip_path, "w") as archive:
+        archive.writestr("a.txt", b"x" * 20)
+    with pytest.raises(extractors.ExtractionError) as exc:
+        extractors.extract_zip(zip_path)
+    assert exc.value.reason == "zip_too_large"
+
+
+def test_extract_zip_skips_member_over_individual_size_cap(monkeypatch, tmp_path: Path):
+    import zipfile as zf
+
+    from platform_common import settings as settings_module
+
+    zip_path = tmp_path / "mixed.zip"
+
+    class FakeSettings:
+        operator_upload_max_bytes = 5
+
+    monkeypatch.setattr(settings_module, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(extractors, "get_settings", lambda: FakeSettings())
+    with zf.ZipFile(zip_path, "w") as archive:
+        archive.writestr("small.txt", b"hi")
+        archive.writestr("huge.txt", b"x" * 1000)
+    result = extractors.extract_zip(zip_path)
+    assert "--- small.txt ---" in result
+    assert "--- huge.txt ---" not in result
+
+
+def test_extract_zip_skips_member_extractor_failures(monkeypatch, tmp_path: Path):
+    import zipfile as zf
+
+    zip_path = tmp_path / "mixed.zip"
+    with zf.ZipFile(zip_path, "w") as archive:
+        archive.writestr("ok.txt", b"hello")
+        archive.writestr("blank.txt", b"   ")
+    result = extractors.extract_zip(zip_path)
+    assert "--- ok.txt ---" in result
+    assert "hello" in result
+    assert "--- blank.txt ---" not in result
+
+
+def test_extract_zip_skips_member_raising_extraction_error(monkeypatch, tmp_path: Path):
+    import zipfile as zf
+
+    zip_path = tmp_path / "mixed.zip"
+    with zf.ZipFile(zip_path, "w") as archive:
+        archive.writestr("ok.txt", b"good")
+        archive.writestr("flaky.txt", b"bad")
+    real_txt = extractors.EXTRACTORS["txt"]
+    invocations: list[Path] = []
+
+    def flaky(path: Path) -> str:
+        invocations.append(path)
+        if path.name == "member.txt" and len(invocations) == 2:
+            raise extractors.ExtractionError("synthetic_failure")
+        return real_txt(path)
+
+    monkeypatch.setitem(extractors.EXTRACTORS, "txt", flaky)
+    result = extractors.extract_zip(zip_path)
+    assert "good" in result
+    assert "bad" not in result
+
+
+def test_extract_zip_bad_zipfile_raises(tmp_path: Path):
+    zip_path = tmp_path / "garbage.zip"
+    zip_path.write_bytes(b"not a zip at all")
+    with pytest.raises(extractors.ExtractionError) as exc:
+        extractors.extract_zip(zip_path)
+    assert exc.value.reason == "zip_corrupt"
+
+
+def test_extract_zip_testzip_reports_bad_member_raises(monkeypatch, tmp_path: Path):
+    import zipfile as zf
+
+    zip_path = tmp_path / "ok.zip"
+    with zf.ZipFile(zip_path, "w") as archive:
+        archive.writestr("a.txt", b"hello")
+    monkeypatch.setattr(zf.ZipFile, "testzip", lambda self: "a.txt")
+    with pytest.raises(extractors.ExtractionError) as exc:
+        extractors.extract_zip(zip_path)
+    assert exc.value.reason == "zip_corrupt"
+
+
+@pytest.mark.parametrize(
+    "source_type,filename,payload",
+    [
+        ("csv", "blank.csv", "   \n\n"),
+        ("html", "blank.html", "<html><body></body></html>"),
+        ("md", "blank.md", "\n\n"),
+        ("rtf", "blank.rtf", r"{\rtf1 }"),
+    ],
+)
+def test_extract_dispatch_raises_empty_text_for_new_text_formats(
+    tmp_path: Path, source_type: str, filename: str, payload: str
+):
+    file_path = tmp_path / filename
+    file_path.write_text(payload, encoding="utf-8")
+    with pytest.raises(extractors.ExtractionError) as exc:
+        extractors.extract(source_type, file_path)
+    assert exc.value.reason == "empty_text"
+
+
+def test_extract_dispatch_raises_empty_text_for_empty_zip(tmp_path: Path):
+    import zipfile as zf
+
+    zip_path = tmp_path / "empty.zip"
+    with zf.ZipFile(zip_path, "w"):
+        pass
+    with pytest.raises(extractors.ExtractionError) as exc:
+        extractors.extract("zip", zip_path)
+    assert exc.value.reason == "empty_text"
+
+
+def test_extract_epub_skips_chapters_with_empty_extracted_text(tmp_path: Path):
+    epub_path = tmp_path / "mixed.epub"
+    book = epub.EpubBook()
+    book.set_identifier("id")
+    book.set_title("t")
+    book.set_language("ru")
+    real = epub.EpubHtml(title="real", file_name="real.xhtml", lang="ru")
+    real.content = "<html><body><p>Реальный текст.</p></body></html>"
+    blank = epub.EpubHtml(title="blank", file_name="blank.xhtml", lang="ru")
+    blank.content = (
+        "<html><body><script>console.log('hidden')</script></body></html>"
+    )
+    book.add_item(real)
+    book.add_item(blank)
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    book.spine = ["nav", real, blank]
+    epub.write_epub(str(epub_path), book)
+    result = extractors.extract_epub(epub_path)
+    assert "Реальный текст" in result
+    assert "console.log" not in result
+    assert "hidden" not in result

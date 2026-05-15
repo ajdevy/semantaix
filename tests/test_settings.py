@@ -34,12 +34,18 @@ def test_settings_defaults(monkeypatch):
         ".data/semantaix_hitl.db",
         ".data/semantaix_rag.db",
         ".data/semantaix_knowledge.db",
+        ".data/semantaix_web_auth.db",
+        ".data/semantaix_operator_files.db",
     ]
     assert settings.bot_persona_first_name == "Анна"
     assert settings.bot_persona_last_name == "Иванова"
     assert "бот" not in settings.bot_telegram_description.lower()
     assert "бот" not in settings.bot_telegram_short_description.lower()
     assert settings.inbound_ack_message == "Минутку, уточню и вернусь с ответом."
+    assert settings.web_auth_db_path == ".data/semantaix_web_auth.db"
+    assert settings.web_session_cookie_name == "semantaix_session"
+    assert settings.web_session_cookie_secure is True
+    assert settings.internal_service_token is None
 
 
 def test_settings_env_override(monkeypatch):

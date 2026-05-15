@@ -193,6 +193,26 @@ def test_infer_source_file_type_returns_none_for_empty_filename():
     assert _infer_source_file_type("") is None
 
 
+@pytest.mark.parametrize(
+    "filename,expected_type",
+    [
+        ("table.xlsx", "xlsx"),
+        ("data.csv", "csv"),
+        ("page.html", "html"),
+        ("page.htm", "html"),
+        ("notes.md", "md"),
+        ("notes.markdown", "md"),
+        ("memo.rtf", "rtf"),
+        ("book.epub", "epub"),
+        ("bundle.zip", "zip"),
+    ],
+)
+def test_infer_source_file_type_resolves_new_extensions(filename, expected_type):
+    from services.api.app.main import _infer_source_file_type
+
+    assert _infer_source_file_type(filename) == expected_type
+
+
 def test_multipart_inline_text_whitespace_only_treated_as_missing(isolated_paths):
     client = TestClient(api_app)
     response = client.post(
