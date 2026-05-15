@@ -11,7 +11,11 @@ from pydantic import BaseModel
 
 from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
-from services.api.app.admin_auth import AdminAuthRepository
+from services.api.app.admin_auth import (
+    AdminAuthRepository,
+    AdminAuthService,
+    wire_admin_auth_routes,
+)
 from services.api.app.admin_nl_ops import AdminNlOpsRepository
 from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.answerers import AnswerContext, AnswerPipeline
@@ -41,6 +45,7 @@ from services.api.app.trace_corrections import (
     TraceCorrectionError,
     TraceCorrectionRepository,
 )
+from services.api.app.web_auth import WebAuthRepository
 
 app = create_service_app("api")
 logger = logging.getLogger(__name__)
@@ -83,6 +88,14 @@ project_repository = ProjectRepository(settings.projects_db_path)
 operator_repository = OperatorRepository(settings.operators_db_path)
 admin_auth_repository = AdminAuthRepository(settings.admin_session_db_path)
 admin_nl_ops_repository = AdminNlOpsRepository(settings.nl_ops_db_path)
+web_auth_repository = WebAuthRepository(db_path=settings.web_auth_db_path)
+admin_auth_service = AdminAuthService(
+    web_auth_repository=web_auth_repository,
+    hitl_repository=hitl_ticket_repository,
+    telegram_bot_sender=telegram_bot_sender,
+    settings=settings,
+)
+wire_admin_auth_routes(app, service=admin_auth_service)
 
 
 def _bootstrap_default_entities() -> None:

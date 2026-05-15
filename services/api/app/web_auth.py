@@ -158,19 +158,24 @@ class WebAuthRepository:
                         """,
                         (new_failed, now_iso, int(row["id"])),
                     )
-                else:
-                    connection.execute(
-                        """
-                        UPDATE web_auth_codes
-                        SET failed_attempts = ?
-                        WHERE id = ?
-                        """,
-                        (new_failed, int(row["id"])),
+                    return CodeVerification(
+                        ok=False,
+                        reason="too_many_attempts",
+                        remaining_attempts=0,
+                        chat_id=None,
                     )
+                connection.execute(
+                    """
+                    UPDATE web_auth_codes
+                    SET failed_attempts = ?
+                    WHERE id = ?
+                    """,
+                    (new_failed, int(row["id"])),
+                )
                 return CodeVerification(
                     ok=False,
                     reason="invalid",
-                    remaining_attempts=max(0, _MAX_FAILED_ATTEMPTS - new_failed),
+                    remaining_attempts=_MAX_FAILED_ATTEMPTS - new_failed,
                     chat_id=None,
                 )
             connection.execute(
