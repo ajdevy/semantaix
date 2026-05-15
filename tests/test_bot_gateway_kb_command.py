@@ -1189,6 +1189,25 @@ def test_kb_media_group_flush_empty_buffer_is_noop(
     assert not any("Принял" in t for _, t in isolated_bot["dms"])
 
 
+def test_kb_media_group_flush_sleeps_when_debounce_positive(monkeypatch):
+    """A positive debounce must sleep before draining, so Telegram has time
+    to deliver every update in the group."""
+    import asyncio
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(bot_main.asyncio, "sleep", fake_sleep)
+    asyncio.run(
+        bot_main._flush_media_group_after_debounce(
+            media_group_id="UNKNOWN_DEBOUNCED", debounce_seconds=2.5
+        )
+    )
+    assert sleep_calls == [2.5]
+
+
 def test_kb_media_group_flush_swallows_internal_errors(
     isolated_bot, monkeypatch, caplog
 ):
