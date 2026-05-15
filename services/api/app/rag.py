@@ -37,6 +37,14 @@ def init_schema(db_path: str) -> None:
             connection.execute(
                 "ALTER TABLE rag_chunks ADD COLUMN is_confidential INTEGER NOT NULL DEFAULT 0"
             )
+        if "project_id" not in columns:
+            connection.execute(
+                "ALTER TABLE rag_chunks ADD COLUMN project_id INTEGER"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rag_chunks_project "
+            "ON rag_chunks(project_id)"
+        )
 
 
 def _tokenize(text: str) -> set[str]:

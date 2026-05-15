@@ -30,6 +30,7 @@ _OPERATOR_UPLOAD_COLUMNS: tuple[tuple[str, str], ...] = (
     ("source_file_type", "TEXT"),
     ("stored_binary_path", "TEXT"),
     ("binary_sha256", "TEXT"),
+    ("project_id", "INTEGER"),
 )
 
 
