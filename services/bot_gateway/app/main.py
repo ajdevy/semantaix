@@ -14,6 +14,7 @@ from services.api.app.hitl import HitlTicketRepository
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.bot_gateway.app.admin_commands import handle_admin_project_command
+from services.bot_gateway.app.admin_nl_dialog import handle_admin_nl_dialog
 from services.bot_gateway.app.api_client import ApiClient
 from services.bot_gateway.app.kb_intent import KbIntent, detect_kb_intent
 from services.bot_gateway.app.kb_session import OperatorKbSessionRepository
@@ -1680,6 +1681,17 @@ async def _process_telegram_update(
     if admin_project_result is not None:
         response = {"trace_id": trace_id}
         response.update(admin_project_result)
+        return response
+
+    admin_nl_result = await handle_admin_nl_dialog(
+        normalized=normalized,
+        api_client=api_client,
+        send_dm=_send_dm,
+        admin_username=settings.admin_telegram_username,
+    )
+    if admin_nl_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(admin_nl_result)
         return response
 
     whoami_result = await _handle_whoami_command(normalized=normalized)
