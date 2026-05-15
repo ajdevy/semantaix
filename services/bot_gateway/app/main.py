@@ -1092,6 +1092,158 @@ async def _flush_media_group_after_debounce(
 
 _FILES_TRIGGER_RE = re.compile(r"^\s*/files(\b|$)", re.IGNORECASE)
 _SEND_TRIGGER_RE = re.compile(r"^\s*/send(\b|$)", re.IGNORECASE)
+_FILE_INSPECT_TRIGGER_RE = re.compile(r"^\s*/file(\b|$)", re.IGNORECASE)
+_FILES_FIND_TRIGGER_RE = re.compile(r"^\s*/files_find(\b|$)", re.IGNORECASE)
+_FILE_INSPECT_HEAD_CHARS = 3072
+_FILES_FIND_MIN_QUERY = 2
+_FILE_INSPECT_USAGE = "Использование: /file <short_id>"
+_FILES_FIND_USAGE = "Использование: /files_find <запрос>"
+
+
+async def _handle_file_inspect_command(
+    *,
+    normalized: NormalizedTelegramMessage,
+) -> dict[str, str] | None:
+    """Dispatch `/file <short_id>` and `/files_find <query>` for operator/admin.
+
+    Returns None for non-matching commands or unauthorised senders so the
+    normal routing continues.
+    """
+    if not normalized.username:
+        return None
+    is_operator = normalized.username == _effective_operator_username()
+    is_admin = normalized.username == settings.hitl_config_admin_username
+    if not (is_operator or is_admin):
+        return None
+    text = normalized.text or ""
+    # files_find checked first since both /file and /files_find start with /file
+    # (the regex \b boundaries already make them mutually exclusive, but this
+    # keeps the dispatch order explicit).
+    if _FILES_FIND_TRIGGER_RE.match(text):
+        return await _handle_files_find_command(normalized=normalized, text=text)
+    if _FILE_INSPECT_TRIGGER_RE.match(text):
+        return await _handle_file_inspect_subcommand(
+            normalized=normalized, text=text
+        )
+    return None
+
+
+def _format_file_inspect_dm(detail: dict) -> str:
+    short_id = detail.get("short_id") or "?"
+    name = detail.get("source_file_name") or short_id
+    uploaded_by = detail.get("uploaded_by") or "?"
+    uploaded_at = detail.get("uploaded_at") or "?"
+    size = detail.get("file_size_bytes")
+    size_str = (
+        f"{size // 1024} KB" if isinstance(size, int) and size >= 1024 else f"{size or 0} B"
+    )
+    file_type = detail.get("source_file_type") or "?"
+    confidential = "🔒 конфиденциально" if detail.get("is_confidential") else ""
+    kb_status = detail.get("kb_ingest_status") or "?"
+    chunks = detail.get("kb_inserted_chunks")
+    kb_line = (
+        f"🧩 KB: {kb_status} · {chunks} фрагментов"
+        if isinstance(chunks, int)
+        else f"🧩 KB: {kb_status}"
+    )
+    badge_line = " · ".join(
+        part for part in [size_str, file_type, confidential] if part
+    )
+    candidate_text = detail.get("candidate_text") or ""
+    head = candidate_text[:_FILE_INSPECT_HEAD_CHARS]
+    lines = [
+        f"📄 #{short_id} · {name}",
+        f"👤 Загрузил: {uploaded_by}",
+        f"🕐 {uploaded_at}",
+        f"📦 {badge_line}",
+        kb_line,
+    ]
+    if head.strip():
+        lines.append("")
+        lines.append(
+            f"Извлечённый текст (первые {_FILE_INSPECT_HEAD_CHARS} символов):"
+        )
+        lines.append("─────────")
+        lines.append(head)
+        lines.append("─────────")
+    else:
+        lines.append("")
+        lines.append(
+            f"Извлечение текста недоступно (kb_ingest_status: {kb_status})."
+        )
+    return "\n".join(lines)
+
+
+def _format_files_find_dm(*, query: str, payload: dict) -> str:
+    total = int(payload.get("total", 0) or 0)
+    items = payload.get("items") or []
+    if total == 0 or not items:
+        return "Ничего не найдено."
+    lines = [f"🔎 По запросу «{query}» найдено ({total}):", ""]
+    for item in items:
+        short_id = item.get("short_id") or "?"
+        name = item.get("source_file_name") or short_id
+        uploaded_by = item.get("uploaded_by") or "?"
+        uploaded_at = item.get("uploaded_at") or "?"
+        snippet = item.get("snippet") or ""
+        lines.append(f"📄 #{short_id} · {name} · {uploaded_by} · {uploaded_at}")
+        if snippet:
+            lines.append(f"   {snippet}")
+    return "\n".join(lines)
+
+
+async def _handle_file_inspect_subcommand(
+    *, normalized: NormalizedTelegramMessage, text: str
+) -> dict[str, str]:
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await _send_dm(normalized.chat_id, _FILE_INSPECT_USAGE)
+        return {"status": "accepted", "route": "file_inspect", "decision": "usage"}
+    short_id = parts[1].strip().lstrip("#").upper()
+    token = settings.internal_service_token or ""
+    detail = await api_client.fetch_file_inspect(
+        short_id=short_id,
+        requester_username=normalized.username or "",
+        internal_token=token,
+    )
+    if detail is None:
+        await _send_dm(normalized.chat_id, f"Файл #{short_id} не найден.")
+        return {
+            "status": "accepted",
+            "route": "file_inspect",
+            "decision": "not_found",
+        }
+    await _send_dm(normalized.chat_id, _format_file_inspect_dm(detail))
+    return {
+        "status": "accepted",
+        "route": "file_inspect",
+        "decision": "shown",
+    }
+
+
+async def _handle_files_find_command(
+    *, normalized: NormalizedTelegramMessage, text: str
+) -> dict[str, str]:
+    parts = text.split(maxsplit=1)
+    if len(parts) < 2 or len(parts[1].strip()) < _FILES_FIND_MIN_QUERY:
+        await _send_dm(normalized.chat_id, _FILES_FIND_USAGE)
+        return {"status": "accepted", "route": "files_find", "decision": "usage"}
+    query = parts[1].strip()
+    token = settings.internal_service_token or ""
+    payload = await api_client.search_files(
+        query=query,
+        requester_username=normalized.username or "",
+        internal_token=token,
+    )
+    await _send_dm(
+        normalized.chat_id, _format_files_find_dm(query=query, payload=payload)
+    )
+    return {
+        "status": "accepted",
+        "route": "files_find",
+        "decision": "shown",
+        "count": str(int(payload.get("total", 0) or 0)),
+    }
 
 
 async def _handle_operator_file_library_command(
@@ -1461,6 +1613,13 @@ async def _process_telegram_update(
             "attachment_sizes": [a.file_size for a in normalized.attachments],
         },
     )
+
+    inspect_result = await _handle_file_inspect_command(normalized=normalized)
+    if inspect_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(inspect_result)
+        _log_routed(trace_id=trace_id, result=inspect_result, fallback="file_inspect")
+        return response
 
     file_lib_result = await _handle_operator_file_library_command(
         normalized=normalized
