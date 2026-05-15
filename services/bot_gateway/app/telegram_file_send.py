@@ -36,10 +36,11 @@ class TelegramFileSendError(Exception):
 @dataclass(frozen=True)
 class _Endpoint:
     bot_token: str
+    base_url: str
 
     @property
     def url(self) -> str:
-        return f"https://api.telegram.org/bot{self.bot_token}/sendDocument"
+        return f"{self.base_url}/bot{self.bot_token}/sendDocument"
 
 
 HttpClientFactory = Callable[..., httpx.AsyncClient]
@@ -52,8 +53,11 @@ class TelegramFileSender:
         bot_token: str,
         http_client_factory: HttpClientFactory = httpx.AsyncClient,
         timeout_seconds: int = 60,
+        base_url: str = "https://api.telegram.org",
     ) -> None:
-        self._endpoint = _Endpoint(bot_token=bot_token)
+        self._endpoint = _Endpoint(
+            bot_token=bot_token, base_url=base_url.rstrip("/")
+        )
         self._client_factory = http_client_factory
         self._timeout = timeout_seconds
 

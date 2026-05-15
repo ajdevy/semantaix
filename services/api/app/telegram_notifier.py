@@ -21,10 +21,12 @@ class TelegramIncidentNotifier:
         bot_token: str,
         alert_chat_id: str | None,
         alert_username: str,
+        base_url: str = "https://api.telegram.org",
     ) -> None:
         self.bot_token = bot_token
         self.alert_chat_id = alert_chat_id
         self.alert_username = alert_username
+        self._base_url = base_url.rstrip("/")
 
     async def notify_if_critical(
         self,
@@ -53,7 +55,7 @@ class TelegramIncidentNotifier:
 
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.post(
-                f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+                f"{self._base_url}/bot{self.bot_token}/sendMessage",
                 json={"chat_id": self.alert_chat_id, "text": text},
             )
             response.raise_for_status()

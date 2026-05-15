@@ -4,8 +4,14 @@ import httpx
 
 
 class TelegramBotSender:
-    def __init__(self, *, bot_token: str) -> None:
+    def __init__(
+        self,
+        *,
+        bot_token: str,
+        base_url: str = "https://api.telegram.org",
+    ) -> None:
         self.bot_token = bot_token
+        self._base_url = base_url.rstrip("/")
 
     def _require_token(self) -> None:
         if self.bot_token == "replace-me" or not self.bot_token:
@@ -25,7 +31,7 @@ class TelegramBotSender:
         # double-post. We rely on api-side idempotency
         # (answer_traces.trace_id) to make that case rare; this retry is
         # specifically for fully-failed first attempts.
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        url = f"{self._base_url}/bot{self.bot_token}/sendMessage"
         body = {"chat_id": chat_id, "text": text}
         async with httpx.AsyncClient(timeout=15) as client:
             try:
@@ -57,7 +63,7 @@ class TelegramBotSender:
             return {"ok": False, "skipped": "missing_bot_token"}
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.post(
-                f"https://api.telegram.org/bot{self.bot_token}/{method}",
+                f"{self._base_url}/bot{self.bot_token}/{method}",
                 json=json_body,
             )
             response.raise_for_status()

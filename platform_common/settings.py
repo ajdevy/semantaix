@@ -15,6 +15,11 @@ class AppSettings(BaseSettings):
     database_url: str = "postgresql://postgres:postgres@postgres:5432/semantaix"
     persistence_db_path: str = ".data/semantaix_story1.db"
     telegram_bot_token: str = "replace-me"
+    telegram_bot_api_base_url: str = "https://api.telegram.org"
+    telegram_bot_api_local_mode: bool = False
+    telegram_bot_api_file_storage_root: str = "/var/lib/telegram-bot-api"
+    telegram_api_id: str | None = None
+    telegram_api_hash: str | None = None
     telegram_alert_username: str = "@ajdevy"
     telegram_alert_chat_id: str | None = None
     openrouter_api_key: str | None = None

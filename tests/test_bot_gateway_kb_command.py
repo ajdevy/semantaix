@@ -335,6 +335,37 @@ def test_send_dm_logs_failure_but_does_not_raise(monkeypatch):
     asyncio.run(bot_main._send_dm(42, "hello"))
 
 
+def test_send_dm_uses_configured_base_url(monkeypatch):
+    """When the bot is pointed at a self-hosted Bot API server, _send_dm
+    must call that host instead of api.telegram.org."""
+    captured: list[str] = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json):
+            captured.append(url)
+
+    monkeypatch.setattr(
+        bot_main.settings,
+        "telegram_bot_api_base_url",
+        "http://local-bot-api:8081",
+    )
+    monkeypatch.setattr(bot_main.settings, "telegram_bot_token", "TKN")
+    monkeypatch.setattr(bot_main.httpx, "AsyncClient", FakeClient)
+    import asyncio
+
+    asyncio.run(bot_main._send_dm(42, "hello"))
+    assert captured == ["http://local-bot-api:8081/botTKN/sendMessage"]
+
+
 def test_kb_source_file_type_for_direct_kinds(isolated_bot):
     from services.bot_gateway.app.main import _kb_source_file_type
     from services.bot_gateway.app.telegram_update import TelegramAttachment
