@@ -1016,6 +1016,40 @@ async def _handle_kb_session_continuation(
     }
 
 
+async def _handle_operator_media_group_orphan(
+    *,
+    normalized: NormalizedTelegramMessage,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str] | None:
+    """Speculatively buffer a caption-less operator media-group sibling.
+
+    Telegram delivers each file in a media group as a separate webhook,
+    and only one of them carries the caption with the KB-intent trigger.
+    If the caption-less sibling is processed before the captioned one has
+    upserted the kb_session, the standard dispatch would silently drop it
+    as "attachment_only" — losing files. We buffer here regardless of
+    session/intent state; `_flush_media_group_after_debounce` re-checks
+    the session at drain time and either processes or refuses with a hint.
+    """
+    if not normalized.attachments:
+        return None
+    if normalized.media_group_id is None:
+        return None
+    if not normalized.username or normalized.username != _effective_operator_username():
+        return None
+    _buffer_attachments_for_media_group(
+        normalized=normalized,
+        is_confidential=False,
+        background_tasks=background_tasks,
+    )
+    return {
+        "status": "accepted",
+        "kb_mode": "media_group_orphan_buffered",
+        "attachment_count": str(len(normalized.attachments)),
+        "media_group_id": normalized.media_group_id,
+    }
+
+
 def _buffer_attachments_for_media_group(
     *,
     normalized: NormalizedTelegramMessage,
@@ -1098,6 +1132,27 @@ async def _flush_media_group_after_debounce(
         if not items:
             return
         first = items[0]
+        session = kb_session_repository.get_active(
+            chat_id=first.chat_id,
+            username=first.username,
+        )
+        if session is None:
+            logger.warning(
+                "media_group_orphan_dropped",
+                extra={
+                    "media_group_id": media_group_id,
+                    "chat_id": first.chat_id,
+                    "username": first.username,
+                    "attachment_count": len(items),
+                },
+            )
+            await _send_dm(
+                first.chat_id,
+                "Получил файлы без активной сессии добавления в базу. "
+                "Если хотите загрузить — отправьте сначала фразу "
+                "«добавь в базу знаний», затем файлы.",
+            )
+            return
         attachments = tuple(item.attachment for item in items)
         synthesized = NormalizedTelegramMessage(
             update_id=first.update_id,
@@ -1112,7 +1167,9 @@ async def _flush_media_group_after_debounce(
             attachments=attachments,
         )
         intent = KbIntent(
-            confidential=any(item.is_confidential for item in items),
+            confidential=session.is_confidential or any(
+                item.is_confidential for item in items
+            ),
             mode="freetext",
             cleaned_text="",
             match_kind="literal",
@@ -1876,6 +1933,20 @@ async def _process_telegram_update(
         response.update(session_result)
         _log_routed(
             trace_id=trace_id, result=session_result, fallback="kb_continuation"
+        )
+        return response
+
+    orphan_result = await _handle_operator_media_group_orphan(
+        normalized=normalized,
+        background_tasks=background_tasks,
+    )
+    if orphan_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(orphan_result)
+        _log_routed(
+            trace_id=trace_id,
+            result=orphan_result,
+            fallback="media_group_orphan",
         )
         return response
 
