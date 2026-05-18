@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class AppSettings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
+    log_format: str = "text"
     api_port: int = 8000
     web_ui_port: int = 8001
     bot_gateway_port: int = 8002

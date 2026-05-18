@@ -31,6 +31,7 @@ from services.api.app.admin_nl_ops import (
     InvalidConfirmToken,
     SessionNotPending,
 )
+from services.api.app.admin_rag_inspect import wire_admin_rag_inspect_routes
 from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.answerers import AnswerContext, AnswerPipeline
 from services.api.app.answerers.datetime_answerer import DateTimeAnswerer
@@ -126,6 +127,15 @@ operator_files_view = OperatorFilesView(
 wire_admin_auth_routes(app, service=admin_auth_service)
 wire_admin_files_routes(
     app, auth_service=admin_auth_service, files_view=operator_files_view
+)
+wire_admin_rag_inspect_routes(
+    app,
+    auth_service=admin_auth_service,
+    rag_repository=rag_repository,
+    operator_files_db_path=lambda: settings.operator_files_db_path,
+    resolve_inbound_project_id=lambda chat_id: _resolve_inbound_project_id(chat_id),
+    default_project_id=lambda: _default_project_id(),
+    grounding_threshold=lambda: _effective_grounding_threshold(),
 )
 
 
@@ -718,6 +728,7 @@ class RagIngestRequest(BaseModel):
 class RagRetrieveRequest(BaseModel):
     query: str
     limit: int = 3
+    project_id: int | None = None
 
 
 class KnowledgeCandidateCreateRequest(BaseModel):
@@ -881,19 +892,58 @@ def _resolve_inbound_project_id(chat_id: int | None) -> int | None:
     to the default project (id from `ensure_default_project`) so
     pre-Epic-10 deployments behave identically.
     """
+    default_project_id = _default_project_id()
     if chat_id is None:
-        return _default_project_id()
+        logger.info(
+            "inbound_project_resolved",
+            extra={
+                "chat_id": None,
+                "resolution_path": "no_chat_id",
+                "resolved_project_id": default_project_id,
+                "default_project_id": default_project_id,
+                "latest_ticket_id": None,
+                "ticket_operator_username": None,
+                "operator_project_id": None,
+            },
+        )
+        return default_project_id
     try:
         ticket = hitl_ticket_repository.latest_for_chat(chat_id)
     except AttributeError:
         ticket = None
+    ticket_id = ticket.id if ticket is not None else None
+    ticket_op = ticket.operator_username if ticket is not None else None
     if ticket is not None and ticket.operator_username:
         operator = operator_repository.find_by_username(
             ticket.operator_username
         )
         if operator is not None:
+            logger.info(
+                "inbound_project_resolved",
+                extra={
+                    "chat_id": chat_id,
+                    "resolution_path": "from_ticket_operator",
+                    "resolved_project_id": operator.project_id,
+                    "default_project_id": default_project_id,
+                    "latest_ticket_id": ticket_id,
+                    "ticket_operator_username": ticket_op,
+                    "operator_project_id": operator.project_id,
+                },
+            )
             return operator.project_id
-    return _default_project_id()
+    logger.info(
+        "inbound_project_resolved",
+        extra={
+            "chat_id": chat_id,
+            "resolution_path": "default_fallback",
+            "resolved_project_id": default_project_id,
+            "default_project_id": default_project_id,
+            "latest_ticket_id": ticket_id,
+            "ticket_operator_username": ticket_op,
+            "operator_project_id": None,
+        },
+    )
+    return default_project_id
 
 
 def _default_project_id() -> int | None:
@@ -906,6 +956,7 @@ def _resolve_upload_project_id(
     operator_username: str,
     project_id: int | None,
     project_slug: str | None,
+    short_id: str | None = None,
 ) -> int | None:
     """Resolve project_id for an operator upload.
 
@@ -913,15 +964,53 @@ def _resolve_upload_project_id(
     project_id (from the operators registry) > default project.
     """
     if project_id is not None:
+        logger.info(
+            "operator_upload_project_resolved",
+            extra={
+                "short_id": short_id,
+                "operator_username": operator_username,
+                "precedence_path": "explicit_id",
+                "resolved_project_id": project_id,
+            },
+        )
         return project_id
     if project_slug:
         project = project_repository.get_by_slug(project_slug)
         if project is not None:
+            logger.info(
+                "operator_upload_project_resolved",
+                extra={
+                    "short_id": short_id,
+                    "operator_username": operator_username,
+                    "precedence_path": "explicit_slug",
+                    "resolved_project_id": project.id,
+                    "project_slug": project_slug,
+                },
+            )
             return project.id
     operator = operator_repository.find_by_username(operator_username)
     if operator is not None:
+        logger.info(
+            "operator_upload_project_resolved",
+            extra={
+                "short_id": short_id,
+                "operator_username": operator_username,
+                "precedence_path": "operator_default",
+                "resolved_project_id": operator.project_id,
+            },
+        )
         return operator.project_id
-    return _default_project_id()
+    fallback = _default_project_id()
+    logger.info(
+        "operator_upload_project_resolved",
+        extra={
+            "short_id": short_id,
+            "operator_username": operator_username,
+            "precedence_path": "system_default",
+            "resolved_project_id": fallback,
+        },
+    )
+    return fallback
 
 
 def _build_answer_context(
@@ -992,19 +1081,46 @@ async def _notify_hitl_operator_with_question(
 ) -> bool:
     chat_id_raw = _effective_hitl_operator_chat_id()
     if not chat_id_raw:
+        logger.info(
+            "hitl_operator_notified",
+            extra={
+                "ticket_id": ticket_id,
+                "operator_chat_id": None,
+                "dm_sent": False,
+                "skip_reason": "no_operator_chat_id_configured",
+            },
+        )
         return False
     try:
         chat_id = int(chat_id_raw)
     except ValueError:
+        logger.info(
+            "hitl_operator_notified",
+            extra={
+                "ticket_id": ticket_id,
+                "operator_chat_id": chat_id_raw,
+                "dm_sent": False,
+                "skip_reason": "operator_chat_id_invalid",
+            },
+        )
         return False
     customer_label = customer_username or "unknown"
     text = f"HITL ticket #{ticket_id} | from {customer_label} | {question}"
-    return await _safe_send_message(
+    sent = await _safe_send_message(
         chat_id=chat_id,
         text=text,
         failure_summary="HITL operator notification failed",
         failure_kind="hitl_operator_notify_failed",
     )
+    logger.info(
+        "hitl_operator_notified",
+        extra={
+            "ticket_id": ticket_id,
+            "operator_chat_id": chat_id,
+            "dm_sent": sent,
+        },
+    )
+    return sent
 
 
 def _persist_answer_trace(
@@ -1059,6 +1175,17 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
 
     started_at = time.perf_counter()
     trace_id = request.trace_id or str(uuid.uuid4())
+
+    logger.info(
+        "inbound_received",
+        extra={
+            "trace_id": trace_id,
+            "chat_id": request.chat_id,
+            "customer_username": request.customer_username,
+            "text_length": len(request.text),
+            "text": request.text,
+        },
+    )
 
     # Idempotency: if we've already processed this trace_id, return the cached
     # outcome and skip the side effects (ack, ticket, operator notify). This
@@ -1144,6 +1271,18 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         operator_username = (
             active_ticket.operator_username or _effective_hitl_operator_username()
         )
+        logger.info(
+            "hitl_escalation_start",
+            extra={
+                "trace_id": trace_id,
+                "chat_id": request.chat_id,
+                "customer_username": request.customer_username,
+                "has_existing_ticket": True,
+                "existing_ticket_id": active_ticket.id,
+                "ticket_operator_username": operator_username,
+                "is_follow_up": True,
+            },
+        )
         await _notify_hitl_operator_with_question(
             ticket_id=active_ticket.id,
             question=f"[follow-up] {request.text}",
@@ -1172,6 +1311,17 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         }
 
     ack_message = _effective_inbound_ack_message()
+    logger.info(
+        "hitl_escalation_start",
+        extra={
+            "trace_id": trace_id,
+            "chat_id": request.chat_id,
+            "customer_username": request.customer_username,
+            "has_existing_ticket": False,
+            "existing_ticket_id": None,
+            "is_follow_up": False,
+        },
+    )
     if request.chat_id is not None:
         await _safe_send_message(
             chat_id=request.chat_id,
@@ -1185,9 +1335,20 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         reason="awaiting_human_response",
         target_chat_id=request.chat_id,
     )
+    assignee = _pick_assignee_for_chat(request.chat_id)
     hitl_ticket_repository.assign(
         ticket_id=ticket.id,
-        operator_username=_pick_assignee_for_chat(request.chat_id),
+        operator_username=assignee,
+    )
+    logger.info(
+        "hitl_ticket_created",
+        extra={
+            "trace_id": trace_id,
+            "ticket_id": ticket.id,
+            "operator_username": assignee,
+            "reason": "awaiting_human_response",
+            "conversation_ref_snippet": request.text[:120],
+        },
     )
     await _notify_hitl_operator_with_question(
         ticket_id=ticket.id,
@@ -1239,7 +1400,11 @@ def ingest_rag(request: RagIngestRequest) -> dict[str, object]:
 
 @app.post("/rag/retrieve")
 def retrieve_rag(request: RagRetrieveRequest) -> dict[str, object]:
-    chunks = rag_repository.retrieve(query=request.query, limit=request.limit)
+    chunks = rag_repository.retrieve(
+        query=request.query,
+        limit=request.limit,
+        project_id=request.project_id,
+    )
     return {
         "items": [
             {
@@ -1247,6 +1412,8 @@ def retrieve_rag(request: RagRetrieveRequest) -> dict[str, object]:
                 "source_id": chunk.source_id,
                 "chunk_text": chunk.chunk_text,
                 "score": chunk.score,
+                "project_id": chunk.project_id,
+                "is_confidential": chunk.is_confidential,
             }
             for chunk in chunks
         ]
@@ -1829,7 +1996,30 @@ async def _perform_operator_upload(request: OperatorUploadRequest) -> dict[str, 
         soft_wrap,
     )
 
+    logger.info(
+        "operator_upload_received",
+        extra={
+            "operator_username": request.operator_username,
+            "operator_short_id": request.operator_short_id,
+            "source_file_type": request.source_file_type,
+            "source_file_name": request.source_file_name,
+            "is_confidential": request.is_confidential,
+            "stored_binary_path": request.stored_binary_path,
+            "project_id_requested": request.project_id,
+            "project_slug_requested": request.project_slug,
+        },
+    )
+
     if request.source_file_type not in _OPERATOR_UPLOAD_TYPES:
+        logger.info(
+            "operator_upload_failed",
+            extra={
+                "operator_username": request.operator_username,
+                "stage": "type_validation",
+                "error": "unsupported_source_file_type",
+                "source_file_type": request.source_file_type,
+            },
+        )
         raise HTTPException(status_code=422, detail="unsupported_source_file_type")
 
     sha: str | None = None
@@ -1887,16 +2077,46 @@ async def _perform_operator_upload(request: OperatorUploadRequest) -> dict[str, 
                 f"path={request.stored_binary_path}"
             ),
         )
+        logger.info(
+            "operator_upload_failed",
+            extra={
+                "operator_username": request.operator_username,
+                "stage": "extraction",
+                "error": repr(exc),
+                "source_file_type": request.source_file_type,
+                "incident_id": incident.id,
+            },
+        )
         raise HTTPException(status_code=500, detail="operator_upload_failed") from exc
+
+    logger.info(
+        "operator_upload_extracted",
+        extra={
+            "operator_username": request.operator_username,
+            "operator_short_id": request.operator_short_id,
+            "source_file_type": request.source_file_type,
+            "extracted_text_length": len(raw_text),
+        },
+    )
 
     wrapped = soft_wrap(raw_text)
     if not wrapped.strip():
+        logger.info(
+            "operator_upload_failed",
+            extra={
+                "operator_username": request.operator_username,
+                "stage": "soft_wrap",
+                "error": "empty_text_after_wrap",
+                "raw_text_length": len(raw_text),
+            },
+        )
         raise HTTPException(status_code=422, detail="empty_text")
 
     resolved_project_id = _resolve_upload_project_id(
         operator_username=request.operator_username,
         project_id=request.project_id,
         project_slug=request.project_slug,
+        short_id=request.operator_short_id,
     )
     candidate = knowledge_moderation_repository.create_approved_operator_upload(
         candidate_text=raw_text,
@@ -1919,6 +2139,19 @@ async def _perform_operator_upload(request: OperatorUploadRequest) -> dict[str, 
         text=wrapped,
         is_confidential=request.is_confidential,
         project_id=resolved_project_id,
+    )
+    logger.info(
+        "operator_upload_ingested",
+        extra={
+            "operator_username": request.operator_username,
+            "operator_short_id": request.operator_short_id,
+            "candidate_id": candidate.id,
+            "source_id": source_id,
+            "inserted_chunks": inserted_chunks,
+            "project_id": resolved_project_id,
+            "is_confidential": request.is_confidential,
+            "extracted_chars": len(wrapped),
+        },
     )
     return {
         "candidate_id": candidate.id,

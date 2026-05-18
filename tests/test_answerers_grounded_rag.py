@@ -84,11 +84,13 @@ def _assert_skip_log(
     assert record.retrieved_count == retrieved_count
     assert record.top_score == top_score
     assert record.trace_id == "t-1"
+    assert record.chunk_confidential_flags == [False] * retrieved_count
+    assert record.chunk_project_ids == [None] * retrieved_count
     return record
 
 
 @pytest.mark.asyncio
-async def test_strong_retrieval_grounded_verifier_delivers_answer():
+async def test_strong_retrieval_grounded_verifier_delivers_answer(caplog):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm(
         answer="Возврат занимает пять рабочих дней."
@@ -98,9 +100,12 @@ async def test_strong_retrieval_grounded_verifier_delivers_answer():
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
     )
-    result = await answerer.try_answer(
-        question="когда придёт мой возврат?", ctx=_ctx()
-    )
+    with caplog.at_level(
+        logging.INFO, logger="services.api.app.answerers.grounded_rag"
+    ):
+        result = await answerer.try_answer(
+            question="когда придёт мой возврат?", ctx=_ctx()
+        )
     assert result.handled is True
     assert result.response_mode == "grounded_rag"
     assert "пять рабочих дней" in result.text
@@ -109,6 +114,29 @@ async def test_strong_retrieval_grounded_verifier_delivers_answer():
     # Persona name must reach the LLM call so it speaks in-character.
     assert llm.answer_grounded.await_args.kwargs["persona_first_name"] == "Анна"
     assert llm.answer_grounded.await_args.kwargs["persona_last_name"] == "Иванова"
+    # Each pipeline stage emits a structured event.
+    events = [r.message for r in caplog.records]
+    for expected in (
+        "grounded_rag_pipeline_entry",
+        "grounded_rag_llm_request",
+        "grounded_rag_llm_response",
+        "grounded_rag_verifier_result",
+        "grounded_rag_guardrail_result",
+        "grounded_rag_profanity_result",
+        "grounded_rag_delivered",
+    ):
+        assert expected in events, f"missing event {expected}"
+    entry = next(
+        r for r in caplog.records if r.message == "grounded_rag_pipeline_entry"
+    )
+    assert entry.chunk_confidential_flags == [False]
+    assert entry.chunk_project_ids == [None]
+    assert entry.top_score == 0.9
+    delivered = next(
+        r for r in caplog.records if r.message == "grounded_rag_delivered"
+    )
+    assert delivered.retrieval_source_ids == ["kb-1"]
+    assert delivered.guardrail_score == 0.95
 
 
 @pytest.mark.asyncio
@@ -222,6 +250,14 @@ async def test_guardrail_hedge_escalates_even_when_verifier_grounded(caplog):
         top_score=0.9,
     )
     assert hasattr(record, "guardrail_score")
+    assert isinstance(record.guardrail_failure_reasons, list)
+    assert record.guardrail_failure_reasons, "expected at least one reason"
+    # The guardrail result event also fires with the same reasons.
+    guardrail_events = [
+        r for r in caplog.records if r.message == "grounded_rag_guardrail_result"
+    ]
+    assert guardrail_events and guardrail_events[-1].valid is False
+    assert guardrail_events[-1].failure_reasons == record.guardrail_failure_reasons
 
 
 @pytest.mark.asyncio

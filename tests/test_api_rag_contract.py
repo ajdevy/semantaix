@@ -30,6 +30,36 @@ def test_rag_retrieve_empty_query_returns_no_items(tmp_path):
     assert retrieve.json()["items"] == []
 
 
+def test_rag_retrieve_with_project_id_filters_results(tmp_path):
+    rag_repository.db_path = str(tmp_path / "rag.sqlite3")
+    rag_repository.ingest(
+        source_id="kb-a", text="Багги-тур проект A", project_id=1
+    )
+    rag_repository.ingest(
+        source_id="kb-b", text="Багги-тур проект B", project_id=2
+    )
+    rag_repository.ingest(source_id="kb-null", text="Багги-тур без проекта")
+    client = TestClient(api_app)
+    only_a = client.post(
+        "/rag/retrieve",
+        json={"query": "багги тур", "limit": 10, "project_id": 1},
+    )
+    assert only_a.status_code == 200
+    source_ids = {item["source_id"] for item in only_a.json()["items"]}
+    assert source_ids == {"kb-a", "kb-null"}
+    unscoped = client.post(
+        "/rag/retrieve", json={"query": "багги тур", "limit": 10}
+    )
+    assert unscoped.status_code == 200
+    assert {item["source_id"] for item in unscoped.json()["items"]} == {
+        "kb-a", "kb-b", "kb-null"
+    }
+    # Response now surfaces project_id and is_confidential per item.
+    item = only_a.json()["items"][0]
+    assert "project_id" in item
+    assert "is_confidential" in item
+
+
 def test_rag_ingest_failure_emits_incident(tmp_path, monkeypatch):
     rag_repository.db_path = str(tmp_path / "rag.sqlite3")
     incident_repository.db_path = str(tmp_path / "incidents.sqlite3")
