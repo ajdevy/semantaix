@@ -677,3 +677,81 @@ def test_extract_epub_skips_chapters_with_empty_extracted_text(tmp_path: Path):
     assert "Реальный текст" in result
     assert "console.log" not in result
     assert "hidden" not in result
+
+
+def _image_only_pdf_bytes(text: str, *, pages: int = 1) -> bytes:
+    """Render text as a rasterized image and embed it in a PDF.
+
+    The resulting PDF has no text layer — pypdf returns empty, so
+    `extract_pdf` must fall back to OCR.
+    """
+    from PIL import ImageDraw, ImageFont
+
+    font = ImageFont.load_default(size=48)
+    images: list[Image.Image] = []
+    for i in range(pages):
+        image = Image.new("RGB", (800, 240), color=(255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.text((20, 80), f"{text} {i + 1}", fill=(0, 0, 0), font=font)
+        images.append(image)
+    buffer = BytesIO()
+    images[0].save(buffer, format="PDF", save_all=True, append_images=images[1:])
+    return buffer.getvalue()
+
+
+def test_extract_pdf_uses_pypdf_when_text_present(tmp_path: Path, monkeypatch):
+    pdf_path = tmp_path / "text.pdf"
+    pdf_path.write_bytes(_make_pdf("Has text layer"))
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("OCR fallback must not run when pypdf returns text")
+
+    monkeypatch.setattr(extractors.pdfium, "PdfDocument", _boom)
+    result = extractors.extract_pdf(pdf_path)
+    assert "Has text layer" in result
+
+
+def test_extract_pdf_falls_back_to_ocr_for_image_only_pdf(tmp_path: Path, monkeypatch):
+    pdf_path = tmp_path / "image_only.pdf"
+    pdf_path.write_bytes(_image_only_pdf_bytes("HELLO"))
+
+    seen_langs: list[str] = []
+
+    def fake_ocr(image, lang):
+        seen_langs.append(lang)
+        return "Распознано:OCR"
+
+    monkeypatch.setattr(extractors.pytesseract, "image_to_string", fake_ocr)
+    result = extractors.extract_pdf(pdf_path)
+    assert "Распознано:OCR" in result
+    assert seen_langs == ["rus+eng"]
+
+
+def test_extract_pdf_ocr_respects_page_cap(tmp_path: Path, monkeypatch):
+    pdf_path = tmp_path / "many.pdf"
+    pdf_path.write_bytes(_image_only_pdf_bytes("PAGE", pages=4))
+
+    class FakeSettings:
+        operator_upload_pdf_ocr_max_pages = 2
+
+    monkeypatch.setattr(extractors, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(
+        extractors.pytesseract,
+        "image_to_string",
+        lambda image, lang: "should-not-be-reached",
+    )
+    with pytest.raises(extractors.ExtractionError) as info:
+        extractors.extract_pdf(pdf_path)
+    assert info.value.reason == "pdf_too_many_pages_for_ocr"
+
+
+def test_extract_pdf_returns_empty_when_ocr_yields_nothing(tmp_path: Path, monkeypatch):
+    pdf_path = tmp_path / "image_only.pdf"
+    pdf_path.write_bytes(_image_only_pdf_bytes("HELLO"))
+
+    monkeypatch.setattr(
+        extractors.pytesseract,
+        "image_to_string",
+        lambda image, lang: "   \n   ",
+    )
+    assert extractors.extract_pdf(pdf_path) == ""

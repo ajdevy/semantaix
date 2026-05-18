@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Protocol
 
 import pypdf
+import pypdfium2 as pdfium
 import pytesseract
 from bs4 import BeautifulSoup
 from docx import Document
@@ -44,7 +45,10 @@ class ExtractionError(Exception):
         self.reason = reason
 
 
-def extract_pdf(path: Path) -> str:
+_PDF_OCR_DPI = 150
+
+
+def _extract_pdf_text_via_pypdf(path: Path) -> str:
     reader = pypdf.PdfReader(str(path))
     pages: list[str] = []
     for page in reader.pages:
@@ -53,6 +57,43 @@ def extract_pdf(path: Path) -> str:
         if text:
             pages.append(text)
     return "\n\n".join(pages)
+
+
+def _ocr_pdf(path: Path) -> str:
+    """Rasterize each PDF page and OCR with tesseract (Russian + English).
+
+    Used as a fallback when pypdf yields no text — typical for
+    presentation/slide-deck PDFs where glyphs are vector paths or
+    embedded images that pypdf cannot decode as text.
+    """
+    max_pages = get_settings().operator_upload_pdf_ocr_max_pages
+    document = pdfium.PdfDocument(str(path))
+    try:
+        if len(document) > max_pages:
+            raise ExtractionError("pdf_too_many_pages_for_ocr")
+        parts: list[str] = []
+        for page in document:
+            try:
+                bitmap = page.render(scale=_PDF_OCR_DPI / 72)
+                image = bitmap.to_pil()
+                try:
+                    text = pytesseract.image_to_string(image, lang="rus+eng").strip()
+                finally:
+                    image.close()
+            finally:
+                page.close()
+            if text:
+                parts.append(text)
+    finally:
+        document.close()
+    return "\n\n".join(parts)
+
+
+def extract_pdf(path: Path) -> str:
+    text = _extract_pdf_text_via_pypdf(path)
+    if text.strip():
+        return text
+    return _ocr_pdf(path)
 
 
 def extract_docx(path: Path) -> str:

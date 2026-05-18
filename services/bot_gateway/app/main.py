@@ -15,7 +15,7 @@ from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.bot_gateway.app.admin_commands import handle_admin_project_command
 from services.bot_gateway.app.admin_nl_dialog import handle_admin_nl_dialog
-from services.bot_gateway.app.api_client import ApiClient
+from services.bot_gateway.app.api_client import ApiClient, ApiError
 from services.bot_gateway.app.kb_intent import KbIntent, detect_kb_intent
 from services.bot_gateway.app.kb_session import OperatorKbSessionRepository
 from services.bot_gateway.app.media_group_buffer import (
@@ -615,6 +615,9 @@ async def _process_operator_upload(
             )
             successes.append(result)
             successes_meta.append((None, None))
+        except ApiError as exc:
+            reason = _redact_token(exc.detail or str(exc))
+            failures.append(("inline_text", reason, None))
         except Exception as exc:
             failures.append(("inline_text", _redact_token(str(exc)), None))
     else:
@@ -736,6 +739,16 @@ async def _process_operator_upload(
                         short_id=record.short_id,
                         knowledge_candidate_id=int(candidate_id),
                     )
+            except ApiError as exc:
+                redacted = _redact_token(exc.detail or str(exc))
+                operator_file_repository.update_kb_status(
+                    short_id=record.short_id,
+                    kb_ingest_status=f"failed:{redacted}",
+                    kb_inserted_chunks=None,
+                )
+                failures.append(
+                    (label, f"api_failed:{redacted}", record.short_id)
+                )
             except Exception as exc:
                 redacted = _redact_token(str(exc))
                 operator_file_repository.update_kb_status(
@@ -772,6 +785,30 @@ async def _process_operator_upload(
     await _send_dm(normalized.chat_id, "\n".join(summary_lines))
 
 
+_API_DETAIL_FRIENDLY: dict[str, str] = {
+    "empty_text": (
+        "из файла не удалось извлечь текст — возможно, это скан или "
+        "слайды без текстового слоя. Попробуйте экспортировать PDF "
+        "с текстовым слоем или прислать оригинал в DOCX/PPTX."
+    ),
+    "unsupported_source_file_type": "тип файла не поддерживается на стороне API",
+    "missing_stored_binary_path": "внутренняя ошибка: не передан путь к файлу",
+    "binary_not_found": "файл не найден на диске API",
+    "empty_inline_text": "пустой текст — нечего сохранять",
+    "zip_corrupt": "ZIP-архив повреждён",
+    "zip_too_many_members": "слишком много файлов в ZIP-архиве",
+    "zip_too_large": "ZIP-архив слишком большой",
+    "nested_zip_not_supported": "вложенные ZIP-архивы не поддерживаются",
+    "pdf_too_many_pages_for_ocr": (
+        "PDF слишком длинный для распознавания — попробуйте уменьшить "
+        "количество страниц или приложить текстовый оригинал."
+    ),
+    "audio_too_long": "запись слишком длинная — сократите файл и повторите.",
+    "ffprobe_no_duration": "не удалось определить длительность медиафайла.",
+    "operator_upload_failed": "внутренняя ошибка извлечения текста на стороне API.",
+}
+
+
 def _friendly_failure_reason(reason: str, *, max_bytes: int) -> str:
     """Translate an internal failure reason to operator-facing Russian.
 
@@ -797,9 +834,16 @@ def _friendly_failure_reason(reason: str, *, max_bytes: int) -> str:
             return f"Telegram отклонил getFile: {description}"
         return "Telegram отклонил getFile"
     if reason.startswith("api_failed:"):
+        detail = reason[len("api_failed:") :]
+        friendly = _API_DETAIL_FRIENDLY.get(detail)
+        if friendly is not None:
+            return f"API: {friendly}"
         return reason
     if reason == "download_failed":
         return "не удалось скачать файл"
+    friendly = _API_DETAIL_FRIENDLY.get(reason)
+    if friendly is not None:
+        return f"API: {friendly}"
     return _redact_token(reason)
 
 

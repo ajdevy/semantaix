@@ -71,6 +71,7 @@ class AppSettings(BaseSettings):
     )
     operator_upload_max_bytes: int = 20 * 1024 * 1024
     operator_upload_max_audio_seconds: int = 900
+    operator_upload_pdf_ocr_max_pages: int = 50
     operator_upload_storage_dir: str = ".data/operator_uploads"
     operator_kb_intent_phrases_path: str = "data/russian_kb_intent_phrases.txt"
     operator_upload_api_timeout_seconds: int = 120
