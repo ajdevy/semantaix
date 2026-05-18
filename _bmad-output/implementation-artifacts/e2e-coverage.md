@@ -47,6 +47,10 @@ Each row marks whether a happy path (`H`) and/or an error/incident path (`E`) is
 | 05 | 05-01 | Repeated ingest dedup returns zero new chunks | H | `tests/e2e/test_e2e_epic05_rag_suggest.py::test_epic05_rag_ingest_dedup_returns_zero_chunks_second_call` |
 | 05 | 05-01 | Multi-source retrieve ranks higher overlap first | H | `tests/e2e/test_e2e_epic05_rag_suggest.py::test_epic05_rag_retrieve_ranks_higher_overlap_source_first` |
 | 05 | 05-01 | Ingest failure → 500 + incident | E | `tests/e2e/test_e2e_epic05_rag_suggest.py::test_epic05_rag_ingest_failure_emits_incident` |
+| 05 | 05-03 | Natural-language intent query scores above grounding threshold against catalog chunk | H | `tests/test_rag_repository.py::test_retrieve_buggy_tour_natural_language_query` |
+| 05 | 05-03 | Content-token denominator: short on-topic query scores 1.0 | H | `tests/test_rag_repository.py::test_retrieve_score_uses_content_tokens_denominator` |
+| 05 | 05-03 | Stopword-only query does not award false-positive score 1.0 | E | `tests/test_rag_repository.py::test_retrieve_stopword_only_query_falls_back` |
+| 05 | 05-03 | Grounded-RAG escalation emits structured `grounded_rag_skipped` log with reason | E | `tests/test_answerers_grounded_rag.py::test_weak_retrieval_falls_through` (and seven peer reasons) |
 | 06 | 06-02 | Extract → approve → retrievable | H | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_extract_approve_then_retrievable` |
 | 06 | 06-02 | Reject not retrievable, status filter shows rejected | H | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_extract_reject_path_not_retrievable` |
 | 06 | 06-02 | Approve with edited text publishes edited version | H | `tests/e2e/test_e2e_epic06_knowledge_pipeline.py::test_epic06_approve_with_edited_text_publishes_edited_version` |

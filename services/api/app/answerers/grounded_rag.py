@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Protocol
+import logging
+from typing import Any, Protocol
 
 from services.api.app.answerers import AnswerContext, AnswerResult
 from services.api.app.guardrails import evaluate_suggestion
@@ -9,6 +10,8 @@ from services.api.app.rag import RagChunk
 from services.api.app.russian_text import get_russian_normalizer
 
 _SENTINEL = "ESCALATE_TO_HUMAN"
+
+logger = logging.getLogger(__name__)
 
 
 class _RagReader(Protocol):
@@ -45,8 +48,20 @@ class GroundedRagAnswerer:
         chunks = self._rag.retrieve(
             query=question, limit=3, project_id=ctx.project_id
         )
-        if not chunks or chunks[0].score < ctx.grounding_threshold:
-            return AnswerResult(handled=False)
+        if not chunks:
+            return self._skip(
+                reason="no_chunks",
+                ctx=ctx,
+                question=question,
+                chunks=chunks,
+            )
+        if chunks[0].score < ctx.grounding_threshold:
+            return self._skip(
+                reason="below_threshold",
+                ctx=ctx,
+                question=question,
+                chunks=chunks,
+            )
 
         today_iso = ctx.now.date().isoformat()
         first_name, last_name = self._persona_reader()
@@ -58,11 +73,22 @@ class GroundedRagAnswerer:
                 persona_first_name=first_name,
                 persona_last_name=last_name,
             )
-        except Exception:
-            return AnswerResult(handled=False)
+        except Exception as exc:
+            return self._skip(
+                reason="llm_generator_error",
+                ctx=ctx,
+                question=question,
+                chunks=chunks,
+                error=repr(exc),
+            )
 
         if answer.strip().upper() == _SENTINEL:
-            return AnswerResult(handled=False)
+            return self._skip(
+                reason="escalate_sentinel",
+                ctx=ctx,
+                question=question,
+                chunks=chunks,
+            )
 
         try:
             verdict = await self._llm.verify_grounding(
@@ -70,17 +96,41 @@ class GroundedRagAnswerer:
                 answer=answer,
                 snippets=chunks,
             )
-        except Exception:
-            return AnswerResult(handled=False)
+        except Exception as exc:
+            return self._skip(
+                reason="verifier_error",
+                ctx=ctx,
+                question=question,
+                chunks=chunks,
+                error=repr(exc),
+            )
         if verdict.label != "GROUNDED":
-            return AnswerResult(handled=False)
+            return self._skip(
+                reason="verifier_not_grounded",
+                ctx=ctx,
+                question=question,
+                chunks=chunks,
+                verdict_label=verdict.label,
+                verdict_reason=verdict.reason,
+            )
 
         decision = evaluate_suggestion(answer)
         if not decision.valid:
-            return AnswerResult(handled=False)
+            return self._skip(
+                reason="guardrail_invalid",
+                ctx=ctx,
+                question=question,
+                chunks=chunks,
+                guardrail_score=decision.score,
+            )
 
         if get_russian_normalizer().contains_profanity(answer):
-            return AnswerResult(handled=False)
+            return self._skip(
+                reason="profanity_detected",
+                ctx=ctx,
+                question=question,
+                chunks=chunks,
+            )
 
         return AnswerResult(
             handled=True,
@@ -92,6 +142,28 @@ class GroundedRagAnswerer:
                 "guardrail_score": decision.score,
             },
         )
+
+    def _skip(
+        self,
+        *,
+        reason: str,
+        ctx: AnswerContext,
+        question: str,
+        chunks: list[RagChunk],
+        **extra: Any,
+    ) -> AnswerResult:
+        payload: dict[str, Any] = {
+            "trace_id": ctx.trace_id,
+            "reason": reason,
+            "query": question,
+            "threshold": ctx.grounding_threshold,
+            "retrieved_count": len(chunks),
+            "top_score": chunks[0].score if chunks else None,
+            "chunk_source_ids": [chunk.source_id for chunk in chunks],
+        }
+        payload.update(extra)
+        logger.info("grounded_rag_skipped", extra=payload)
+        return AnswerResult(handled=False)
 
 
 def _render_chunk_metadata(chunk: RagChunk) -> dict[str, object]:

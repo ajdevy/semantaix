@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
@@ -62,6 +63,30 @@ def _fake_llm(
     return llm
 
 
+def _assert_skip_log(
+    caplog: pytest.LogCaptureFixture,
+    *,
+    reason: str,
+    question: str,
+    retrieved_count: int,
+    top_score: float | None,
+) -> logging.LogRecord:
+    records = [
+        r
+        for r in caplog.records
+        if r.message == "grounded_rag_skipped"
+        and getattr(r, "reason", None) == reason
+    ]
+    assert records, f"expected grounded_rag_skipped log with reason={reason}"
+    record = records[-1]
+    assert record.query == question
+    assert record.threshold == 0.6
+    assert record.retrieved_count == retrieved_count
+    assert record.top_score == top_score
+    assert record.trace_id == "t-1"
+    return record
+
+
 @pytest.mark.asyncio
 async def test_strong_retrieval_grounded_verifier_delivers_answer():
     rag = _FakeRag(_chunks(score=0.9))
@@ -87,7 +112,7 @@ async def test_strong_retrieval_grounded_verifier_delivers_answer():
 
 
 @pytest.mark.asyncio
-async def test_weak_retrieval_falls_through():
+async def test_weak_retrieval_falls_through(caplog):
     rag = _FakeRag(_chunks(score=0.2))
     llm = _fake_llm()
     answerer = GroundedRagAnswerer(
@@ -95,13 +120,22 @@ async def test_weak_retrieval_falls_through():
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
     )
-    result = await answerer.try_answer(question="q", ctx=_ctx())
+    with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
+        result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
     llm.answer_grounded.assert_not_awaited()
+    record = _assert_skip_log(
+        caplog,
+        reason="below_threshold",
+        question="q",
+        retrieved_count=1,
+        top_score=0.2,
+    )
+    assert record.chunk_source_ids == ["kb-1"]
 
 
 @pytest.mark.asyncio
-async def test_empty_retrieval_falls_through():
+async def test_empty_retrieval_falls_through(caplog):
     rag = _FakeRag([])
     llm = _fake_llm()
     answerer = GroundedRagAnswerer(
@@ -109,13 +143,21 @@ async def test_empty_retrieval_falls_through():
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
     )
-    result = await answerer.try_answer(question="q", ctx=_ctx())
+    with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
+        result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
     llm.answer_grounded.assert_not_awaited()
+    _assert_skip_log(
+        caplog,
+        reason="no_chunks",
+        question="q",
+        retrieved_count=0,
+        top_score=None,
+    )
 
 
 @pytest.mark.asyncio
-async def test_sentinel_response_escalates():
+async def test_sentinel_response_escalates(caplog):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm(answer="ESCALATE_TO_HUMAN")
     answerer = GroundedRagAnswerer(
@@ -123,13 +165,21 @@ async def test_sentinel_response_escalates():
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
     )
-    result = await answerer.try_answer(question="q", ctx=_ctx())
+    with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
+        result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
     llm.verify_grounding.assert_not_awaited()
+    _assert_skip_log(
+        caplog,
+        reason="escalate_sentinel",
+        question="q",
+        retrieved_count=1,
+        top_score=0.9,
+    )
 
 
 @pytest.mark.asyncio
-async def test_verifier_not_grounded_escalates():
+async def test_verifier_not_grounded_escalates(caplog):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm(verdict_label="NOT_GROUNDED", verdict_reason="hallucination")
     answerer = GroundedRagAnswerer(
@@ -137,12 +187,22 @@ async def test_verifier_not_grounded_escalates():
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
     )
-    result = await answerer.try_answer(question="q", ctx=_ctx())
+    with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
+        result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
+    record = _assert_skip_log(
+        caplog,
+        reason="verifier_not_grounded",
+        question="q",
+        retrieved_count=1,
+        top_score=0.9,
+    )
+    assert record.verdict_label == "NOT_GROUNDED"
+    assert record.verdict_reason == "hallucination"
 
 
 @pytest.mark.asyncio
-async def test_guardrail_hedge_escalates_even_when_verifier_grounded():
+async def test_guardrail_hedge_escalates_even_when_verifier_grounded(caplog):
     rag = _FakeRag(_chunks(score=0.9))
     # Hedging phrase will trigger evaluate_suggestion -> low_confidence.
     llm = _fake_llm(answer="Я не знаю точного ответа.")
@@ -151,12 +211,21 @@ async def test_guardrail_hedge_escalates_even_when_verifier_grounded():
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
     )
-    result = await answerer.try_answer(question="q", ctx=_ctx())
+    with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
+        result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
+    record = _assert_skip_log(
+        caplog,
+        reason="guardrail_invalid",
+        question="q",
+        retrieved_count=1,
+        top_score=0.9,
+    )
+    assert hasattr(record, "guardrail_score")
 
 
 @pytest.mark.asyncio
-async def test_profane_llm_output_escalates():
+async def test_profane_llm_output_escalates(caplog):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm(answer="Полный пиздец, ничего не работает у нас.")
     answerer = GroundedRagAnswerer(
@@ -164,12 +233,20 @@ async def test_profane_llm_output_escalates():
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
     )
-    result = await answerer.try_answer(question="q", ctx=_ctx())
+    with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
+        result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
+    _assert_skip_log(
+        caplog,
+        reason="profanity_detected",
+        question="q",
+        retrieved_count=1,
+        top_score=0.9,
+    )
 
 
 @pytest.mark.asyncio
-async def test_llm_generator_exception_falls_through():
+async def test_llm_generator_exception_falls_through(caplog):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm()
     llm.answer_grounded = AsyncMock(side_effect=RuntimeError("boom"))
@@ -178,12 +255,21 @@ async def test_llm_generator_exception_falls_through():
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
     )
-    result = await answerer.try_answer(question="q", ctx=_ctx())
+    with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
+        result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
+    record = _assert_skip_log(
+        caplog,
+        reason="llm_generator_error",
+        question="q",
+        retrieved_count=1,
+        top_score=0.9,
+    )
+    assert "boom" in record.error
 
 
 @pytest.mark.asyncio
-async def test_llm_verifier_exception_falls_through():
+async def test_llm_verifier_exception_falls_through(caplog):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm()
     llm.verify_grounding = AsyncMock(side_effect=RuntimeError("verify failed"))
@@ -192,5 +278,14 @@ async def test_llm_verifier_exception_falls_through():
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
     )
-    result = await answerer.try_answer(question="q", ctx=_ctx())
+    with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
+        result = await answerer.try_answer(question="q", ctx=_ctx())
     assert result.handled is False
+    record = _assert_skip_log(
+        caplog,
+        reason="verifier_error",
+        question="q",
+        retrieved_count=1,
+        top_score=0.9,
+    )
+    assert "verify failed" in record.error
