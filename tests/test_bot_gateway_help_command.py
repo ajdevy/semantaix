@@ -72,6 +72,9 @@ def test_operator_help_returns_dm_with_command_list(isolated_bot):
     assert "/hitl_config" in text
     assert "💬 Ответ клиенту" in text
     assert "HITL ticket #N" in text
+    assert "/file_delete" in text
+    assert "/files_delete_all" in text
+    assert "confirm" in text
 
 
 def test_operator_help_is_case_insensitive(isolated_bot):
