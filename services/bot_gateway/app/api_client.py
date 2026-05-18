@@ -276,6 +276,42 @@ class ApiClient:
         _raise_for_status(response)
         return response.json()
 
+    async def delete_operator_file(
+        self,
+        *,
+        short_id: str,
+        requester_username: str,
+        internal_token: str,
+    ) -> dict | None:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.delete(
+                f"{self._base_url}/admin/files/{short_id}",
+                params={"as_user": requester_username},
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        if response.status_code == 404:
+            return None
+        _raise_for_status(response)
+        return response.json()
+
+    async def delete_all_operator_files(
+        self,
+        *,
+        requester_username: str,
+        internal_token: str,
+    ) -> dict:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.delete(
+                f"{self._base_url}/admin/files",
+                params={
+                    "as_user": requester_username,
+                    "confirm": "true",
+                },
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
     async def _post(
         self,
         path: str,

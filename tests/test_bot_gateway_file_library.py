@@ -475,6 +475,310 @@ def test_send_command_local_fallback_also_fails(isolated_bot, monkeypatch):
     assert any("chat not found" in t for t in dms)
 
 
+def _install_delete_fakes(monkeypatch, *, fetch_returns, delete_returns,
+                          delete_all_returns):
+    """Wire fake ApiClient methods on the live bot_main.api_client instance.
+
+    Each handler receives ``**kwargs`` so tests can assert on the requester.
+    """
+    fetch_calls: list[dict] = []
+    delete_calls: list[dict] = []
+    delete_all_calls: list[dict] = []
+
+    async def fake_fetch(**kwargs):
+        fetch_calls.append(kwargs)
+        return fetch_returns
+
+    async def fake_delete(**kwargs):
+        delete_calls.append(kwargs)
+        return delete_returns
+
+    async def fake_delete_all(**kwargs):
+        delete_all_calls.append(kwargs)
+        return delete_all_returns
+
+    monkeypatch.setattr(bot_main.api_client, "fetch_file_inspect", fake_fetch)
+    monkeypatch.setattr(bot_main.api_client, "delete_operator_file", fake_delete)
+    monkeypatch.setattr(
+        bot_main.api_client, "delete_all_operator_files", fake_delete_all
+    )
+    return {
+        "fetch_calls": fetch_calls,
+        "delete_calls": delete_calls,
+        "delete_all_calls": delete_all_calls,
+    }
+
+
+def test_file_delete_without_confirm_emits_warning(isolated_bot, monkeypatch):
+    record = _seed(isolated_bot["files_repo"], n=1)[0]
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns={
+            "short_id": record.short_id,
+            "source_file_name": "file_0.pdf",
+        },
+        delete_returns=None,
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    resp = client.post(
+        "/telegram/webhook", json=_msg(f"/file_delete {record.short_id}")
+    )
+    body = resp.json()
+    assert body["status"] == "accepted"
+    assert body["route"] == "file_delete"
+    assert body["decision"] == "warn"
+    assert fakes["delete_calls"] == []
+    dms = [t for _, t in isolated_bot["dms"]]
+    assert any("file_0.pdf" in t and "Подтвердите" in t for t in dms)
+
+
+def test_file_delete_unknown_short_id_emits_not_found(isolated_bot, monkeypatch):
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns=None,
+        delete_returns=None,
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    resp = client.post(
+        "/telegram/webhook", json=_msg("/file_delete NOPE1234")
+    )
+    body = resp.json()
+    assert body["decision"] == "not_found"
+    assert fakes["delete_calls"] == []
+    dms = [t for _, t in isolated_bot["dms"]]
+    assert any("не найден" in t for t in dms)
+
+
+def test_file_delete_with_confirm_invokes_api_and_dms_summary(
+    isolated_bot, monkeypatch
+):
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns={
+            "short_id": "ABC1",
+            "source_file_name": "abc.pdf",
+        },
+        delete_returns={
+            "deleted_files": 1,
+            "deleted_chunks": 3,
+            "deleted_candidates": 1,
+            "deleted_binaries": 1,
+            "failed_binary_paths": [],
+        },
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    resp = client.post(
+        "/telegram/webhook", json=_msg("/file_delete ABC1 confirm")
+    )
+    body = resp.json()
+    assert body["decision"] == "deleted"
+    assert fakes["delete_calls"][0]["short_id"] == "ABC1"
+    assert fakes["delete_calls"][0]["requester_username"] == "@ajdevy"
+    dms = [t for _, t in isolated_bot["dms"]]
+    assert any("Удалено" in t and "файлов: 1" in t for t in dms)
+
+
+def test_file_delete_confirm_token_case_insensitive(isolated_bot, monkeypatch):
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns=None,
+        delete_returns={
+            "deleted_files": 1,
+            "deleted_chunks": 0,
+            "deleted_candidates": 0,
+            "deleted_binaries": 0,
+            "failed_binary_paths": [],
+        },
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    client.post("/telegram/webhook", json=_msg("/file_delete XYZ1 CONFIRM"))
+    client.post("/telegram/webhook", json=_msg("/file_delete xyz2 Confirm"))
+    assert len(fakes["delete_calls"]) == 2
+    # Short ids are upper-cased before being sent.
+    assert fakes["delete_calls"][0]["short_id"] == "XYZ1"
+    assert fakes["delete_calls"][1]["short_id"] == "XYZ2"
+
+
+def test_file_delete_confirm_returns_404_dms_not_found(isolated_bot, monkeypatch):
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns=None,
+        delete_returns=None,
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    resp = client.post(
+        "/telegram/webhook", json=_msg("/file_delete GONE1 confirm")
+    )
+    assert resp.json()["decision"] == "not_found"
+    dms = [t for _, t in isolated_bot["dms"]]
+    assert any("не найден" in t for t in dms)
+    assert fakes["delete_calls"]  # call was made before the 404
+
+
+def test_file_delete_missing_short_id_emits_usage(isolated_bot, monkeypatch):
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns=None,
+        delete_returns=None,
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    resp = client.post("/telegram/webhook", json=_msg("/file_delete"))
+    assert resp.json()["decision"] == "usage"
+    assert fakes["fetch_calls"] == []
+    dms = [t for _, t in isolated_bot["dms"]]
+    assert any("Использование" in t for t in dms)
+
+
+def test_file_delete_from_non_operator_non_admin_ignored(isolated_bot, monkeypatch):
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns=None,
+        delete_returns=None,
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    resp = client.post(
+        "/telegram/webhook",
+        json=_msg("/file_delete ABC1 confirm", username="stranger"),
+    )
+    body = resp.json()
+    assert body.get("route") != "file_delete"
+    assert fakes["delete_calls"] == []
+
+
+def test_file_delete_admin_can_run(isolated_bot, monkeypatch):
+    # The fixture pins @ajdevy as primary operator AND admin (same username
+    # in this fixture); set distinct admin so we exercise the admin branch.
+    monkeypatch.setattr(
+        bot_main.settings, "hitl_primary_operator_username", "@alice"
+    )
+    monkeypatch.setattr(
+        bot_main.settings, "hitl_config_admin_username", "@ajdevy"
+    )
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns=None,
+        delete_returns={
+            "deleted_files": 1,
+            "deleted_chunks": 0,
+            "deleted_candidates": 0,
+            "deleted_binaries": 0,
+            "failed_binary_paths": [],
+        },
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    resp = client.post(
+        "/telegram/webhook",
+        json=_msg("/file_delete OTHR1 confirm", username="ajdevy"),
+    )
+    assert resp.json()["decision"] == "deleted"
+    assert fakes["delete_calls"][0]["requester_username"] == "@ajdevy"
+
+
+def test_file_delete_summary_lists_failed_binaries(isolated_bot, monkeypatch):
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns=None,
+        delete_returns={
+            "deleted_files": 1,
+            "deleted_chunks": 0,
+            "deleted_candidates": 0,
+            "deleted_binaries": 0,
+            "failed_binary_paths": ["/data/stuck.bin"],
+        },
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    client.post("/telegram/webhook", json=_msg("/file_delete STUCK1 confirm"))
+    assert fakes["delete_calls"]
+    dms = [t for _, t in isolated_bot["dms"]]
+    assert any("Не удалось удалить файлы с диска" in t for t in dms)
+
+
+def test_files_delete_all_without_confirm_zero_files(isolated_bot, monkeypatch):
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns=None,
+        delete_returns=None,
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    resp = client.post("/telegram/webhook", json=_msg("/files_delete_all"))
+    assert resp.json()["decision"] == "empty"
+    assert fakes["delete_all_calls"] == []
+    dms = [t for _, t in isolated_bot["dms"]]
+    assert any("нет сохранённых файлов" in t for t in dms)
+
+
+def test_files_delete_all_without_confirm_with_files(isolated_bot, monkeypatch):
+    _seed(isolated_bot["files_repo"], n=3)
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns=None,
+        delete_returns=None,
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    resp = client.post("/telegram/webhook", json=_msg("/files_delete_all"))
+    body = resp.json()
+    assert body["decision"] == "warn"
+    assert body["count"] == "3"
+    assert fakes["delete_all_calls"] == []
+    dms = [t for _, t in isolated_bot["dms"]]
+    assert any("3 файлов" in t and "Подтвердите" in t for t in dms)
+
+
+def test_files_delete_all_with_confirm_invokes_api(isolated_bot, monkeypatch):
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns=None,
+        delete_returns=None,
+        delete_all_returns={
+            "deleted_files": 3,
+            "deleted_chunks": 9,
+            "deleted_candidates": 3,
+            "deleted_binaries": 2,
+            "failed_binary_paths": [],
+        },
+    )
+    client = TestClient(bot_app)
+    resp = client.post(
+        "/telegram/webhook", json=_msg("/files_delete_all confirm")
+    )
+    body = resp.json()
+    assert body["decision"] == "deleted"
+    assert body["count"] == "3"
+    assert fakes["delete_all_calls"][0]["requester_username"] == "@ajdevy"
+    dms = [t for _, t in isolated_bot["dms"]]
+    assert any("файлов: 3" in t for t in dms)
+
+
+def test_files_delete_all_from_non_operator_non_admin_ignored(
+    isolated_bot, monkeypatch
+):
+    fakes = _install_delete_fakes(
+        monkeypatch,
+        fetch_returns=None,
+        delete_returns=None,
+        delete_all_returns=None,
+    )
+    client = TestClient(bot_app)
+    resp = client.post(
+        "/telegram/webhook",
+        json=_msg("/files_delete_all confirm", username="stranger"),
+    )
+    body = resp.json()
+    assert body.get("route") != "files_delete_all"
+    assert fakes["delete_all_calls"] == []
+
+
 def test_files_listing_renders_skipped_and_failed_glyphs(isolated_bot):
     repo = isolated_bot["files_repo"]
     repo.record_upload(

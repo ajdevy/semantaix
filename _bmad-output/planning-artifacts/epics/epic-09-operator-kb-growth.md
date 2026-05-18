@@ -18,7 +18,7 @@ Let the trusted HITL operator grow the knowledge base by sending text, files, im
 - Vision-LLM OCR (tesseract handles images locally).
 - Cloud transcription APIs (OpenAI Whisper, AssemblyAI, …) — local only.
 - Media-group batching (each Telegram update is processed independently).
-- Editing or revoking previously uploaded knowledge.
+- Editing previously uploaded knowledge (deletion is in scope via Story 09.07).
 - Multi-operator support — single trusted operator only.
 
 ## Dependencies

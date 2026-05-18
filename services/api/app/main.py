@@ -48,6 +48,7 @@ from services.api.app.nl_knowledge_ops import (
     NlKnowledgeOpsRepository,
 )
 from services.api.app.openrouter_client import OpenRouterClient
+from services.api.app.operator_files_admin import OperatorFilesAdminWriter
 from services.api.app.operator_files_view import OperatorFilesView
 from services.api.app.operators import (
     Operator,
@@ -123,9 +124,17 @@ operator_files_view = OperatorFilesView(
     operator_files_db_path=settings.operator_files_db_path,
     knowledge_db_path=settings.knowledge_db_path,
 )
+operator_files_admin_writer = OperatorFilesAdminWriter(
+    operator_files_db_path=settings.operator_files_db_path,
+    knowledge_db_path=settings.knowledge_db_path,
+    rag_db_path=settings.rag_db_path,
+)
 wire_admin_auth_routes(app, service=admin_auth_service)
 wire_admin_files_routes(
-    app, auth_service=admin_auth_service, files_view=operator_files_view
+    app,
+    auth_service=admin_auth_service,
+    files_view=operator_files_view,
+    files_admin_writer=operator_files_admin_writer,
 )
 
 

@@ -1144,10 +1144,16 @@ _FILES_TRIGGER_RE = re.compile(r"^\s*/files(\b|$)", re.IGNORECASE)
 _SEND_TRIGGER_RE = re.compile(r"^\s*/send(\b|$)", re.IGNORECASE)
 _FILE_INSPECT_TRIGGER_RE = re.compile(r"^\s*/file(\b|$)", re.IGNORECASE)
 _FILES_FIND_TRIGGER_RE = re.compile(r"^\s*/files_find(\b|$)", re.IGNORECASE)
+_FILE_DELETE_TRIGGER_RE = re.compile(r"^\s*/file_delete\b", re.IGNORECASE)
+_FILES_DELETE_ALL_TRIGGER_RE = re.compile(
+    r"^\s*/files_delete_all\b", re.IGNORECASE
+)
 _FILE_INSPECT_HEAD_CHARS = 3072
 _FILES_FIND_MIN_QUERY = 2
 _FILE_INSPECT_USAGE = "Использование: /file <short_id>"
 _FILES_FIND_USAGE = "Использование: /files_find <запрос>"
+_FILE_DELETE_USAGE = "Использование: /file_delete <short_id> [confirm]"
+_FILES_DELETE_ALL_BULK_LIMIT = 10_000
 
 
 async def _handle_file_inspect_command(
@@ -1176,6 +1182,173 @@ async def _handle_file_inspect_command(
             normalized=normalized, text=text
         )
     return None
+
+
+async def _handle_file_delete_command(
+    *,
+    normalized: NormalizedTelegramMessage,
+) -> dict[str, str] | None:
+    """Dispatch `/file_delete` and `/files_delete_all` for operator/admin.
+
+    Both commands use a stateless two-step confirm: the first message replies
+    with a warning and a hint; the second message ending in literal ``confirm``
+    performs the destructive call.
+
+    Story 09.07: ``/file_delete`` lets an operator delete an own file or an
+    admin delete any file. ``/files_delete_all`` always scopes to the caller's
+    own username (admin uses the per-file path to wipe someone else's data).
+    """
+    if not normalized.username:
+        return None
+    is_operator = normalized.username == _effective_operator_username()
+    is_admin = normalized.username == settings.hitl_config_admin_username
+    if not (is_operator or is_admin):
+        return None
+    text = normalized.text or ""
+    # Order matters: /files_delete_all starts with /files_delete which would
+    # otherwise be intercepted if we matched /file_delete first via a less
+    # specific regex. The current regexes are mutually exclusive (one starts
+    # with /file_delete, the other with /files_delete_all), but keep this
+    # ordering explicit.
+    if _FILES_DELETE_ALL_TRIGGER_RE.match(text):
+        return await _handle_files_delete_all_subcommand(
+            normalized=normalized, text=text
+        )
+    if _FILE_DELETE_TRIGGER_RE.match(text):
+        return await _handle_file_delete_subcommand(
+            normalized=normalized, text=text
+        )
+    return None
+
+
+def _has_confirm_token(parts: list[str]) -> bool:
+    return bool(parts) and parts[-1].lower() == "confirm"
+
+
+def _format_delete_summary(summary: dict, *, scope_label: str) -> str:
+    files = int(summary.get("deleted_files", 0) or 0)
+    chunks = int(summary.get("deleted_chunks", 0) or 0)
+    candidates = int(summary.get("deleted_candidates", 0) or 0)
+    binaries = int(summary.get("deleted_binaries", 0) or 0)
+    failed = summary.get("failed_binary_paths") or []
+    lines = [
+        f"🗑 Удалено ({scope_label}):",
+        f"• файлов: {files}",
+        f"• чанков RAG: {chunks}",
+        f"• кандидатов знаний: {candidates}",
+        f"• бинарных файлов: {binaries}",
+    ]
+    if failed:
+        lines.append(f"⚠️ Не удалось удалить файлы с диска: {len(failed)}")
+    return "\n".join(lines)
+
+
+async def _handle_file_delete_subcommand(
+    *, normalized: NormalizedTelegramMessage, text: str
+) -> dict[str, str]:
+    parts = text.split()
+    # parts[0] is '/file_delete' itself.
+    if len(parts) < 2:
+        await _send_dm(normalized.chat_id, _FILE_DELETE_USAGE)
+        return {"status": "accepted", "route": "file_delete", "decision": "usage"}
+    short_id = parts[1].lstrip("#").upper()
+    token = settings.internal_service_token or ""
+    has_confirm = _has_confirm_token(parts[2:])
+    if not has_confirm:
+        detail = await api_client.fetch_file_inspect(
+            short_id=short_id,
+            requester_username=normalized.username or "",
+            internal_token=token,
+        )
+        if detail is None:
+            await _send_dm(normalized.chat_id, f"Файл #{short_id} не найден.")
+            return {
+                "status": "accepted",
+                "route": "file_delete",
+                "decision": "not_found",
+            }
+        name = detail.get("source_file_name") or short_id
+        await _send_dm(
+            normalized.chat_id,
+            (
+                f"⚠️ Будет удалён без возможности восстановить: {name}.\n"
+                f"Подтвердите: /file_delete {short_id} confirm"
+            ),
+        )
+        return {
+            "status": "accepted",
+            "route": "file_delete",
+            "decision": "warn",
+        }
+    summary = await api_client.delete_operator_file(
+        short_id=short_id,
+        requester_username=normalized.username or "",
+        internal_token=token,
+    )
+    if summary is None:
+        await _send_dm(normalized.chat_id, f"Файл #{short_id} не найден.")
+        return {
+            "status": "accepted",
+            "route": "file_delete",
+            "decision": "not_found",
+        }
+    await _send_dm(
+        normalized.chat_id,
+        _format_delete_summary(summary, scope_label=f"#{short_id}"),
+    )
+    return {
+        "status": "accepted",
+        "route": "file_delete",
+        "decision": "deleted",
+    }
+
+
+async def _handle_files_delete_all_subcommand(
+    *, normalized: NormalizedTelegramMessage, text: str
+) -> dict[str, str]:
+    parts = text.split()
+    # parts[0] is '/files_delete_all'.
+    has_confirm = _has_confirm_token(parts[1:])
+    token = settings.internal_service_token or ""
+    if not has_confirm:
+        records = operator_file_repository.list_recent(
+            username=normalized.username or "",
+            limit=_FILES_DELETE_ALL_BULK_LIMIT,
+        )
+        if not records:
+            await _send_dm(normalized.chat_id, "У вас нет сохранённых файлов.")
+            return {
+                "status": "accepted",
+                "route": "files_delete_all",
+                "decision": "empty",
+            }
+        await _send_dm(
+            normalized.chat_id,
+            (
+                f"⚠️ Будет удалено навсегда {len(records)} файлов.\n"
+                "Подтвердите: /files_delete_all confirm"
+            ),
+        )
+        return {
+            "status": "accepted",
+            "route": "files_delete_all",
+            "decision": "warn",
+            "count": str(len(records)),
+        }
+    summary = await api_client.delete_all_operator_files(
+        requester_username=normalized.username or "",
+        internal_token=token,
+    )
+    await _send_dm(
+        normalized.chat_id,
+        _format_delete_summary(summary, scope_label="все файлы"),
+    )
+    return {
+        "status": "accepted",
+        "route": "files_delete_all",
+        "decision": "deleted",
+        "count": str(int(summary.get("deleted_files", 0) or 0)),
+    }
 
 
 def _format_file_inspect_dm(detail: dict) -> str:
@@ -1663,6 +1836,13 @@ async def _process_telegram_update(
             "attachment_sizes": [a.file_size for a in normalized.attachments],
         },
     )
+
+    delete_result = await _handle_file_delete_command(normalized=normalized)
+    if delete_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(delete_result)
+        _log_routed(trace_id=trace_id, result=delete_result, fallback="file_delete")
+        return response
 
     inspect_result = await _handle_file_inspect_command(normalized=normalized)
     if inspect_result is not None:
