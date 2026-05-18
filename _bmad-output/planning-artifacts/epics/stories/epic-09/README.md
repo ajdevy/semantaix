@@ -8,7 +8,7 @@ This story pack is implementation-ready and includes:
 - manual verification steps
 - completion gates
 
-Implementation order follows story numbering (09.01 → 09.05).
+Implementation order follows story numbering (09.01 → 09.05). Story 09.06 is a post-signoff augmentation triggered by a real-world media-group upload that surfaced two latent gaps; it does not change the public surface and can ship independently.
 
 ## Automated E2E (current repo)
 

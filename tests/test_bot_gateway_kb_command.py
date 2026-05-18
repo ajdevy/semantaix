@@ -310,6 +310,90 @@ def test_kb_api_submit_failure_reports_failure(isolated_bot, monkeypatch):
     assert any("api_failed" in t for t in summaries)
 
 
+def test_kb_api_error_with_detail_is_surfaced_in_dm(isolated_bot, monkeypatch):
+    """When the API returns 422 {"detail": "empty_text"}, the operator DM
+    must contain the localized friendly reason — not the opaque httpx string.
+    """
+    import httpx
+
+    from services.bot_gateway.app.api_client import ApiError
+
+    txt_on_disk = isolated_bot["tmp_path"] / "presentation.pdf"
+    txt_on_disk.write_bytes(b"PDF")
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        return DownloadedFile(path=txt_on_disk, byte_size=3, mime_type=mime_type)
+
+    async def fake_submit(**kwargs):
+        request = httpx.Request("POST", "http://api:8000/knowledge/operator_upload")
+        response = httpx.Response(
+            status_code=422,
+            json={"detail": "empty_text"},
+            request=request,
+        )
+        raise ApiError(
+            "Client error '422 Unprocessable Entity'",
+            request=request,
+            response=response,
+            detail="empty_text",
+        )
+
+    monkeypatch.setattr(bot_main.TelegramFileDownloader, "download", fake_download)
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_message(
+            caption="/kb_add",
+            attachments=[
+                {
+                    "document": {
+                        "file_id": "P",
+                        "file_name": "Презентация.pdf",
+                        "mime_type": "application/pdf",
+                        "file_size": 3,
+                    }
+                }
+            ],
+        ),
+    )
+    assert response.status_code == 200
+    summaries = [t for _, t in isolated_bot["dms"]]
+    failure_lines = [t for t in summaries if "Не удалось обработать" in t]
+    assert any("извлечь текст" in t for t in failure_lines)
+    assert not any("Client error '422" in t for t in summaries)
+
+
+def test_kb_inline_api_error_with_detail_is_surfaced(isolated_bot, monkeypatch):
+    import httpx
+
+    from services.bot_gateway.app.api_client import ApiError
+
+    async def fake_submit(**kwargs):
+        request = httpx.Request("POST", "http://api:8000/knowledge/operator_upload")
+        response = httpx.Response(
+            status_code=422,
+            json={"detail": "empty_inline_text"},
+            request=request,
+        )
+        raise ApiError(
+            "Client error '422 Unprocessable Entity'",
+            request=request,
+            response=response,
+            detail="empty_inline_text",
+        )
+
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_message(text="добавь в базу: справка"),
+    )
+    assert response.status_code == 200
+    summaries = [t for _, t in isolated_bot["dms"]]
+    assert any("пустой текст" in t for t in summaries)
+
+
 def test_kb_inline_submit_failure_reported(isolated_bot, monkeypatch):
     async def fake_submit(**kwargs):
         raise RuntimeError("api boom")
@@ -1161,6 +1245,18 @@ def test_kb_friendly_failure_reason_helper_covers_branches():
     assert _friendly_failure_reason(
         "api_failed:something", max_bytes=1
     ).startswith("api_failed:")
+    assert "извлечь текст" in _friendly_failure_reason(
+        "api_failed:empty_text", max_bytes=1
+    )
+    assert "тип файла" in _friendly_failure_reason(
+        "api_failed:unsupported_source_file_type", max_bytes=1
+    )
+    assert "не передан путь" in _friendly_failure_reason(
+        "api_failed:missing_stored_binary_path", max_bytes=1
+    )
+    assert "слишком длинный" in _friendly_failure_reason(
+        "api_failed:pdf_too_many_pages_for_ocr", max_bytes=1
+    )
     assert _friendly_failure_reason("download_failed", max_bytes=1) == (
         "не удалось скачать файл"
     )

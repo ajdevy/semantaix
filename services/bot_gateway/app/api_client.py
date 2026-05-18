@@ -3,6 +3,52 @@ from __future__ import annotations
 import httpx
 
 
+class ApiError(httpx.HTTPStatusError):
+    """HTTPStatusError that also carries the API's structured `detail`.
+
+    Subclasses HTTPStatusError so existing `except httpx.HTTPStatusError`
+    sites keep working unchanged; new callers can read `.detail` for the
+    API-level reason (e.g. ``"empty_text"``, ``"unsupported_source_file_type"``).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request: httpx.Request,
+        response: httpx.Response,
+        detail: str | None,
+    ) -> None:
+        super().__init__(message, request=request, response=response)
+        self.detail = detail
+
+
+def _extract_detail(response: httpx.Response) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if isinstance(body, dict):
+        raw = body.get("detail")
+        if isinstance(raw, str):
+            return raw
+        if raw is not None:
+            return str(raw)
+    return None
+
+
+def _raise_for_status(response: httpx.Response) -> None:
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise ApiError(
+            str(exc),
+            request=exc.request,
+            response=exc.response,
+            detail=_extract_detail(exc.response),
+        ) from exc
+
+
 class ApiClient:
     def __init__(
         self,
@@ -206,7 +252,7 @@ class ApiClient:
             )
         if response.status_code == 404:
             return None
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     async def search_files(
@@ -227,7 +273,7 @@ class ApiClient:
                 },
                 headers={"Authorization": f"Bearer {internal_token}"},
             )
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     async def _post(
@@ -244,7 +290,7 @@ class ApiClient:
             response = await client.post(
                 f"{self._base_url}{path}", json=json, headers=headers
             )
-            response.raise_for_status()
+            _raise_for_status(response)
             return response.json()
 
     async def _get(self, path: str, *, auth: bool = False) -> dict:
@@ -253,7 +299,7 @@ class ApiClient:
             response = await client.get(
                 f"{self._base_url}{path}", headers=headers
             )
-            response.raise_for_status()
+            _raise_for_status(response)
             return response.json()
 
     async def _patch(
@@ -264,5 +310,5 @@ class ApiClient:
             response = await client.patch(
                 f"{self._base_url}{path}", json=json, headers=headers
             )
-            response.raise_for_status()
+            _raise_for_status(response)
             return response.json()

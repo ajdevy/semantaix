@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 
-from services.bot_gateway.app.api_client import ApiClient
+from services.bot_gateway.app.api_client import ApiClient, ApiError
 
 
 def _http_mock(monkeypatch, *, response_json: dict):
@@ -189,6 +190,194 @@ async def test_search_files_passes_query_and_limit(monkeypatch):
         "limit": 5,
     }
     assert args.kwargs["headers"] == {"Authorization": "Bearer bot-token"}
+
+
+def _error_response(
+    *,
+    status_code: int,
+    body: object,
+    content_type: str = "application/json",
+) -> httpx.Response:
+    if isinstance(body, (dict, list)):
+        import json as _json
+
+        content = _json.dumps(body).encode("utf-8")
+    elif isinstance(body, bytes):
+        content = body
+    else:
+        content = str(body).encode("utf-8")
+    return httpx.Response(
+        status_code=status_code,
+        headers={"content-type": content_type},
+        content=content,
+        request=httpx.Request("POST", "http://api:8000/some/path"),
+    )
+
+
+def _http_error_mock(monkeypatch, *, response: httpx.Response, method: str = "post"):
+    http_client = AsyncMock()
+    setattr(http_client, method, AsyncMock(return_value=response))
+
+    cm = AsyncMock()
+    cm.__aenter__.return_value = http_client
+    cm.__aexit__.return_value = None
+    monkeypatch.setattr(
+        "services.bot_gateway.app.api_client.httpx.AsyncClient",
+        lambda timeout: cm,
+    )
+    return http_client
+
+
+@pytest.mark.asyncio
+async def test_post_raises_api_error_with_detail_when_json_body(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=422, body={"detail": "empty_text"}),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.submit_operator_upload(
+            operator_username="@op",
+            source_file_type="pdf",
+            source_file_name="x.pdf",
+            stored_binary_path="/data/x.pdf",
+            is_confidential=False,
+        )
+    assert info.value.detail == "empty_text"
+    assert info.value.response.status_code == 422
+    assert isinstance(info.value, httpx.HTTPStatusError)
+
+
+@pytest.mark.asyncio
+async def test_post_api_error_detail_is_none_when_body_not_json(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(
+            status_code=500,
+            body=b"<html>boom</html>",
+            content_type="text/html",
+        ),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.deliver_operator_reply(
+            ticket_id=1, operator_username="@op", reply_text="hi"
+        )
+    assert info.value.detail is None
+    assert info.value.response.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_post_api_error_detail_is_none_when_detail_field_missing(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=400, body={"error": "nope"}),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.forward_inbound(
+            text="x", chat_id=1, customer_username=None, trace_id="t"
+        )
+    assert info.value.detail is None
+
+
+@pytest.mark.asyncio
+async def test_post_api_error_stringifies_non_string_detail(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(
+            status_code=422,
+            body={"detail": {"loc": ["body"], "msg": "field required"}},
+        ),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.forward_inbound(
+            text="x", chat_id=1, customer_username=None, trace_id="t"
+        )
+    assert info.value.detail is not None
+    assert "field required" in info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_get_raises_api_error_with_detail(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=404, body={"detail": "not_found"}),
+        method="get",
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.list_projects()
+    assert info.value.detail == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_patch_raises_api_error_with_detail(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=409, body={"detail": "conflict"}),
+        method="patch",
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.detach_operator(username="@op")
+    assert info.value.detail == "conflict"
+
+
+@pytest.mark.asyncio
+async def test_fetch_file_inspect_raises_api_error_on_non_404(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=500, body={"detail": "boom"}),
+        method="get",
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.fetch_file_inspect(
+            short_id="X", requester_username="@u", internal_token="t"
+        )
+    assert info.value.detail == "boom"
+
+
+@pytest.mark.asyncio
+async def test_search_files_raises_api_error(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=400, body={"detail": "bad_query"}),
+        method="get",
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.search_files(
+            query="x", requester_username="@u", internal_token="t"
+        )
+    assert info.value.detail == "bad_query"
+
+
+@pytest.mark.asyncio
+async def test_find_operator_by_username_returns_none_on_404(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=404, body={"detail": "missing"}),
+        method="get",
+    )
+    client = ApiClient(base_url="http://api:8000")
+    assert await client.find_operator_by_username(username="@nope") is None
+
+
+@pytest.mark.asyncio
+async def test_find_operator_by_username_reraises_non_404(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=500, body={"detail": "oops"}),
+        method="get",
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.find_operator_by_username(username="@op")
+    assert info.value.response.status_code == 500
+    assert info.value.detail == "oops"
 
 
 @pytest.mark.asyncio
