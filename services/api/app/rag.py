@@ -5,7 +5,10 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from services.api.app.russian_text import get_russian_normalizer
+from services.api.app.russian_text import (
+    get_retrieval_stopwords,
+    get_russian_normalizer,
+)
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -48,7 +51,11 @@ def init_schema(db_path: str) -> None:
 
 
 def _tokenize(text: str) -> set[str]:
-    return set(get_russian_normalizer().lemmas(text))
+    # Pre-split on hyphens so compounds like "Багги-тур" produce ("багги", "тур")
+    # on both query and chunk sides. razdel keeps them as one token otherwise,
+    # which makes "багги тур" miss "багги-тур" entirely.
+    flattened = text.replace("-", " ")
+    return set(get_russian_normalizer().lemmas(flattened))
 
 
 def split_into_chunks(text: str) -> list[str]:
@@ -129,6 +136,13 @@ class RagRepository:
         query_tokens = _tokenize(query)
         if not query_tokens:
             return []
+        # Score over content lemmas only so intent/connector words ("хочу",
+        # "поехать", "на") do not deflate the denominator for short natural-
+        # language queries. Stopword-only queries fall back to the full token
+        # set to avoid awarding a perfect score against any chunk by accident.
+        content_tokens = query_tokens - get_retrieval_stopwords()
+        scoring_tokens = content_tokens or query_tokens
+        denominator = len(scoring_tokens)
 
         with _connect(self.db_path) as connection:
             if project_id is None:
@@ -148,10 +162,10 @@ class RagRepository:
         for row in rows:
             chunk_text = str(row["chunk_text"])
             chunk_tokens = _tokenize(chunk_text)
-            overlap = len(query_tokens.intersection(chunk_tokens))
+            overlap = len(scoring_tokens.intersection(chunk_tokens))
             if overlap <= 0:
                 continue
-            score = overlap / max(len(query_tokens), 1)
+            score = overlap / max(denominator, 1)
             chunk_project_id = (
                 int(row["project_id"]) if row["project_id"] is not None else None
             )
