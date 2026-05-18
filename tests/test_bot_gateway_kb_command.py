@@ -1538,6 +1538,12 @@ def test_kb_media_group_settling_cap_forces_drain(
         ),
         is_confidential=False,
     )
+    # An active kb_session must exist for the flusher to upload — the
+    # session check at drain time guards against random operator media
+    # groups being silently ingested as KB content.
+    isolated_bot["kb_session_repo"].upsert(
+        chat_id=100, username="@ajdevy", is_confidential=False, ttl_seconds=900
+    )
 
     submit_calls: list[dict] = []
 
@@ -1633,6 +1639,9 @@ def test_kb_media_group_concurrent_flushers_only_one_drains(
             ),
             is_confidential=False,
         )
+    isolated_bot["kb_session_repo"].upsert(
+        chat_id=100, username="@ajdevy", is_confidential=False, ttl_seconds=900
+    )
 
     submit_calls: list[dict] = []
 
@@ -1915,3 +1924,233 @@ def test_kb_non_media_group_keeps_immediate_ack(isolated_bot, monkeypatch):
     acks = [t for _, t in isolated_bot["dms"] if "Принял" in t]
     assert acks
     assert "1" in acks[0]
+
+
+def test_kb_media_group_orphan_webhook_arrives_before_captioned(
+    isolated_bot, monkeypatch
+):
+    """Regression for the 2-files-only-1-ingested bug.
+
+    Telegram delivers a media group as N independent webhooks. Only one
+    carries the caption with KB intent; the others have no text/caption.
+    If the caption-less sibling is processed first (no session yet, no
+    intent), the pre-fix dispatch silently dropped it as
+    `attachment_only`. With the orphan-buffer handler in place it is
+    speculatively buffered, and the captioned sibling that arrives later
+    upserts the session + buffers its own row. The single flush sees
+    both rows + active session and ingests both files.
+    """
+    import asyncio
+
+    pdf_a = isolated_bot["tmp_path"] / "a.pdf"
+    pdf_a.write_bytes(b"AAAA")
+    pdf_b = isolated_bot["tmp_path"] / "b.pdf"
+    pdf_b.write_bytes(b"BBBB")
+
+    async def fake_download(self, *, file_id, suggested_extension, mime_type=None):
+        if file_id == "MG-ORPHAN":
+            return DownloadedFile(path=pdf_a, byte_size=4, mime_type=mime_type)
+        return DownloadedFile(path=pdf_b, byte_size=4, mime_type=mime_type)
+
+    submit_calls: list[dict] = []
+
+    async def fake_submit(**kwargs):
+        submit_calls.append(kwargs)
+        return {"inserted_chunks": 5, "is_confidential": False, "deduplicated": False}
+
+    monkeypatch.setattr(bot_main.TelegramFileDownloader, "download", fake_download)
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+
+    real_flush = bot_main._flush_media_group_after_debounce
+
+    async def noop_flush(**kwargs):
+        return None
+
+    monkeypatch.setattr(bot_main, "_flush_media_group_after_debounce", noop_flush)
+
+    client = TestClient(bot_app)
+
+    # Caption-less webhook arrives FIRST. No kb_session yet, no intent.
+    # Pre-fix: silently dropped at attachment_only fallthrough.
+    # Post-fix: speculatively buffered via the orphan handler.
+    orphan_msg = _operator_message(
+        attachments=[
+            {
+                "document": {
+                    "file_id": "MG-ORPHAN",
+                    "file_name": "a.pdf",
+                    "mime_type": "application/pdf",
+                    "file_size": 4,
+                }
+            }
+        ],
+    )
+    orphan_msg["update_id"] = 12001
+    orphan_msg["message"]["message_id"] = 12001
+    orphan_msg["message"]["media_group_id"] = "MG_ORPHAN_RACE"
+    response = client.post("/telegram/webhook", json=orphan_msg)
+    body = response.json()
+    assert body["status"] == "accepted"
+    assert body["kb_mode"] == "media_group_orphan_buffered"
+    assert body["attachment_count"] == "1"
+    # No "Принял" ack yet — buffer only.
+    assert not any("Принял" in t for _, t in isolated_bot["dms"])
+    # No kb_session opened yet.
+    assert (
+        isolated_bot["kb_session_repo"].get_active(chat_id=100, username="@ajdevy")
+        is None
+    )
+
+    # Captioned webhook arrives SECOND, opening the session and buffering
+    # its own attachment via the kb_command path.
+    captioned_msg = _operator_message(
+        caption="добавь в базу знаний",
+        attachments=[
+            {
+                "document": {
+                    "file_id": "MG-CAPTIONED",
+                    "file_name": "b.pdf",
+                    "mime_type": "application/pdf",
+                    "file_size": 4,
+                }
+            }
+        ],
+    )
+    captioned_msg["update_id"] = 12002
+    captioned_msg["message"]["message_id"] = 12002
+    captioned_msg["message"]["media_group_id"] = "MG_ORPHAN_RACE"
+    response = client.post("/telegram/webhook", json=captioned_msg)
+    body = response.json()
+    assert body["kb_mode"] == "media_group_buffered"
+    assert (
+        isolated_bot["kb_session_repo"].get_active(chat_id=100, username="@ajdevy")
+        is not None
+    )
+
+    # Run the real flush — both attachments must be ingested.
+    asyncio.run(
+        real_flush(media_group_id="MG_ORPHAN_RACE", debounce_seconds=0)
+    )
+
+    acks = [t for _, t in isolated_bot["dms"] if "Принял" in t]
+    summaries = [t for _, t in isolated_bot["dms"] if "Добавлено в базу" in t]
+    assert len(acks) == 1
+    assert "2" in acks[0]
+    assert "файла" in acks[0]
+    assert len(summaries) == 1
+    assert len(submit_calls) == 2
+    assert "a.pdf" in summaries[0]
+    assert "b.pdf" in summaries[0]
+
+
+def test_kb_media_group_orphan_no_intent_ever_dropped_with_dm(
+    isolated_bot, monkeypatch, caplog
+):
+    """Operator sends a media group with NO KB-intent trigger on any
+    sibling and no pre-existing session. The orphan handler buffers each
+    caption-less webhook, but the drain-time session check refuses to
+    upload: `media_group_orphan_dropped` is logged and the operator
+    receives a soft hint instead of silent ingest."""
+    import asyncio
+
+    submit_calls: list[dict] = []
+
+    async def fake_submit(**kwargs):  # pragma: no cover - must not run
+        submit_calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(bot_main.api_client, "submit_operator_upload", fake_submit)
+
+    real_flush = bot_main._flush_media_group_after_debounce
+
+    async def noop_flush(**kwargs):
+        return None
+
+    monkeypatch.setattr(bot_main, "_flush_media_group_after_debounce", noop_flush)
+
+    client = TestClient(bot_app)
+
+    for offset, fid in ((1, "MG-N1"), (2, "MG-N2")):
+        msg = _operator_message(
+            attachments=[
+                {
+                    "document": {
+                        "file_id": fid,
+                        "file_name": f"{fid}.pdf",
+                        "mime_type": "application/pdf",
+                        "file_size": 4,
+                    }
+                }
+            ],
+        )
+        msg["update_id"] = 13000 + offset
+        msg["message"]["message_id"] = 13000 + offset
+        msg["message"]["media_group_id"] = "MG_NO_INTENT"
+        response = client.post("/telegram/webhook", json=msg)
+        assert response.json()["kb_mode"] == "media_group_orphan_buffered"
+
+    # No session was ever opened.
+    assert (
+        isolated_bot["kb_session_repo"].get_active(chat_id=100, username="@ajdevy")
+        is None
+    )
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(real_flush(media_group_id="MG_NO_INTENT", debounce_seconds=0))
+
+    assert submit_calls == []
+    assert any(
+        "media_group_orphan_dropped" in r.message for r in caplog.records
+    )
+    hint_dms = [
+        t
+        for _, t in isolated_bot["dms"]
+        if "без активной сессии" in t and "добавь в базу знаний" in t
+    ]
+    assert len(hint_dms) == 1
+    # No "Принял" / "Добавлено в базу" — we refused to ingest.
+    assert not any("Принял" in t for _, t in isolated_bot["dms"])
+    assert not any("Добавлено в базу" in t for _, t in isolated_bot["dms"])
+
+
+def test_kb_media_group_orphan_handler_ignores_non_operator(
+    isolated_bot, monkeypatch
+):
+    """Non-operator (customer) attachment-only messages must not be
+    speculatively buffered — they continue to fall through to the
+    standard attachment_only ignore path."""
+    scheduled: list[str] = []
+
+    async def fake_flush(*, media_group_id, debounce_seconds):
+        scheduled.append(media_group_id)
+
+    monkeypatch.setattr(bot_main, "_flush_media_group_after_debounce", fake_flush)
+
+    client = TestClient(bot_app)
+    customer_msg = _operator_message(
+        attachments=[
+            {
+                "document": {
+                    "file_id": "CUST-1",
+                    "file_name": "c.pdf",
+                    "mime_type": "application/pdf",
+                    "file_size": 4,
+                }
+            }
+        ],
+    )
+    customer_msg["update_id"] = 14001
+    customer_msg["message"]["message_id"] = 14001
+    customer_msg["message"]["media_group_id"] = "MG_CUSTOMER"
+    customer_msg["message"]["from"]["username"] = "random_customer"
+    response = client.post("/telegram/webhook", json=customer_msg)
+    body = response.json()
+    # Falls through to attachment_only ignore.
+    assert body["status"] == "ignored"
+    assert body["reason"] == "attachment_only"
+    assert scheduled == []
+    # No buffer rows.
+    assert (
+        isolated_bot["media_group_buffer"].drain(media_group_id="MG_CUSTOMER")
+        == []
+    )
