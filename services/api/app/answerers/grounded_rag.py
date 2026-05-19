@@ -10,6 +10,7 @@ from services.api.app.rag import RagChunk
 from services.api.app.russian_text import get_russian_normalizer
 
 _SENTINEL = "ESCALATE_TO_HUMAN"
+_ANSWER_SNIPPET_MAX = 200
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +64,30 @@ class GroundedRagAnswerer:
                 chunks=chunks,
             )
 
+        logger.info(
+            "grounded_rag_pipeline_entry",
+            extra={
+                "trace_id": ctx.trace_id,
+                "top_score": chunks[0].score,
+                "threshold": ctx.grounding_threshold,
+                "chunk_source_ids": [c.source_id for c in chunks],
+                "chunk_confidential_flags": [c.is_confidential for c in chunks],
+                "chunk_project_ids": [c.project_id for c in chunks],
+            },
+        )
+
         today_iso = ctx.now.date().isoformat()
         first_name, last_name = self._persona_reader()
+        logger.info(
+            "grounded_rag_llm_request",
+            extra={
+                "trace_id": ctx.trace_id,
+                "persona_first_name": first_name,
+                "persona_last_name": last_name,
+                "snippet_count": len(chunks),
+                "today_iso": today_iso,
+            },
+        )
         try:
             answer = await self._llm.answer_grounded(
                 question=question,
@@ -82,7 +105,17 @@ class GroundedRagAnswerer:
                 error=repr(exc),
             )
 
-        if answer.strip().upper() == _SENTINEL:
+        is_sentinel = answer.strip().upper() == _SENTINEL
+        logger.info(
+            "grounded_rag_llm_response",
+            extra={
+                "trace_id": ctx.trace_id,
+                "answer_length": len(answer),
+                "answer_snippet": answer[:_ANSWER_SNIPPET_MAX],
+                "is_sentinel": is_sentinel,
+            },
+        )
+        if is_sentinel:
             return self._skip(
                 reason="escalate_sentinel",
                 ctx=ctx,
@@ -104,6 +137,14 @@ class GroundedRagAnswerer:
                 chunks=chunks,
                 error=repr(exc),
             )
+        logger.info(
+            "grounded_rag_verifier_result",
+            extra={
+                "trace_id": ctx.trace_id,
+                "verdict_label": verdict.label,
+                "verdict_reason": verdict.reason,
+            },
+        )
         if verdict.label != "GROUNDED":
             return self._skip(
                 reason="verifier_not_grounded",
@@ -115,6 +156,15 @@ class GroundedRagAnswerer:
             )
 
         decision = evaluate_suggestion(answer)
+        logger.info(
+            "grounded_rag_guardrail_result",
+            extra={
+                "trace_id": ctx.trace_id,
+                "valid": decision.valid,
+                "score": decision.score,
+                "failure_reasons": list(decision.reasons),
+            },
+        )
         if not decision.valid:
             return self._skip(
                 reason="guardrail_invalid",
@@ -122,9 +172,18 @@ class GroundedRagAnswerer:
                 question=question,
                 chunks=chunks,
                 guardrail_score=decision.score,
+                guardrail_failure_reasons=list(decision.reasons),
             )
 
-        if get_russian_normalizer().contains_profanity(answer):
+        contains_profanity = get_russian_normalizer().contains_profanity(answer)
+        logger.info(
+            "grounded_rag_profanity_result",
+            extra={
+                "trace_id": ctx.trace_id,
+                "contains_profanity": contains_profanity,
+            },
+        )
+        if contains_profanity:
             return self._skip(
                 reason="profanity_detected",
                 ctx=ctx,
@@ -132,9 +191,19 @@ class GroundedRagAnswerer:
                 chunks=chunks,
             )
 
+        text = answer.strip()
+        logger.info(
+            "grounded_rag_delivered",
+            extra={
+                "trace_id": ctx.trace_id,
+                "text_length": len(text),
+                "retrieval_source_ids": [c.source_id for c in chunks],
+                "guardrail_score": decision.score,
+            },
+        )
         return AnswerResult(
             handled=True,
-            text=answer.strip(),
+            text=text,
             response_mode="grounded_rag",
             metadata={
                 "retrieval": [_render_chunk_metadata(chunk) for chunk in chunks],
@@ -160,6 +229,8 @@ class GroundedRagAnswerer:
             "retrieved_count": len(chunks),
             "top_score": chunks[0].score if chunks else None,
             "chunk_source_ids": [chunk.source_id for chunk in chunks],
+            "chunk_confidential_flags": [chunk.is_confidential for chunk in chunks],
+            "chunk_project_ids": [chunk.project_id for chunk in chunks],
         }
         payload.update(extra)
         logger.info("grounded_rag_skipped", extra=payload)

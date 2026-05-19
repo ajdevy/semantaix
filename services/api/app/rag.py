@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,8 @@ from services.api.app.russian_text import (
     get_retrieval_stopwords,
     get_russian_normalizer,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -135,14 +138,36 @@ class RagRepository:
         init_schema(self.db_path)
         query_tokens = _tokenize(query)
         if not query_tokens:
+            logger.info(
+                "rag_retrieve_empty_query",
+                extra={
+                    "query": query,
+                    "project_id_filter": project_id,
+                    "limit": limit,
+                },
+            )
             return []
         # Score over content lemmas only so intent/connector words ("хочу",
         # "поехать", "на") do not deflate the denominator for short natural-
         # language queries. Stopword-only queries fall back to the full token
         # set to avoid awarding a perfect score against any chunk by accident.
+        stopwords_removed = sorted(query_tokens & get_retrieval_stopwords())
         content_tokens = query_tokens - get_retrieval_stopwords()
         scoring_tokens = content_tokens or query_tokens
         denominator = len(scoring_tokens)
+
+        logger.info(
+            "rag_retrieve_request",
+            extra={
+                "query": query,
+                "query_lemmas_all": sorted(query_tokens),
+                "query_lemmas_content": sorted(content_tokens),
+                "stopwords_removed": stopwords_removed,
+                "denominator": denominator,
+                "project_id_filter": project_id,
+                "limit": limit,
+            },
+        )
 
         with _connect(self.db_path) as connection:
             if project_id is None:
@@ -158,27 +183,54 @@ class RagRepository:
                     (project_id,),
                 ).fetchall()
 
-        scored: list[RagChunk] = []
+        scored: list[tuple[RagChunk, list[str]]] = []
         for row in rows:
             chunk_text = str(row["chunk_text"])
             chunk_tokens = _tokenize(chunk_text)
-            overlap = len(scoring_tokens.intersection(chunk_tokens))
-            if overlap <= 0:
+            matched = scoring_tokens.intersection(chunk_tokens)
+            if not matched:
                 continue
-            score = overlap / max(denominator, 1)
+            score = len(matched) / max(denominator, 1)
             chunk_project_id = (
                 int(row["project_id"]) if row["project_id"] is not None else None
             )
             scored.append(
-                RagChunk(
-                    id=int(row["id"]),
-                    source_id=str(row["source_id"]),
-                    chunk_text=chunk_text,
-                    score=score,
-                    is_confidential=bool(row["is_confidential"]),
-                    project_id=chunk_project_id,
+                (
+                    RagChunk(
+                        id=int(row["id"]),
+                        source_id=str(row["source_id"]),
+                        chunk_text=chunk_text,
+                        score=score,
+                        is_confidential=bool(row["is_confidential"]),
+                        project_id=chunk_project_id,
+                    ),
+                    sorted(matched),
                 )
             )
 
-        scored.sort(key=lambda item: item.score, reverse=True)
-        return scored[:limit]
+        scored.sort(key=lambda item: item[0].score, reverse=True)
+        top = scored[:limit]
+        logger.info(
+            "rag_retrieve_result",
+            extra={
+                "query": query,
+                "project_id_filter": project_id,
+                "total_rows_scanned": len(rows),
+                "matched_count": len(scored),
+                "returned_count": len(top),
+                "top_score": top[0][0].score if top else None,
+                "candidates": [
+                    {
+                        "id": chunk.id,
+                        "source_id": chunk.source_id,
+                        "project_id": chunk.project_id,
+                        "is_confidential": chunk.is_confidential,
+                        "score": chunk.score,
+                        "chunk_text_snippet": chunk.chunk_text[:200],
+                        "matched_lemmas": matched_lemmas,
+                    }
+                    for chunk, matched_lemmas in scored[:5]
+                ],
+            },
+        )
+        return [chunk for chunk, _ in top]

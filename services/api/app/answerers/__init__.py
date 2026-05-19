@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -46,6 +49,15 @@ class AnswerPipeline:
     async def run(self, *, question: str, ctx: AnswerContext) -> AnswerResult:
         for answerer in self._answerers:
             result = await answerer.try_answer(question=question, ctx=ctx)
+            logger.info(
+                "answerer_evaluated",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "answerer_name": answerer.name,
+                    "handled": result.handled,
+                    "response_mode": result.response_mode,
+                },
+            )
             if result.handled:
                 metadata = dict(result.metadata)
                 metadata.setdefault("answerer", answerer.name)
@@ -55,6 +67,13 @@ class AnswerPipeline:
                     response_mode=result.response_mode,
                     metadata=metadata,
                 )
+        logger.info(
+            "answer_pipeline_no_handler",
+            extra={
+                "trace_id": ctx.trace_id,
+                "evaluated_answerers": [a.name for a in self._answerers],
+            },
+        )
         return AnswerResult(handled=False)
 
 

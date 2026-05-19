@@ -1,3 +1,7 @@
+import logging
+
+import pytest
+
 from services.api.app.rag import RagRepository, split_into_chunks
 
 
@@ -100,3 +104,70 @@ def test_retrieve_stopword_only_query_falls_back(tmp_path):
     # Either no chunks (zero overlap) or low score — never a free 1.0.
     for item in items:
         assert item.score < 1.0
+
+
+def _records(caplog: pytest.LogCaptureFixture, event: str) -> list:
+    return [r for r in caplog.records if r.message == event]
+
+
+def test_retrieve_emits_request_and_result_events(tmp_path, caplog):
+    repository = RagRepository(str(tmp_path / "rag.sqlite3"))
+    repository.ingest(
+        source_id="kb-buggy",
+        text="Багги-тур по дюнам. Стоимость 2500 руб.",
+    )
+    with caplog.at_level(logging.INFO, logger="services.api.app.rag"):
+        items = repository.retrieve(query="хочу поехать на багги тур", limit=3)
+    assert items, "expected at least one chunk"
+    request_records = _records(caplog, "rag_retrieve_request")
+    assert request_records, "rag_retrieve_request not emitted"
+    rec = request_records[-1]
+    assert rec.query == "хочу поехать на багги тур"
+    # pymorphy3 may pick a non-trivial canonical for "багги"; we don't
+    # assert the exact surface form, only that content tokens exist and
+    # stopwords are stripped.
+    assert "тур" in rec.query_lemmas_content
+    assert "хотеть" in rec.stopwords_removed
+    assert "поехать" in rec.stopwords_removed
+    assert "на" in rec.stopwords_removed
+    assert rec.denominator == len(rec.query_lemmas_content)
+    assert rec.project_id_filter is None
+    assert rec.limit == 3
+    result_records = _records(caplog, "rag_retrieve_result")
+    assert result_records, "rag_retrieve_result not emitted"
+    res = result_records[-1]
+    assert res.returned_count == 1
+    assert res.top_score == 1.0
+    assert res.candidates[0]["source_id"] == "kb-buggy"
+    assert "тур" in res.candidates[0]["matched_lemmas"]
+
+
+def test_retrieve_empty_query_emits_empty_query_event(tmp_path, caplog):
+    repository = RagRepository(str(tmp_path / "rag.sqlite3"))
+    repository.ingest(source_id="kb-1", text="anything")
+    with caplog.at_level(logging.INFO, logger="services.api.app.rag"):
+        items = repository.retrieve(query="...", limit=1)
+    assert items == []
+    assert _records(caplog, "rag_retrieve_empty_query"), \
+        "empty-query event missing"
+    assert _records(caplog, "rag_retrieve_request") == []
+
+
+def test_retrieve_project_id_filter_scopes_results(tmp_path):
+    repository = RagRepository(str(tmp_path / "rag.sqlite3"))
+    repository.ingest(
+        source_id="kb-a", text="Багги-тур проект A", project_id=1,
+    )
+    repository.ingest(
+        source_id="kb-b", text="Багги-тур проект B", project_id=2,
+    )
+    repository.ingest(
+        source_id="kb-null", text="Багги-тур без проекта",
+    )
+    only_a = repository.retrieve(query="багги тур", limit=10, project_id=1)
+    source_ids = {item.source_id for item in only_a}
+    assert source_ids == {"kb-a", "kb-null"}
+    only_b = repository.retrieve(query="багги тур", limit=10, project_id=2)
+    assert {item.source_id for item in only_b} == {"kb-b", "kb-null"}
+    unscoped = repository.retrieve(query="багги тур", limit=10)
+    assert {item.source_id for item in unscoped} == {"kb-a", "kb-b", "kb-null"}
