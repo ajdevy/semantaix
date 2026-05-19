@@ -89,11 +89,35 @@ def _ocr_pdf(path: Path) -> str:
     return "\n\n".join(parts)
 
 
+def _unwrap_paragraphs(text: str) -> str:
+    """Collapse layout-broken single newlines while preserving paragraph breaks.
+
+    PDF text extraction (pypdf and the OCR fallback) reflows the visual
+    layout into one line per visual row. A heading like
+    ``"ТУРЫ НА ЭНДУРО,\\nКВАДРОЦИКЛАХ,\\nБАГГИ В СОЧИ"`` arrives with
+    single ``\\n`` separators, and the RAG ingest pipeline chunks per
+    line — so semantically-related tokens scatter across separate
+    chunks and lock the best possible retrieval score at
+    (matched / scoring_tokens) where matched < scoring_tokens.
+
+    Both PDF paths in this module already mark real paragraph/page
+    breaks with a blank line, so runs of ``\\n[ \\t]*\\n+`` stay as
+    paragraph boundaries while every other newline (with its surrounding
+    whitespace) collapses into a single space.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    paragraphs = [p for p in re.split(r"\n[ \t]*\n+", text) if p.strip()]
+    return "\n\n".join(
+        re.sub(r"\s*\n\s*", " ", paragraph).strip() for paragraph in paragraphs
+    )
+
+
 def extract_pdf(path: Path) -> str:
     text = _extract_pdf_text_via_pypdf(path)
     if text.strip():
-        return text
-    return _ocr_pdf(path)
+        return _unwrap_paragraphs(text)
+    ocr = _ocr_pdf(path)
+    return _unwrap_paragraphs(ocr) if ocr.strip() else ocr
 
 
 def extract_docx(path: Path) -> str:

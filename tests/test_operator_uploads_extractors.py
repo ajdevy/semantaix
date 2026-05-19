@@ -745,6 +745,48 @@ def test_extract_pdf_ocr_respects_page_cap(tmp_path: Path, monkeypatch):
     assert info.value.reason == "pdf_too_many_pages_for_ocr"
 
 
+def test_unwrap_paragraphs_collapses_layout_newlines_but_keeps_paragraph_breaks():
+    raw = (
+        "ТУРЫ НА ЭНДУРО,\n"
+        "КВАДРОЦИКЛАХ,\n"
+        "БАГГИ В СОЧИ\n"
+        "\n"
+        "Компания Козлотур, ИП Плескач,\n"
+        "2025\n"
+        "\n"
+        "  \n"  # blank-with-spaces still counts as paragraph break
+        "Маршрут под запрос\n"
+    )
+    out = extractors._unwrap_paragraphs(raw)
+    assert out == (
+        "ТУРЫ НА ЭНДУРО, КВАДРОЦИКЛАХ, БАГГИ В СОЧИ"
+        "\n\n"
+        "Компания Козлотур, ИП Плескач, 2025"
+        "\n\n"
+        "Маршрут под запрос"
+    )
+
+
+def test_extract_pdf_joins_layout_broken_lines_into_single_paragraph(tmp_path, monkeypatch):
+    """Regression: brochure-style PDFs lay one phrase across multiple visual
+    lines; extract_pdf must collapse those into a single paragraph so the
+    RAG line-chunker doesn't split related tokens into separate chunks.
+    """
+    monkeypatch.setattr(
+        extractors,
+        "_extract_pdf_text_via_pypdf",
+        lambda _path: (
+            "ТУРЫ НА ЭНДУРО,\nКВАДРОЦИКЛАХ,\nБАГГИ В СОЧИ\n\nПрайс на 2025"
+        ),
+    )
+    pdf_path = tmp_path / "brochure.pdf"
+    pdf_path.write_bytes(b"%PDF-stub")  # path only needs to exist for the call
+    result = extractors.extract_pdf(pdf_path)
+    assert "ТУРЫ НА ЭНДУРО, КВАДРОЦИКЛАХ, БАГГИ В СОЧИ" in result
+    # paragraph break preserved between heading run and the price line
+    assert "БАГГИ В СОЧИ\n\nПрайс на 2025" in result
+
+
 def test_extract_pdf_returns_empty_when_ocr_yields_nothing(tmp_path: Path, monkeypatch):
     pdf_path = tmp_path / "image_only.pdf"
     pdf_path.write_bytes(_image_only_pdf_bytes("HELLO"))
