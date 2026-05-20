@@ -151,8 +151,19 @@ def normalize_value(prompt_name: str, value: str) -> str:
 
 
 def split_guardrail_lines(value: str) -> list[str]:
-    """Return non-empty, stripped lines from a guardrail prompt value."""
-    return [line.strip() for line in value.splitlines() if line.strip()]
+    """Return non-empty, non-comment, stripped lines from a guardrail value.
+
+    Comments (``#``-prefixed lines) and blank lines are dropped so the
+    same parsing rule applies whether the value came from the canonical
+    data file or from a project override.
+    """
+    lines: list[str] = []
+    for line in value.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        lines.append(stripped)
+    return lines
 
 
 class ProjectPromptRepository:

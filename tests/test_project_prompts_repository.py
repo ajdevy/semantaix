@@ -142,6 +142,11 @@ def test_split_guardrail_lines_strips_and_drops_blanks():
     assert split_guardrail_lines("  a \n\n b \n\nc  \n") == ["a", "b", "c"]
 
 
+def test_split_guardrail_lines_drops_comments():
+    raw = "# header comment\nалfa\n# inline note\nбета\n"
+    assert split_guardrail_lines(raw) == ["алfa", "бета"]
+
+
 def test_get_unknown_name_raises(tmp_path):
     repo = _repo(tmp_path)
     with pytest.raises(UnknownPromptName):

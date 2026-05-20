@@ -8,6 +8,7 @@ import pytest
 
 from services.api.app.answerers import AnswerContext
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
+from services.api.app.project_prompts import ProjectPromptRepository
 from services.api.app.rag import RagChunk
 
 
@@ -31,12 +32,15 @@ class _FakeLLM:
 
 
 @pytest.mark.asyncio
-async def test_grounded_rag_forwards_project_id():
+async def test_grounded_rag_forwards_project_id(tmp_path):
     rag = _RecordingRag()
     answerer = GroundedRagAnswerer(
         rag_repository=rag,
         openrouter_client=_FakeLLM(),  # type: ignore[arg-type]
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=ProjectPromptRepository(
+            str(tmp_path / "prompts.sqlite3")
+        ),
     )
     ctx = AnswerContext(
         chat_id=1,
@@ -50,12 +54,15 @@ async def test_grounded_rag_forwards_project_id():
 
 
 @pytest.mark.asyncio
-async def test_grounded_rag_forwards_none_when_unset():
+async def test_grounded_rag_forwards_none_when_unset(tmp_path):
     rag = _RecordingRag()
     answerer = GroundedRagAnswerer(
         rag_repository=rag,
         openrouter_client=_FakeLLM(),  # type: ignore[arg-type]
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=ProjectPromptRepository(
+            str(tmp_path / "prompts.sqlite3")
+        ),
     )
     ctx = AnswerContext(
         chat_id=1, customer_username="@c", trace_id="t", now=datetime.now(UTC)

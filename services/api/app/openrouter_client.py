@@ -48,10 +48,15 @@ def _format_snippets(snippets: list[RagChunk]) -> str:
 
 
 def _build_grounding_system_prompt(
-    *, first_name: str, last_name: str, today_iso: str
+    *,
+    first_name: str,
+    last_name: str,
+    today_iso: str,
+    template: str | None = None,
 ) -> str:
     name = f"{first_name} {last_name}".strip()
-    return _GROUNDING_SYSTEM_PROMPT_TEMPLATE.format(name=name, today_iso=today_iso)
+    chosen = template if template is not None else _GROUNDING_SYSTEM_PROMPT_TEMPLATE
+    return chosen.format(name=name, today_iso=today_iso)
 
 
 class OpenRouterClient:
@@ -90,11 +95,13 @@ class OpenRouterClient:
         persona_first_name: str,
         persona_last_name: str,
         model: str | None = None,
+        system_prompt_template: str | None = None,
     ) -> str:
         system = _build_grounding_system_prompt(
             first_name=persona_first_name,
             last_name=persona_last_name,
             today_iso=today_iso,
+            template=system_prompt_template,
         )
         user_block = (
             "Snippets:\n"
@@ -117,6 +124,7 @@ class OpenRouterClient:
         answer: str,
         snippets: list[RagChunk],
         model: str | None = None,
+        system_prompt: str | None = None,
     ) -> GroundingVerdict:
         user_block = (
             "Snippets:\n"
@@ -126,8 +134,11 @@ class OpenRouterClient:
             + "\n\nCandidate answer:\n"
             + answer
         )
+        chosen_system = (
+            system_prompt if system_prompt is not None else _VERIFIER_SYSTEM_PROMPT
+        )
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": _VERIFIER_SYSTEM_PROMPT},
+            {"role": "system", "content": chosen_system},
             {"role": "user", "content": user_block},
         ]
         raw = await self._chat(

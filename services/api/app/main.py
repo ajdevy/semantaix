@@ -202,6 +202,7 @@ answer_pipeline = AnswerPipeline(
             rag_repository=rag_repository,
             openrouter_client=openrouter_client,
             persona_reader=_effective_bot_persona,
+            project_prompt_repository=project_prompt_repository,
         ),
     ]
 )
@@ -1026,7 +1027,17 @@ def _effective_hitl_operator_chat_id() -> str | None:
     )
 
 
-def _effective_inbound_ack_message() -> str:
+def _effective_inbound_ack_message(project_id: int | None = None) -> str:
+    """Resolve the inbound ack with per-project precedence.
+
+    Order: project-scoped override → global runtime_config → settings default.
+    """
+    if project_id is not None:
+        override = project_prompt_repository.get(
+            project_id=project_id, prompt_name="inbound_ack"
+        )
+        if override:
+            return override
     return (
         hitl_ticket_repository.get_runtime_config("inbound_ack_message")
         or settings.inbound_ack_message
@@ -1524,7 +1535,7 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             "coalesced": True,
         }
 
-    ack_message = _effective_inbound_ack_message()
+    ack_message = _effective_inbound_ack_message(project_id=ctx.project_id)
     logger.info(
         "hitl_escalation_start",
         extra={

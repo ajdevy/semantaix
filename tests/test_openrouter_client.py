@@ -172,3 +172,35 @@ def test_grounding_verdict_dataclass_immutable():
     v = GroundingVerdict(label="GROUNDED", reason="ok")
     with pytest.raises(Exception):
         v.label = "NOT_GROUNDED"  # type: ignore[misc]
+
+
+@pytest.mark.asyncio
+async def test_answer_grounded_uses_overridden_system_prompt_template(monkeypatch):
+    http_client = _http_mock(monkeypatch, content="ok")
+    client = OpenRouterClient()
+    client.api_key = "token"
+    await client.answer_grounded(
+        question="q",
+        snippets=[_snippet()],
+        today_iso="2026-05-20",
+        persona_first_name="Анна",
+        persona_last_name="Иванова",
+        system_prompt_template="Custom template — {name}, день {today_iso}.",
+    )
+    system = http_client.post.call_args.kwargs["json"]["messages"][0]["content"]
+    assert system == "Custom template — Анна Иванова, день 2026-05-20."
+
+
+@pytest.mark.asyncio
+async def test_verify_grounding_uses_overridden_system_prompt(monkeypatch):
+    http_client = _http_mock(monkeypatch, content="GROUNDED: ok.")
+    client = OpenRouterClient()
+    client.api_key = "token"
+    await client.verify_grounding(
+        question="q",
+        answer="a",
+        snippets=[_snippet()],
+        system_prompt="Use only YES or NO.",
+    )
+    system = http_client.post.call_args.kwargs["json"]["messages"][0]["content"]
+    assert system == "Use only YES or NO."

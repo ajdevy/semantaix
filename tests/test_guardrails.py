@@ -72,3 +72,32 @@ def test_guardrails_block_ai_self_identification_english():
     )
     assert decision.valid is False
     assert "policy_violation" in decision.reasons
+
+
+def test_guardrails_custom_hedge_phrases_override_defaults():
+    # Phrase not in the default hedges file — must trigger only under override.
+    answer = "По нашему уставу есть особое правило для возврата."
+    assert evaluate_suggestion(answer).valid is True
+    decision = evaluate_suggestion(answer, hedge_phrases=["особое правило"])
+    assert decision.valid is False
+    assert "low_confidence" in decision.reasons
+
+
+def test_guardrails_custom_policy_phrases_override_defaults():
+    answer = "Полная информация о наших премиальных условиях здесь."
+    assert evaluate_suggestion(answer).valid is True
+    decision = evaluate_suggestion(
+        answer, policy_phrases=["премиальных условиях"]
+    )
+    assert decision.valid is False
+    assert "policy_violation" in decision.reasons
+
+
+def test_guardrails_empty_override_lists_disable_those_checks():
+    # The default hedges would flag "не знаю"; explicit empty list disables.
+    answer = "Я не знаю точного ответа но возможно завтра увидим."
+    assert evaluate_suggestion(answer).valid is False
+    relaxed = evaluate_suggestion(
+        answer, hedge_phrases=[], policy_phrases=[]
+    )
+    assert relaxed.valid is True

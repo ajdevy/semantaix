@@ -345,6 +345,47 @@ def test_inbound_followup_question_coalesces_to_active_ticket(tmp_path, monkeypa
     settings.hitl_primary_operator_chat_id = None
 
 
+def test_inbound_project_prompt_override_wins_over_runtime_config(
+    tmp_path, monkeypatch
+):
+    """Per-project override takes precedence over the global runtime_config."""
+    _wire(tmp_path)
+    # Point the project prompt repo at an isolated DB and seed an override
+    # for the default project so the resolution helper finds it.
+    from services.api.app import main as api_main
+    from services.api.app.project_prompts import ProjectPromptRepository
+
+    project_prompts = ProjectPromptRepository(
+        str(tmp_path / "project_prompts.sqlite3")
+    )
+    monkeypatch.setattr(api_main, "project_prompt_repository", project_prompts)
+    default_project = api_main.project_repository.ensure_default_project()
+    project_prompts.set(
+        project_id=default_project.id,
+        prompt_name="inbound_ack",
+        value="per-project ack wins",
+        edited_by="@admin",
+    )
+    # Global runtime_config is also set — to prove the per-project value wins.
+    hitl_ticket_repository.set_runtime_config(
+        key="inbound_ack_message",
+        value="runtime ack (should not be used)",
+        updated_by="@admin",
+    )
+    send_mock = AsyncMock(return_value=1)
+    monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
+    _stub_pipeline(monkeypatch, AnswerResult(handled=False))
+    client = TestClient(api_app)
+
+    client.post(
+        "/conversations/inbound", json={"text": "anything", "chat_id": 9002}
+    )
+    ack_call = next(
+        c for c in send_mock.await_args_list if c.kwargs["chat_id"] == 9002
+    )
+    assert ack_call.kwargs["text"] == "per-project ack wins"
+
+
 def test_inbound_runtime_config_overrides_ack_message(tmp_path, monkeypatch):
     _wire(tmp_path)
     hitl_ticket_repository.set_runtime_config(

@@ -8,6 +8,7 @@ import pytest
 from services.api.app.answerers import AnswerContext
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
 from services.api.app.openrouter_client import GroundingVerdict
+from services.api.app.project_prompts import ProjectPromptRepository
 from services.api.app.rag import RagChunk
 
 
@@ -36,7 +37,7 @@ class _FakeRag:
 
 
 @pytest.mark.asyncio
-async def test_confidential_chunk_redacts_metadata_but_grounds_normally():
+async def test_confidential_chunk_redacts_metadata_but_grounds_normally(tmp_path):
     confidential_text = "Внутренние расценки на ремонт офисной мебели."
     chunks = [
         RagChunk(
@@ -58,6 +59,9 @@ async def test_confidential_chunk_redacts_metadata_but_grounds_normally():
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=ProjectPromptRepository(
+            str(tmp_path / "prompts.sqlite3")
+        ),
     )
     result = await answerer.try_answer(question="сколько стоит ремонт?", ctx=_ctx())
 
@@ -74,7 +78,7 @@ async def test_confidential_chunk_redacts_metadata_but_grounds_normally():
 
 
 @pytest.mark.asyncio
-async def test_non_confidential_chunk_passes_through_in_metadata():
+async def test_non_confidential_chunk_passes_through_in_metadata(tmp_path):
     chunks = [
         RagChunk(
             id=2,
@@ -94,6 +98,9 @@ async def test_non_confidential_chunk_passes_through_in_metadata():
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=ProjectPromptRepository(
+            str(tmp_path / "prompts.sqlite3")
+        ),
     )
     result = await answerer.try_answer(question="часы работы офиса?", ctx=_ctx())
 
