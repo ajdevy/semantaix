@@ -499,7 +499,23 @@ def _ensure_known_prompt_name(name: str) -> None:
 def _require_project_access(
     request: Request, slug: str, as_user: str | None
 ) -> tuple[Project, SessionPrincipal]:
-    """Resolve principal and enforce admin-or-operator-of-this-project."""
+    """Resolve principal and enforce admin-or-operator-of-this-project.
+
+    Supports three credentials so both the admin web UI (X-Admin-Session)
+    and the operator web UI (semantaix_session cookie) and bot-to-api
+    calls (Authorization: Bearer + as_user) can reach these endpoints.
+    """
+    admin_session_token = request.headers.get("x-admin-session")
+    if admin_session_token:
+        admin_session = admin_auth_repository.validate_session(
+            admin_session_token
+        )
+        if admin_session is None:
+            raise HTTPException(status_code=401, detail="invalid_admin_session")
+        project = _project_or_404(slug)
+        return project, SessionPrincipal(
+            username=admin_session.admin_username, role="admin"
+        )
     principal = admin_auth_service.require_session_or_internal(request, as_user)
     project = _project_or_404(slug)
     if principal.role == "admin":

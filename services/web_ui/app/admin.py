@@ -388,10 +388,14 @@ async def admin_projects_detail(
         "</textarea></label></p>"
         "<p><button type='submit'>Save</button></p></form>"
     )
+    prompts_link = (
+        f"<p><a href='/admin/projects/{_esc(slug)}/prompts'>"
+        "Manage LLM prompts</a></p>"
+    )
     return HTMLResponse(
         _page(
             f"Project {body.get('slug', '')}",
-            detail + op_table + edit_form + delete_form,
+            detail + op_table + prompts_link + edit_form + delete_form,
             active="projects",
         )
     )
@@ -736,3 +740,206 @@ async def admin_files_reassign(
             status_code=status,
         )
     return RedirectResponse(url="/admin/files", status_code=303)
+
+
+def _prompt_preview(value: str, *, limit: int = 80) -> str:
+    flat = value.replace("\n", " ").strip()
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+@router.get(
+    "/admin/projects/{slug}/prompts", response_class=HTMLResponse
+)
+async def admin_project_prompts_list(
+    request: Request,
+    slug: str,
+    admin_username: Annotated[str, Depends(require_admin)],
+) -> Response:
+    if not admin_username:
+        return _redirect_to_login()
+    status, body = await _api_call(
+        "GET",
+        f"/projects/{slug}/prompts",
+        headers=_auth_headers(request),
+    )
+    if status == 404:
+        return HTMLResponse(
+            _page(
+                "Project not found",
+                f"<p>Slug <code>{_esc(slug)}</code> not found.</p>",
+                active="projects",
+            ),
+            status_code=404,
+        )
+    items = body.get("items", [])
+    rows = "".join(
+        "<tr>"
+        f"<td><a href='/admin/projects/{_esc(slug)}/prompts/"
+        f"{_esc(str(item['prompt_name']))}'>"
+        f"{_esc(str(item['prompt_name']))}</a></td>"
+        f"<td>{_esc(_prompt_preview(str(item.get('value', ''))))}</td>"
+        f"<td>{item.get('version', 0)}</td>"
+        f"<td>{_esc(str(item.get('updated_by') or '—'))}</td>"
+        f"<td>{_esc(str(item.get('updated_at') or '—'))}</td>"
+        f"<td>{'default' if item.get('is_default') else 'override'}</td>"
+        "</tr>"
+        for item in items
+    )
+    table = (
+        "<table border='1' cellpadding='6'>"
+        "<thead><tr><th>name</th><th>preview</th><th>v</th>"
+        "<th>updated by</th><th>updated at</th>"
+        "<th>source</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+    )
+    return HTMLResponse(
+        _page(
+            f"Prompts — project {slug}",
+            f"<p><a href='/admin/projects/{_esc(slug)}'>← Back to project</a>"
+            f"</p>{table}",
+            active="projects",
+        )
+    )
+
+
+@router.get(
+    "/admin/projects/{slug}/prompts/{name}", response_class=HTMLResponse
+)
+async def admin_project_prompt_edit_form(
+    request: Request,
+    slug: str,
+    name: str,
+    admin_username: Annotated[str, Depends(require_admin)],
+) -> Response:
+    if not admin_username:
+        return _redirect_to_login()
+    status, body = await _api_call(
+        "GET",
+        f"/projects/{slug}/prompts/{name}",
+        headers=_auth_headers(request),
+    )
+    if status == 404:
+        return HTMLResponse(
+            _page(
+                "Prompt not found",
+                f"<p>{_esc(slug)} / {_esc(name)} not found.</p>",
+                active="projects",
+            ),
+            status_code=404,
+        )
+    hint = (
+        "<p><em>Must contain <code>{name}</code> and "
+        "<code>{today_iso}</code> placeholders.</em></p>"
+        if name == "grounding_system"
+        else ""
+    )
+    history_rows = "".join(
+        "<tr>"
+        f"<td>{item['version']}</td>"
+        f"<td>{_esc(str(item.get('edited_by', '')))}</td>"
+        f"<td>{_esc(str(item.get('created_at', '')))}</td>"
+        "<td>"
+        f"<form action='/admin/projects/{_esc(slug)}/prompts/"
+        f"{_esc(name)}/restore' method='post' style='display:inline'>"
+        f"<input type='hidden' name='version' value='{item['version']}' />"
+        "<button type='submit'>Restore</button></form>"
+        "</td></tr>"
+        for item in body.get("history", [])
+    )
+    history_table = (
+        "<h2>Version history</h2>"
+        "<table border='1' cellpadding='6'>"
+        "<thead><tr><th>v</th><th>edited by</th><th>created at</th>"
+        "<th>action</th></tr></thead>"
+        f"<tbody>{history_rows}</tbody></table>"
+        if history_rows
+        else "<p>No prior versions.</p>"
+    )
+    edit_form = (
+        f"<form action='/admin/projects/{_esc(slug)}/prompts/{_esc(name)}' "
+        "method='post'>"
+        f"<p><textarea name='value' rows='20' cols='100'>"
+        f"{_esc(str(body.get('value', '')))}</textarea></p>"
+        "<p><button type='submit'>Save</button></p></form>"
+    )
+    meta = (
+        f"<p>Source: <strong>"
+        f"{'default' if body.get('is_default') else 'override'}</strong>; "
+        f"version <code>{body.get('version', 0)}</code></p>"
+    )
+    back = (
+        f"<p><a href='/admin/projects/{_esc(slug)}/prompts'>"
+        "← Back to prompts</a></p>"
+    )
+    return HTMLResponse(
+        _page(
+            f"{name} — project {slug}",
+            back + meta + hint + edit_form + history_table,
+            active="projects",
+        )
+    )
+
+
+@router.post("/admin/projects/{slug}/prompts/{name}")
+async def admin_project_prompt_save(
+    request: Request,
+    slug: str,
+    name: str,
+    admin_username: Annotated[str, Depends(require_admin)],
+    value: Annotated[str, Form()] = "",
+) -> Response:
+    if not admin_username:
+        return _redirect_to_login()
+    status, body = await _api_call(
+        "PUT",
+        f"/projects/{slug}/prompts/{name}",
+        json_body={"value": value},
+        headers=_auth_headers(request),
+    )
+    if status != 200:
+        return HTMLResponse(
+            _page(
+                "Save failed",
+                f"<p>Save failed (HTTP {status}): "
+                f"{_esc(str(body.get('detail', '')))}.</p>"
+                f"<p><a href='/admin/projects/{_esc(slug)}/prompts/"
+                f"{_esc(name)}'>Back</a></p>",
+                active="projects",
+            ),
+            status_code=status,
+        )
+    return RedirectResponse(
+        url=f"/admin/projects/{slug}/prompts/{name}", status_code=303
+    )
+
+
+@router.post("/admin/projects/{slug}/prompts/{name}/restore")
+async def admin_project_prompt_restore(
+    request: Request,
+    slug: str,
+    name: str,
+    admin_username: Annotated[str, Depends(require_admin)],
+    version: Annotated[int, Form()],
+) -> Response:
+    if not admin_username:
+        return _redirect_to_login()
+    status, _ = await _api_call(
+        "POST",
+        f"/projects/{slug}/prompts/{name}/restore",
+        json_body={"version": version},
+        headers=_auth_headers(request),
+    )
+    if status != 200:
+        return HTMLResponse(
+            _page(
+                "Restore failed",
+                f"<p>Restore failed (HTTP {status}).</p>"
+                f"<p><a href='/admin/projects/{_esc(slug)}/prompts/"
+                f"{_esc(name)}'>Back</a></p>",
+                active="projects",
+            ),
+            status_code=status,
+        )
+    return RedirectResponse(
+        url=f"/admin/projects/{slug}/prompts/{name}", status_code=303
+    )

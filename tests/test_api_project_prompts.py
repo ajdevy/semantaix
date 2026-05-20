@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from services.api.app import main as api_main
+from services.api.app.admin_auth import AdminAuthRepository
 from services.api.app.operators import OperatorRepository
 from services.api.app.project_prompts import (
     MAX_PROMPT_VALUE_BYTES,
@@ -26,11 +27,13 @@ def env(tmp_path, monkeypatch):
     operators = OperatorRepository(str(tmp_path / "operators.sqlite3"))
     prompts = ProjectPromptRepository(str(tmp_path / "prompts.sqlite3"))
     web_auth = WebAuthRepository(db_path=str(tmp_path / "web_auth.sqlite3"))
+    admin_auth = AdminAuthRepository(str(tmp_path / "admin_auth.sqlite3"))
 
     monkeypatch.setattr(api_main, "project_repository", projects)
     monkeypatch.setattr(api_main, "operator_repository", operators)
     monkeypatch.setattr(api_main, "project_prompt_repository", prompts)
     monkeypatch.setattr(api_main, "web_auth_repository", web_auth)
+    monkeypatch.setattr(api_main, "admin_auth_repository", admin_auth)
     monkeypatch.setattr(
         api_main.admin_auth_service, "web_auth_repository", web_auth
     )
@@ -121,6 +124,30 @@ def test_internal_with_as_user_admin_works(env):
         headers=_internal_headers(),
     )
     assert response.status_code == 200
+
+
+def test_x_admin_session_header_accepted(env):
+    """The web UI admin pages authenticate via the X-Admin-Session header."""
+    token = api_main.admin_auth_repository.request_code(
+        admin_username="@admin", ttl_seconds=300
+    )
+    session = api_main.admin_auth_repository.consume_code(
+        admin_username="@admin", code=token, ttl_seconds=86400
+    )
+    response = env["client"].get(
+        "/projects/default/prompts",
+        headers={"X-Admin-Session": session.token},
+    )
+    assert response.status_code == 200
+
+
+def test_x_admin_session_invalid_returns_401(env):
+    response = env["client"].get(
+        "/projects/default/prompts",
+        headers={"X-Admin-Session": "not-a-real-token"},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"] == "invalid_admin_session"
 
 
 def test_internal_with_as_user_unknown_role_is_denied(env):
