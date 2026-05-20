@@ -34,10 +34,12 @@ services:
     volumes:
       # Persist every SQLite store under /app/.data (rag, hitl,
       # knowledge, traces, …) so the knowledge base survives container
-      # recreation, image rebuilds, and host reboots. Without this the
-      # next `docker compose up -d --build` wipes the ingested KB and
-      # every customer question falls through to HITL escalation.
-      - api_data:/app/.data
+      # recreation, image rebuilds, and host reboots. Shared with
+      # bot_gateway and web_ui so cross-service DBs (semantaix_hitl.db,
+      # semantaix_operator_files.db) stay byte-for-byte consistent —
+      # otherwise /hitl_config writes from Telegram and operator file
+      # uploads via bot_gateway would be invisible to api.
+      - app_data:/app/.data
       - operator_uploads:/app/.data/operator_uploads
       - whisper_cache:/app/.cache/whisper
       - telegram_bot_api_data:/var/lib/telegram-bot-api
@@ -52,6 +54,8 @@ services:
       context: .
       dockerfile: services/web_ui/Dockerfile
     env_file: .env
+    volumes:
+      - app_data:/app/.data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/live')"]
       interval: 15s
@@ -66,9 +70,11 @@ services:
     volumes:
       # bot_gateway owns semantaix_operator_files.db and writes
       # semantaix_story1.db (Telegram transcripts) + runtime config in
-      # semantaix_hitl.db. Persist them so a redeploy doesn't lose
-      # transcripts, registered uploads, or operator routing config.
-      - bot_gateway_data:/app/.data
+      # semantaix_hitl.db. Same shared app_data volume as api so the
+      # cross-service reads (api opens operator_files RO via
+      # operator_files_view.py, reads hitl_runtime_config on every
+      # message) see the same files.
+      - app_data:/app/.data
       - operator_uploads:/app/.data/operator_uploads
       - telegram_bot_api_data:/var/lib/telegram-bot-api
     healthcheck:
@@ -149,5 +155,4 @@ volumes:
   operator_uploads:
   whisper_cache:
   telegram_bot_api_data:
-  api_data:
-  bot_gateway_data:
+  app_data:
