@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, File, Form, Header, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from platform_common.app_factory import create_service_app
@@ -17,6 +17,7 @@ from services.api.app.admin_auth import (
     AdminAuthService,
     AdminSession,
     InvalidLoginCode,
+    SessionPrincipal,
     wire_admin_auth_routes,
 )
 from services.api.app.admin_files import wire_admin_files_routes
@@ -56,7 +57,17 @@ from services.api.app.operators import (
     OperatorRepository,
     OperatorUsernameConflict,
 )
-from services.api.app.project_prompts import ProjectPromptRepository
+from services.api.app.project_prompts import (
+    PROMPT_NAME_LIST,
+    PROMPT_NAMES,
+    ProjectPromptRepository,
+    PromptCurrent,
+    PromptValueInvalid,
+    PromptValueTooLarge,
+    PromptVersion,
+    PromptVersionNotFound,
+    default_prompt,
+)
 from services.api.app.projects import (
     Project,
     ProjectReferenced,
@@ -429,6 +440,198 @@ def delete_project(
     except ProjectReferenced as exc:
         raise HTTPException(status_code=409, detail="project_referenced") from exc
     return {"ok": True}
+
+
+class PromptValueRequest(BaseModel):
+    value: str
+
+
+class PromptRestoreRequest(BaseModel):
+    version: int
+
+
+def _prompt_current_to_dict(current: PromptCurrent) -> dict[str, object]:
+    return {
+        "project_id": current.project_id,
+        "prompt_name": current.prompt_name,
+        "value": current.value,
+        "version": current.version,
+        "updated_at": current.updated_at,
+        "updated_by": current.updated_by,
+        "is_default": False,
+    }
+
+
+def _prompt_default_to_dict(project_id: int, name: str) -> dict[str, object]:
+    return {
+        "project_id": project_id,
+        "prompt_name": name,
+        "value": default_prompt(name),
+        "version": 0,
+        "updated_at": None,
+        "updated_by": None,
+        "is_default": True,
+    }
+
+
+def _prompt_version_to_dict(pv: PromptVersion) -> dict[str, object]:
+    return {
+        "version": pv.version,
+        "value": pv.value,
+        "edited_by": pv.edited_by,
+        "created_at": pv.created_at,
+    }
+
+
+def _project_or_404(slug: str) -> Project:
+    project = project_repository.get_by_slug(slug)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project_not_found")
+    return project
+
+
+def _ensure_known_prompt_name(name: str) -> None:
+    if name not in PROMPT_NAMES:
+        raise HTTPException(status_code=404, detail="unknown_prompt_name")
+
+
+def _require_project_access(
+    request: Request, slug: str, as_user: str | None
+) -> tuple[Project, SessionPrincipal]:
+    """Resolve principal and enforce admin-or-operator-of-this-project."""
+    principal = admin_auth_service.require_session_or_internal(request, as_user)
+    project = _project_or_404(slug)
+    if principal.role == "admin":
+        return project, principal
+    operator = operator_repository.find_by_username(principal.username)
+    if operator is None or operator.project_id != project.id:
+        raise HTTPException(status_code=403, detail="not_in_project")
+    return project, principal
+
+
+@app.get("/projects/{slug}/prompts")
+def list_project_prompts(
+    slug: str,
+    request: Request,
+    as_user: str | None = None,
+) -> dict[str, object]:
+    project, _ = _require_project_access(request, slug, as_user)
+    by_name = {
+        pc.prompt_name: pc
+        for pc in project_prompt_repository.list_current(project.id)
+    }
+    items = [
+        _prompt_current_to_dict(by_name[name])
+        if name in by_name
+        else _prompt_default_to_dict(project.id, name)
+        for name in PROMPT_NAME_LIST
+    ]
+    return {
+        "project_id": project.id,
+        "project_slug": project.slug,
+        "items": items,
+    }
+
+
+@app.get("/projects/{slug}/prompts/{name}")
+def get_project_prompt(
+    slug: str,
+    name: str,
+    request: Request,
+    as_user: str | None = None,
+) -> dict[str, object]:
+    _ensure_known_prompt_name(name)
+    project, _ = _require_project_access(request, slug, as_user)
+    current = project_prompt_repository.get_current(
+        project_id=project.id, prompt_name=name
+    )
+    if current is None:
+        body = _prompt_default_to_dict(project.id, name)
+    else:
+        body = _prompt_current_to_dict(current)
+    body["history"] = [
+        _prompt_version_to_dict(pv)
+        for pv in project_prompt_repository.list_versions(
+            project_id=project.id, prompt_name=name
+        )
+    ]
+    return body
+
+
+@app.put("/projects/{slug}/prompts/{name}")
+def put_project_prompt(
+    slug: str,
+    name: str,
+    payload: PromptValueRequest,
+    request: Request,
+    as_user: str | None = None,
+) -> dict[str, object]:
+    _ensure_known_prompt_name(name)
+    project, principal = _require_project_access(request, slug, as_user)
+    try:
+        version = project_prompt_repository.set(
+            project_id=project.id,
+            prompt_name=name,
+            value=payload.value,
+            edited_by=principal.username,
+        )
+    except PromptValueTooLarge as exc:
+        raise HTTPException(
+            status_code=413, detail="prompt_value_too_large"
+        ) from exc
+    except PromptValueInvalid as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "project_id": project.id,
+        "prompt_name": name,
+        "version": version,
+    }
+
+
+@app.post("/projects/{slug}/prompts/{name}/restore")
+def restore_project_prompt(
+    slug: str,
+    name: str,
+    payload: PromptRestoreRequest,
+    request: Request,
+    as_user: str | None = None,
+) -> dict[str, object]:
+    _ensure_known_prompt_name(name)
+    project, principal = _require_project_access(request, slug, as_user)
+    try:
+        version = project_prompt_repository.restore(
+            project_id=project.id,
+            prompt_name=name,
+            version=payload.version,
+            edited_by=principal.username,
+        )
+    except PromptVersionNotFound as exc:
+        raise HTTPException(status_code=404, detail="version_not_found") from exc
+    return {
+        "project_id": project.id,
+        "prompt_name": name,
+        "version": version,
+    }
+
+
+@app.get("/projects/{slug}/prompts/{name}/versions")
+def list_project_prompt_versions(
+    slug: str,
+    name: str,
+    request: Request,
+    as_user: str | None = None,
+    limit: int = 50,
+) -> dict[str, object]:
+    _ensure_known_prompt_name(name)
+    project, _ = _require_project_access(request, slug, as_user)
+    versions = project_prompt_repository.list_versions(
+        project_id=project.id, prompt_name=name, limit=limit
+    )
+    return {
+        "project_id": project.id,
+        "prompt_name": name,
+        "items": [_prompt_version_to_dict(pv) for pv in versions],
+    }
 
 
 @app.get("/operators")
