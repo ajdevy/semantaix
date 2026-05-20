@@ -402,3 +402,121 @@ def test_list_versions_respects_limit(env):
         cookies=cookies,
     ).json()
     assert [item["version"] for item in body["items"]] == [3, 2]
+
+
+# ---------------------------------------------------------------------------
+# Pending-edit endpoints (multi-step bot flow)
+# ---------------------------------------------------------------------------
+
+
+def test_arm_pending_creates_state(env):
+    cookies = _login_cookie(env, "@alice")
+    response = env["client"].post(
+        "/projects/default/prompts/verifier_system/pending",
+        cookies=cookies,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["armed_for"] == "@alice"
+    assert body["prompt_name"] == "verifier_system"
+
+
+def test_arm_pending_unknown_name_returns_404(env):
+    cookies = _login_cookie(env, "@alice")
+    response = env["client"].post(
+        "/projects/default/prompts/bogus/pending",
+        cookies=cookies,
+    )
+    assert response.status_code == 404
+
+
+def test_peek_pending_returns_404_when_none(env):
+    cookies = _login_cookie(env, "@alice")
+    response = env["client"].get("/pending-prompt-edits", cookies=cookies)
+    assert response.status_code == 404
+
+
+def test_peek_pending_returns_payload_when_armed(env):
+    cookies = _login_cookie(env, "@alice")
+    env["client"].post(
+        "/projects/default/prompts/verifier_system/pending", cookies=cookies
+    )
+    response = env["client"].get("/pending-prompt-edits", cookies=cookies)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["project_slug"] == "default"
+    assert body["prompt_name"] == "verifier_system"
+
+
+def test_cancel_pending_returns_deleted_flag(env):
+    cookies = _login_cookie(env, "@alice")
+    env["client"].post(
+        "/projects/default/prompts/verifier_system/pending", cookies=cookies
+    )
+    response = env["client"].request(
+        "DELETE", "/pending-prompt-edits", cookies=cookies
+    )
+    assert response.json()["deleted"] is True
+    # Second delete is a no-op.
+    assert (
+        env["client"]
+        .request("DELETE", "/pending-prompt-edits", cookies=cookies)
+        .json()["deleted"]
+        is False
+    )
+
+
+def test_consume_pending_applies_value_and_returns_version(env):
+    cookies = _login_cookie(env, "@alice")
+    env["client"].post(
+        "/projects/default/prompts/verifier_system/pending", cookies=cookies
+    )
+    response = env["client"].post(
+        "/pending-prompt-edits/consume",
+        cookies=cookies,
+        json={"value": "fresh verifier"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["version"] == 1
+    assert body["prompt_name"] == "verifier_system"
+    assert env["prompts"].get(
+        project_id=env["default_project"].id, prompt_name="verifier_system"
+    ) == "fresh verifier"
+
+
+def test_consume_pending_404_when_none_armed(env):
+    cookies = _login_cookie(env, "@alice")
+    response = env["client"].post(
+        "/pending-prompt-edits/consume",
+        cookies=cookies,
+        json={"value": "x"},
+    )
+    assert response.status_code == 404
+
+
+def test_consume_pending_oversize_returns_413(env):
+    cookies = _login_cookie(env, "@alice")
+    env["client"].post(
+        "/projects/default/prompts/verifier_system/pending", cookies=cookies
+    )
+    big = "x" * (MAX_PROMPT_VALUE_BYTES + 1)
+    response = env["client"].post(
+        "/pending-prompt-edits/consume",
+        cookies=cookies,
+        json={"value": big},
+    )
+    assert response.status_code == 413
+
+
+def test_consume_pending_invalid_grounding_returns_422(env):
+    cookies = _login_cookie(env, "@alice")
+    env["client"].post(
+        "/projects/default/prompts/grounding_system/pending", cookies=cookies
+    )
+    response = env["client"].post(
+        "/pending-prompt-edits/consume",
+        cookies=cookies,
+        json={"value": "missing placeholders"},
+    )
+    assert response.status_code == 422

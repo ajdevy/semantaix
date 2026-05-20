@@ -631,6 +631,89 @@ def restore_project_prompt(
     }
 
 
+@app.post("/projects/{slug}/prompts/{name}/pending")
+def arm_prompt_pending_edit(
+    slug: str,
+    name: str,
+    request: Request,
+    as_user: str | None = None,
+) -> dict[str, object]:
+    _ensure_known_prompt_name(name)
+    project, principal = _require_project_access(request, slug, as_user)
+    project_prompt_repository.arm_pending(
+        user_username=principal.username,
+        project_id=project.id,
+        prompt_name=name,
+    )
+    return {
+        "ok": True,
+        "project_id": project.id,
+        "project_slug": project.slug,
+        "prompt_name": name,
+        "armed_for": principal.username,
+    }
+
+
+@app.get("/pending-prompt-edits")
+def peek_pending_prompt_edit(
+    request: Request, as_user: str | None = None
+) -> dict[str, object]:
+    principal = admin_auth_service.require_session_or_internal(request, as_user)
+    pending = project_prompt_repository.peek_pending(principal.username)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="no_pending_edit")
+    project = project_repository.get(pending.project_id)
+    return {
+        "project_id": pending.project_id,
+        "project_slug": project.slug if project is not None else None,
+        "prompt_name": pending.prompt_name,
+        "expires_at": pending.expires_at,
+    }
+
+
+@app.delete("/pending-prompt-edits")
+def cancel_pending_prompt_edit(
+    request: Request, as_user: str | None = None
+) -> dict[str, bool]:
+    principal = admin_auth_service.require_session_or_internal(request, as_user)
+    deleted = project_prompt_repository.cancel_pending(
+        user_username=principal.username
+    )
+    return {"deleted": deleted}
+
+
+@app.post("/pending-prompt-edits/consume")
+def consume_pending_prompt_edit(
+    payload: PromptValueRequest,
+    request: Request,
+    as_user: str | None = None,
+) -> dict[str, object]:
+    principal = admin_auth_service.require_session_or_internal(request, as_user)
+    pending = project_prompt_repository.consume_pending(principal.username)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="no_pending_edit")
+    try:
+        version = project_prompt_repository.set(
+            project_id=pending.project_id,
+            prompt_name=pending.prompt_name,
+            value=payload.value,
+            edited_by=principal.username,
+        )
+    except PromptValueTooLarge as exc:
+        raise HTTPException(
+            status_code=413, detail="prompt_value_too_large"
+        ) from exc
+    except PromptValueInvalid as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    project = project_repository.get(pending.project_id)
+    return {
+        "project_id": pending.project_id,
+        "project_slug": project.slug if project is not None else None,
+        "prompt_name": pending.prompt_name,
+        "version": version,
+    }
+
+
 @app.get("/projects/{slug}/prompts/{name}/versions")
 def list_project_prompt_versions(
     slug: str,
