@@ -56,6 +56,7 @@ from services.api.app.operators import (
     OperatorRepository,
     OperatorUsernameConflict,
 )
+from services.api.app.project_prompts import ProjectPromptRepository
 from services.api.app.projects import (
     Project,
     ProjectReferenced,
@@ -112,6 +113,7 @@ trace_correction_repository = TraceCorrectionRepository(db_path=settings.nl_ops_
 weather_client = WeatherClient(base_url=settings.weather_provider_base_url)
 project_repository = ProjectRepository(settings.projects_db_path)
 operator_repository = OperatorRepository(settings.operators_db_path)
+project_prompt_repository = ProjectPromptRepository(settings.hitl_ticket_db_path)
 admin_auth_repository = AdminAuthRepository(settings.admin_session_db_path)
 admin_nl_ops_repository = AdminNlOpsRepository(settings.nl_ops_db_path)
 web_auth_repository = WebAuthRepository(db_path=settings.web_auth_db_path)
