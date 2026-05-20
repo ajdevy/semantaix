@@ -110,6 +110,12 @@ async def test_answer_grounded_injects_persona_name_into_system_prompt(monkeypat
     assert "Иван Сидоров" in system_prompt
     # The prompt must instruct the LLM not to self-identify as a bot.
     assert "не пиши, что ты бот" in system_prompt.lower()
+    # And to speak as a first-person-plural employee of the company in the
+    # snippets, never naming it in third person — locks in the voice rule
+    # that prevents answers like "Компания X предлагает туры на багги".
+    assert "от первого лица" in system_prompt.lower()
+    assert "мы предлагаем" in system_prompt.lower()
+    assert "запрещено" in system_prompt.lower()
 
 
 @pytest.mark.asyncio
