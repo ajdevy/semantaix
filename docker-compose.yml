@@ -32,6 +32,12 @@ services:
       dockerfile: services/api/Dockerfile
     env_file: .env
     volumes:
+      # Persist every SQLite store under /app/.data (rag, hitl,
+      # knowledge, traces, …) so the knowledge base survives container
+      # recreation, image rebuilds, and host reboots. Without this the
+      # next `docker compose up -d --build` wipes the ingested KB and
+      # every customer question falls through to HITL escalation.
+      - api_data:/app/.data
       - operator_uploads:/app/.data/operator_uploads
       - whisper_cache:/app/.cache/whisper
       - telegram_bot_api_data:/var/lib/telegram-bot-api
@@ -58,6 +64,11 @@ services:
       dockerfile: services/bot_gateway/Dockerfile
     env_file: .env
     volumes:
+      # bot_gateway owns semantaix_operator_files.db and writes
+      # semantaix_story1.db (Telegram transcripts) + runtime config in
+      # semantaix_hitl.db. Persist them so a redeploy doesn't lose
+      # transcripts, registered uploads, or operator routing config.
+      - bot_gateway_data:/app/.data
       - operator_uploads:/app/.data/operator_uploads
       - telegram_bot_api_data:/var/lib/telegram-bot-api
     healthcheck:
@@ -138,3 +149,5 @@ volumes:
   operator_uploads:
   whisper_cache:
   telegram_bot_api_data:
+  api_data:
+  bot_gateway_data:
