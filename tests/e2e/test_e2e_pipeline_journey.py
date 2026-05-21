@@ -54,7 +54,9 @@ def _post_inbound(client, **kwargs):
     return client.post("/conversations/inbound", json=kwargs).json()
 
 
-def test_e2e_deterministic_date_question_no_hitl(tmp_path, monkeypatch):
+def test_e2e_bare_factual_question_escalates(tmp_path, monkeypatch):
+    # Datetime/holiday/weather are no longer pipeline stages, so a bare factual
+    # question with no grounding falls through to HITL like any other.
     _wire(tmp_path, monkeypatch)
     send_mock = AsyncMock(return_value=1)
     monkeypatch.setattr(telegram_bot_sender, "send_message", send_mock)
@@ -67,36 +69,25 @@ def test_e2e_deterministic_date_question_no_hitl(tmp_path, monkeypatch):
         customer_username="@customer",
         trace_id="t-det-date",
     )
-    assert body["delivered"] is True
-    assert body["escalated"] is False
-    assert body["response_mode"] == "deterministic_datetime"
-    assert body["answerer"] == "datetime"
+    assert body["escalated"] is True
+    assert body["response_mode"] == "human_only"
 
-    # No HITL ticket created for deterministic answers
-    assert client.get("/hitl/tickets").json()["items"] == []
+    tickets = client.get("/hitl/tickets").json()["items"]
+    assert len(tickets) == 1
+    assert tickets[0]["target_chat_id"] == 9001
     send_mock.assert_awaited()
 
 
-def test_e2e_holiday_answer_with_country_runtime_override(tmp_path, monkeypatch):
+def test_e2e_scheduling_question_enriches_grounded_answer(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
-    # Default country is RU; verify override works too.
     hitl_ticket_repository.set_runtime_config(
-        key="default_country_code", value="RU", updated_by="@ajdevy"
+        key="rag_grounding_score_threshold", value="0.2", updated_by="@admin"
     )
-    client = TestClient(api_app)
-    body = _post_inbound(
-        client,
-        text="Какой следующий праздник?",
-        chat_id=9001,
-        trace_id="t-holiday",
+    rag_repository.ingest(
+        source_id="kb-delivery",
+        text="Доставка заказов выполняется в течение одного рабочего дня",
     )
-    assert body["response_mode"] == "deterministic_holiday"
-
-
-def test_e2e_weather_cyrillic_city_via_open_meteo_mock(tmp_path, monkeypatch):
-    _wire(tmp_path, monkeypatch)
-    monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
     monkeypatch.setattr(
         weather_client,
         "fetch",
@@ -109,12 +100,29 @@ def test_e2e_weather_cyrillic_city_via_open_meteo_mock(tmp_path, monkeypatch):
             )
         ),
     )
+    answer_mock = AsyncMock(return_value="Доставим ваш заказ завтра.")
+    monkeypatch.setattr(openrouter_client, "answer_grounded", answer_mock)
+    monkeypatch.setattr(
+        openrouter_client,
+        "verify_grounding",
+        AsyncMock(
+            return_value=GroundingVerdict(label="GROUNDED", reason="matches snippet")
+        ),
+    )
+
     client = TestClient(api_app)
     body = _post_inbound(
-        client, text="Какая погода в Москве?", chat_id=9001, trace_id="t-weather"
+        client,
+        text="можете доставить заказ завтра в Москве?",
+        chat_id=9001,
+        trace_id="t-sched",
     )
-    assert body["response_mode"] == "deterministic_weather"
-    assert "Moscow" in body["answer_text"]
+    assert body["response_mode"] == "grounded_rag"
+    # Scheduling context (with datetime/holiday/weather facts) reached the LLM.
+    scheduling_context = answer_mock.await_args.kwargs["scheduling_context"]
+    assert scheduling_context is not None
+    assert "Справочный контекст для планирования" in scheduling_context
+    assert "Погода сейчас (Moscow)" in scheduling_context
 
 
 def test_e2e_grounded_rag_russian_answer(tmp_path, monkeypatch):
@@ -229,12 +237,32 @@ def test_e2e_full_hitl_journey_via_bot_gateway(tmp_path, monkeypatch):
     assert final.resolved_at is not None
 
 
-def test_e2e_slang_intent_via_normalization(tmp_path, monkeypatch):
+def test_e2e_english_scheduling_question_grounded(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
+    hitl_ticket_repository.set_runtime_config(
+        key="rag_grounding_score_threshold", value="0.2", updated_by="@admin"
+    )
+    rag_repository.ingest(
+        source_id="kb-delivery-en",
+        text="Возврат денег занимает пять рабочих дней",
+    )
+    answer_mock = AsyncMock(return_value="Мы доставим завтра.")
+    monkeypatch.setattr(openrouter_client, "answer_grounded", answer_mock)
+    monkeypatch.setattr(
+        openrouter_client,
+        "verify_grounding",
+        AsyncMock(return_value=GroundingVerdict(label="GROUNDED", reason="ok")),
+    )
     client = TestClient(api_app)
-    body = _post_inbound(client, text="че по времени?", chat_id=9001, trace_id="t-slang")
-    assert body["response_mode"] == "deterministic_datetime"
+    body = _post_inbound(
+        client,
+        text="можете доставить мой возврат?",
+        chat_id=9001,
+        trace_id="t-sched-en",
+    )
+    assert body["response_mode"] == "grounded_rag"
+    assert answer_mock.await_args.kwargs["scheduling_context"] is not None
 
 
 def test_e2e_slang_rag_via_lemma_overlap(tmp_path, monkeypatch):
@@ -291,9 +319,11 @@ def test_e2e_profanity_in_llm_output_escalates(tmp_path, monkeypatch):
     assert body["response_mode"] == "human_only"
 
 
-def test_e2e_english_question_still_works_bilingual(tmp_path, monkeypatch):
+def test_e2e_english_factual_question_escalates(tmp_path, monkeypatch):
+    # English factual question with no grounding now escalates to HITL.
     _wire(tmp_path, monkeypatch)
     monkeypatch.setattr(telegram_bot_sender, "send_message", AsyncMock(return_value=1))
     client = TestClient(api_app)
     body = _post_inbound(client, text="what is the date?", chat_id=9001)
-    assert body["response_mode"] == "deterministic_datetime"
+    assert body["escalated"] is True
+    assert body["response_mode"] == "human_only"
