@@ -6,6 +6,11 @@ from typing import Any, Protocol
 from services.api.app.answerers import AnswerContext, AnswerResult
 from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.openrouter_client import OpenRouterClient
+from services.api.app.project_prompts import (
+    ProjectPromptRepository,
+    resolve_prompt,
+    split_guardrail_lines,
+)
 from services.api.app.rag import RagChunk
 from services.api.app.russian_text import get_russian_normalizer
 
@@ -38,10 +43,12 @@ class GroundedRagAnswerer:
         rag_repository: _RagReader,
         openrouter_client: OpenRouterClient,
         persona_reader: _PersonaReader,
+        project_prompt_repository: ProjectPromptRepository,
     ) -> None:
         self._rag = rag_repository
         self._llm = openrouter_client
         self._persona_reader = persona_reader
+        self._prompts = project_prompt_repository
 
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
@@ -78,6 +85,21 @@ class GroundedRagAnswerer:
 
         today_iso = ctx.now.date().isoformat()
         first_name, last_name = self._persona_reader()
+        grounding_template = resolve_prompt(
+            self._prompts, ctx.project_id, "grounding_system"
+        )
+        verifier_prompt = resolve_prompt(
+            self._prompts, ctx.project_id, "verifier_system"
+        )
+        hedge_lines = split_guardrail_lines(
+            resolve_prompt(self._prompts, ctx.project_id, "guardrail_hedges")
+        )
+        policy_lines = split_guardrail_lines(
+            resolve_prompt(self._prompts, ctx.project_id, "guardrail_policy")
+        )
+        profanity_lines = split_guardrail_lines(
+            resolve_prompt(self._prompts, ctx.project_id, "guardrail_profanity")
+        )
         logger.info(
             "grounded_rag_llm_request",
             extra={
@@ -95,6 +117,7 @@ class GroundedRagAnswerer:
                 today_iso=today_iso,
                 persona_first_name=first_name,
                 persona_last_name=last_name,
+                system_prompt_template=grounding_template,
             )
         except Exception as exc:
             return self._skip(
@@ -128,6 +151,7 @@ class GroundedRagAnswerer:
                 question=question,
                 answer=answer,
                 snippets=chunks,
+                system_prompt=verifier_prompt,
             )
         except Exception as exc:
             return self._skip(
@@ -155,7 +179,11 @@ class GroundedRagAnswerer:
                 verdict_reason=verdict.reason,
             )
 
-        decision = evaluate_suggestion(answer)
+        decision = evaluate_suggestion(
+            answer,
+            hedge_phrases=hedge_lines,
+            policy_phrases=policy_lines,
+        )
         logger.info(
             "grounded_rag_guardrail_result",
             extra={
@@ -175,7 +203,9 @@ class GroundedRagAnswerer:
                 guardrail_failure_reasons=list(decision.reasons),
             )
 
-        contains_profanity = get_russian_normalizer().contains_profanity(answer)
+        contains_profanity = get_russian_normalizer().contains_profanity(
+            answer, custom_lemmas=profanity_lines
+        )
         logger.info(
             "grounded_rag_profanity_result",
             extra={

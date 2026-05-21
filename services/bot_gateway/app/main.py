@@ -26,6 +26,10 @@ from services.bot_gateway.app.operator_files import (
     OperatorFileRepository,
 )
 from services.bot_gateway.app.persistence import persist_normalized_message
+from services.bot_gateway.app.prompt_commands import (
+    dispatch_pending_prompt_edit,
+    handle_prompt_command,
+)
 from services.bot_gateway.app.telegram_file_download import (
     TelegramFileDownloader,
     TelegramFileDownloadError,
@@ -1972,6 +1976,17 @@ async def _process_telegram_update(
         response.update(admin_command_result)
         return response
 
+    prompt_command_result = await handle_prompt_command(
+        normalized=normalized,
+        api_client=api_client,
+        send_dm=_send_dm,
+        internal_token=settings.internal_service_token or "",
+    )
+    if prompt_command_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(prompt_command_result)
+        return response
+
     admin_project_result = await handle_admin_project_command(
         normalized=normalized,
         api_client=api_client,
@@ -2054,6 +2069,17 @@ async def _process_telegram_update(
             "reason": "duplicate_source_message",
             "trace_id": trace_id,
         }
+
+    pending_prompt_result = await dispatch_pending_prompt_edit(
+        normalized=normalized,
+        api_client=api_client,
+        send_dm=_send_dm,
+        internal_token=settings.internal_service_token or "",
+    )
+    if pending_prompt_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(pending_prompt_result)
+        return response
 
     operator_username = _effective_operator_username()
     if normalized.username and normalized.username == operator_username:

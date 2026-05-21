@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
 
@@ -56,9 +57,22 @@ class RussianNormalizer:
                 result.append(lemma)
         return result
 
-    def contains_profanity(self, text: str) -> bool:
-        """True if any lemma in `text` matches a profanity entry."""
-        return bool(set(self.lemmas(text)) & self._profanity)
+    def contains_profanity(
+        self, text: str, *, custom_lemmas: Iterable[str] | None = None
+    ) -> bool:
+        """True if any lemma in `text` matches a profanity entry.
+
+        ``custom_lemmas`` lets callers swap the default profanity set for a
+        project-scoped list at call time (lowercased). Passing ``None`` uses
+        the file-backed defaults loaded at construction.
+        """
+        if custom_lemmas is None:
+            target = self._profanity
+        else:
+            target = frozenset(
+                entry.strip().lower() for entry in custom_lemmas if entry.strip()
+            )
+        return bool(set(self.lemmas(text)) & target)
 
     def sentenize(self, text: str) -> list[str]:
         """Split text into Russian sentences via razdel. Whitespace-only ignored."""

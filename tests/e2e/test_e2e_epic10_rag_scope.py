@@ -7,6 +7,7 @@ import pytest
 from services.api.app.answerers import AnswerContext
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
 from services.api.app.openrouter_client import GroundingVerdict
+from services.api.app.project_prompts import ProjectPromptRepository
 from services.api.app.projects import ProjectRepository
 from services.api.app.rag import RagRepository
 
@@ -48,6 +49,9 @@ async def test_rag_scope_isolates_projects(tmp_path):
         rag_repository=rag,
         openrouter_client=llm,  # type: ignore[arg-type]
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=ProjectPromptRepository(
+            str(tmp_path / "prompts.sqlite3")
+        ),
     )
 
     from datetime import UTC, datetime

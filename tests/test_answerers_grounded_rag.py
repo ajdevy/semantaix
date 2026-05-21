@@ -9,7 +9,13 @@ import pytest
 from services.api.app.answerers import AnswerContext
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
 from services.api.app.openrouter_client import GroundingVerdict
+from services.api.app.project_prompts import ProjectPromptRepository
 from services.api.app.rag import RagChunk
+
+
+@pytest.fixture
+def prompts(tmp_path) -> ProjectPromptRepository:
+    return ProjectPromptRepository(str(tmp_path / "prompts.sqlite3"))
 
 
 def _ctx(*, threshold: float = 0.6) -> AnswerContext:
@@ -90,7 +96,7 @@ def _assert_skip_log(
 
 
 @pytest.mark.asyncio
-async def test_strong_retrieval_grounded_verifier_delivers_answer(caplog):
+async def test_strong_retrieval_grounded_verifier_delivers_answer(caplog, prompts):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm(
         answer="Возврат занимает пять рабочих дней."
@@ -99,6 +105,7 @@ async def test_strong_retrieval_grounded_verifier_delivers_answer(caplog):
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
     )
     with caplog.at_level(
         logging.INFO, logger="services.api.app.answerers.grounded_rag"
@@ -140,13 +147,14 @@ async def test_strong_retrieval_grounded_verifier_delivers_answer(caplog):
 
 
 @pytest.mark.asyncio
-async def test_weak_retrieval_falls_through(caplog):
+async def test_weak_retrieval_falls_through(caplog, prompts):
     rag = _FakeRag(_chunks(score=0.2))
     llm = _fake_llm()
     answerer = GroundedRagAnswerer(
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -163,13 +171,14 @@ async def test_weak_retrieval_falls_through(caplog):
 
 
 @pytest.mark.asyncio
-async def test_empty_retrieval_falls_through(caplog):
+async def test_empty_retrieval_falls_through(caplog, prompts):
     rag = _FakeRag([])
     llm = _fake_llm()
     answerer = GroundedRagAnswerer(
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -185,13 +194,14 @@ async def test_empty_retrieval_falls_through(caplog):
 
 
 @pytest.mark.asyncio
-async def test_sentinel_response_escalates(caplog):
+async def test_sentinel_response_escalates(caplog, prompts):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm(answer="ESCALATE_TO_HUMAN")
     answerer = GroundedRagAnswerer(
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -207,13 +217,14 @@ async def test_sentinel_response_escalates(caplog):
 
 
 @pytest.mark.asyncio
-async def test_verifier_not_grounded_escalates(caplog):
+async def test_verifier_not_grounded_escalates(caplog, prompts):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm(verdict_label="NOT_GROUNDED", verdict_reason="hallucination")
     answerer = GroundedRagAnswerer(
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -230,7 +241,7 @@ async def test_verifier_not_grounded_escalates(caplog):
 
 
 @pytest.mark.asyncio
-async def test_guardrail_hedge_escalates_even_when_verifier_grounded(caplog):
+async def test_guardrail_hedge_escalates_even_when_verifier_grounded(caplog, prompts):
     rag = _FakeRag(_chunks(score=0.9))
     # Hedging phrase will trigger evaluate_suggestion -> low_confidence.
     llm = _fake_llm(answer="Я не знаю точного ответа.")
@@ -238,6 +249,7 @@ async def test_guardrail_hedge_escalates_even_when_verifier_grounded(caplog):
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -261,13 +273,14 @@ async def test_guardrail_hedge_escalates_even_when_verifier_grounded(caplog):
 
 
 @pytest.mark.asyncio
-async def test_profane_llm_output_escalates(caplog):
+async def test_profane_llm_output_escalates(caplog, prompts):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm(answer="Полный пиздец, ничего не работает у нас.")
     answerer = GroundedRagAnswerer(
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -282,7 +295,7 @@ async def test_profane_llm_output_escalates(caplog):
 
 
 @pytest.mark.asyncio
-async def test_llm_generator_exception_falls_through(caplog):
+async def test_llm_generator_exception_falls_through(caplog, prompts):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm()
     llm.answer_grounded = AsyncMock(side_effect=RuntimeError("boom"))
@@ -290,6 +303,7 @@ async def test_llm_generator_exception_falls_through(caplog):
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -305,7 +319,7 @@ async def test_llm_generator_exception_falls_through(caplog):
 
 
 @pytest.mark.asyncio
-async def test_llm_verifier_exception_falls_through(caplog):
+async def test_llm_verifier_exception_falls_through(caplog, prompts):
     rag = _FakeRag(_chunks(score=0.9))
     llm = _fake_llm()
     llm.verify_grounding = AsyncMock(side_effect=RuntimeError("verify failed"))
@@ -313,6 +327,7 @@ async def test_llm_verifier_exception_falls_through(caplog):
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -325,3 +340,58 @@ async def test_llm_verifier_exception_falls_through(caplog):
         top_score=0.9,
     )
     assert "verify failed" in record.error
+
+
+@pytest.mark.asyncio
+async def test_per_project_prompt_overrides_reach_llm_and_guardrails(
+    caplog, prompts
+):
+    """When the project has overrides, GroundedRagAnswerer feeds them through
+    to the LLM (system prompts) and to the guardrail/profanity checks."""
+    rag = _FakeRag(_chunks(score=0.9))
+    llm = _fake_llm(answer="свеженькое мнение.")
+    prompts.set(
+        project_id=7,
+        prompt_name="grounding_system",
+        value="custom-{name}-{today_iso}",
+        edited_by="@admin",
+    )
+    prompts.set(
+        project_id=7,
+        prompt_name="verifier_system",
+        value="custom verifier",
+        edited_by="@admin",
+    )
+    prompts.set(
+        project_id=7,
+        prompt_name="guardrail_hedges",
+        value="мнение",
+        edited_by="@admin",
+    )
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+    )
+    ctx = AnswerContext(
+        chat_id=1,
+        customer_username="@c",
+        trace_id="t-prompt",
+        now=datetime(2026, 5, 11, 10, 0, tzinfo=UTC),
+        grounding_threshold=0.6,
+        project_id=7,
+    )
+    result = await answerer.try_answer(
+        question="что вы думаете?", ctx=ctx
+    )
+    # Override propagated to OpenRouter calls.
+    assert llm.answer_grounded.await_args.kwargs["system_prompt_template"] == (
+        "custom-{name}-{today_iso}"
+    )
+    assert llm.verify_grounding.await_args.kwargs["system_prompt"] == (
+        "custom verifier"
+    )
+    # The custom hedge "мнение" appears in the answer, so the guardrail
+    # rejects what the verifier accepted — the answerer must fall through.
+    assert result.handled is False

@@ -312,6 +312,137 @@ class ApiClient:
         _raise_for_status(response)
         return response.json()
 
+    async def _bearer_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        requester_username: str,
+        internal_token: str,
+        json: dict | None = None,
+    ) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.request(
+                method,
+                f"{self._base_url}{path}",
+                json=json,
+                params={"as_user": requester_username},
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        return response
+
+    async def list_project_prompts(
+        self,
+        *,
+        project_slug: str,
+        requester_username: str,
+        internal_token: str,
+    ) -> dict:
+        response = await self._bearer_request(
+            "GET",
+            f"/projects/{project_slug}/prompts",
+            requester_username=requester_username,
+            internal_token=internal_token,
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def get_project_prompt(
+        self,
+        *,
+        project_slug: str,
+        prompt_name: str,
+        requester_username: str,
+        internal_token: str,
+    ) -> dict:
+        response = await self._bearer_request(
+            "GET",
+            f"/projects/{project_slug}/prompts/{prompt_name}",
+            requester_username=requester_username,
+            internal_token=internal_token,
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def restore_project_prompt(
+        self,
+        *,
+        project_slug: str,
+        prompt_name: str,
+        version: int,
+        requester_username: str,
+        internal_token: str,
+    ) -> dict:
+        response = await self._bearer_request(
+            "POST",
+            f"/projects/{project_slug}/prompts/{prompt_name}/restore",
+            requester_username=requester_username,
+            internal_token=internal_token,
+            json={"version": version},
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def arm_prompt_pending_edit(
+        self,
+        *,
+        project_slug: str,
+        prompt_name: str,
+        requester_username: str,
+        internal_token: str,
+    ) -> dict:
+        response = await self._bearer_request(
+            "POST",
+            f"/projects/{project_slug}/prompts/{prompt_name}/pending",
+            requester_username=requester_username,
+            internal_token=internal_token,
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def peek_pending_prompt_edit(
+        self, *, requester_username: str, internal_token: str
+    ) -> dict | None:
+        response = await self._bearer_request(
+            "GET",
+            "/pending-prompt-edits",
+            requester_username=requester_username,
+            internal_token=internal_token,
+        )
+        if response.status_code == 404:
+            return None
+        _raise_for_status(response)
+        return response.json()
+
+    async def cancel_pending_prompt_edit(
+        self, *, requester_username: str, internal_token: str
+    ) -> dict:
+        response = await self._bearer_request(
+            "DELETE",
+            "/pending-prompt-edits",
+            requester_username=requester_username,
+            internal_token=internal_token,
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def consume_pending_prompt_edit(
+        self,
+        *,
+        value: str,
+        requester_username: str,
+        internal_token: str,
+    ) -> dict:
+        response = await self._bearer_request(
+            "POST",
+            "/pending-prompt-edits/consume",
+            requester_username=requester_username,
+            internal_token=internal_token,
+            json={"value": value},
+        )
+        _raise_for_status(response)
+        return response.json()
+
     async def _post(
         self,
         path: str,

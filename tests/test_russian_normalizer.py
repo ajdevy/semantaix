@@ -80,3 +80,29 @@ def test_lemmas_skips_pure_symbol_tokens():
     assert "@" not in lemmas
     assert "hello" in lemmas
     assert "world" in lemmas
+
+
+def test_contains_profanity_custom_lemmas_uses_only_provided_set():
+    normalizer = RussianNormalizer()
+    # Word not in the default file but in the per-project override.
+    assert normalizer.contains_profanity("это шикарный пиджак") is False
+    assert (
+        normalizer.contains_profanity(
+            "это шикарный пиджак", custom_lemmas=["пиджак"]
+        )
+        is True
+    )
+    # Default-banned words become harmless when the project's list omits them.
+    assert (
+        normalizer.contains_profanity(
+            "Это полный пиздец", custom_lemmas=["безобидное"]
+        )
+        is False
+    )
+    # Blank/empty entries are tolerated.
+    assert (
+        normalizer.contains_profanity(
+            "обычный текст", custom_lemmas=["", "   ", "слово"]
+        )
+        is False
+    )
