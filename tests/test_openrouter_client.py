@@ -77,6 +77,42 @@ async def test_answer_grounded_uses_grounding_model_and_sends_context(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_answer_grounded_appends_scheduling_context(monkeypatch):
+    http_client = _http_mock(monkeypatch, content="ok")
+    client = OpenRouterClient()
+    client.api_key = "token"
+    await client.answer_grounded(
+        question="можете доставить заказ?",
+        snippets=[_snippet()],
+        today_iso="2026-05-11",
+        persona_first_name="Анна",
+        persona_last_name="Иванова",
+        scheduling_context="Справочный контекст: сегодня 11 мая.",
+    )
+    user_block = http_client.post.call_args.kwargs["json"]["messages"][1]["content"]
+    assert "Справочный контекст: сегодня 11 мая." in user_block
+    # System prompt now permits using scheduling context.
+    system = http_client.post.call_args.kwargs["json"]["messages"][0]["content"]
+    assert "контекст для планирования" in system.lower()
+
+
+@pytest.mark.asyncio
+async def test_verify_grounding_appends_scheduling_context(monkeypatch):
+    http_client = _http_mock(monkeypatch, content="GROUNDED: ok.")
+    client = OpenRouterClient()
+    client.api_key = "token"
+    await client.verify_grounding(
+        question="q",
+        answer="a",
+        snippets=[_snippet()],
+        scheduling_context="Reference context: today is May 11.",
+    )
+    user_block = http_client.post.call_args.kwargs["json"]["messages"][1]["content"]
+    assert "Reference context: today is May 11." in user_block
+    assert "Candidate answer:\na" in user_block
+
+
+@pytest.mark.asyncio
 async def test_answer_grounded_respects_model_override(monkeypatch):
     http_client = _http_mock(monkeypatch, content="x")
     client = OpenRouterClient()

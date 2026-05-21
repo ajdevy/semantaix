@@ -20,8 +20,9 @@ _GROUNDING_SYSTEM_PROMPT_TEMPLATE = (
     "языковая модель. Если спросят, отвечай как обычный человек на работе. "
     "Отвечай на том же языке, что и вопрос пользователя; если вопрос "
     "на русском — отвечай формальным русским, без сленга и нецензурной "
-    "лексики. Используй ТОЛЬКО приведённые ниже фрагменты знаний и "
-    "сегодняшнюю дату ({today_iso}). Если ответ не полностью подтверждён "
+    "лексики. Используй ТОЛЬКО приведённые ниже фрагменты знаний, "
+    "сегодняшнюю дату ({today_iso}) и предоставленный справочный контекст "
+    "для планирования (если он есть). Если ответ не полностью подтверждён "
     "этими источниками — верни строго `ESCALATE_TO_HUMAN` без каких-либо "
     "других слов. Не хеджируй (\"возможно\", \"вроде\", \"наверное\", "
     "\"хз\") — либо точный ответ, либо `ESCALATE_TO_HUMAN`."
@@ -29,8 +30,9 @@ _GROUNDING_SYSTEM_PROMPT_TEMPLATE = (
 
 _VERIFIER_SYSTEM_PROMPT = (
     "Given the question, the candidate answer, and the snippets, decide "
-    "whether the answer is fully supported by the snippets (and today's "
-    "date). Reply with exactly `GROUNDED: <one-sentence reason>` or "
+    "whether the answer is fully supported by the snippets (today's date "
+    "and any provided scheduling context count as supporting facts). Reply "
+    "with exactly `GROUNDED: <one-sentence reason>` or "
     "`NOT_GROUNDED: <one-sentence reason>`. The candidate answer may be "
     "in Russian or English; the verdict reason should be in English for "
     "log readability."
@@ -45,6 +47,12 @@ class GroundingVerdict:
 
 def _format_snippets(snippets: list[RagChunk]) -> str:
     return "\n".join(f"- [{chunk.source_id}] {chunk.chunk_text}" for chunk in snippets)
+
+
+def _maybe_scheduling_block(scheduling_context: str | None) -> list[str]:
+    if not scheduling_context:
+        return []
+    return [scheduling_context]
 
 
 def _build_grounding_system_prompt(
@@ -96,6 +104,7 @@ class OpenRouterClient:
         persona_last_name: str,
         model: str | None = None,
         system_prompt_template: str | None = None,
+        scheduling_context: str | None = None,
     ) -> str:
         system = _build_grounding_system_prompt(
             first_name=persona_first_name,
@@ -103,11 +112,12 @@ class OpenRouterClient:
             today_iso=today_iso,
             template=system_prompt_template,
         )
-        user_block = (
-            "Snippets:\n"
-            + _format_snippets(snippets)
-            + "\n\nQuestion:\n"
-            + question
+        user_block = "\n\n".join(
+            [
+                "Snippets:\n" + _format_snippets(snippets),
+                *_maybe_scheduling_block(scheduling_context),
+                "Question:\n" + question,
+            ]
         )
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system},
@@ -125,14 +135,15 @@ class OpenRouterClient:
         snippets: list[RagChunk],
         model: str | None = None,
         system_prompt: str | None = None,
+        scheduling_context: str | None = None,
     ) -> GroundingVerdict:
-        user_block = (
-            "Snippets:\n"
-            + _format_snippets(snippets)
-            + "\n\nQuestion:\n"
-            + question
-            + "\n\nCandidate answer:\n"
-            + answer
+        user_block = "\n\n".join(
+            [
+                "Snippets:\n" + _format_snippets(snippets),
+                *_maybe_scheduling_block(scheduling_context),
+                "Question:\n" + question,
+                "Candidate answer:\n" + answer,
+            ]
         )
         chosen_system = (
             system_prompt if system_prompt is not None else _VERIFIER_SYSTEM_PROMPT

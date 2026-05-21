@@ -152,6 +152,46 @@ async def test_strong_retrieval_grounded_verifier_delivers_answer(caplog, prompt
 
 
 @pytest.mark.asyncio
+async def test_scheduling_intent_passes_context_to_llm_calls(prompts):
+    rag = _FakeRag(_chunks(score=0.9))
+    llm = _fake_llm(answer="Доставим ваш заказ завтра в течение рабочего дня.")
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+        weather_client=None,
+    )
+    result = await answerer.try_answer(
+        question="можете доставить заказ завтра?", ctx=_ctx()
+    )
+    assert result.handled is True
+    answer_ctx = llm.answer_grounded.await_args.kwargs["scheduling_context"]
+    verify_ctx = llm.verify_grounding.await_args.kwargs["scheduling_context"]
+    assert answer_ctx is not None
+    assert "Справочный контекст для планирования" in answer_ctx
+    assert verify_ctx == answer_ctx
+
+
+@pytest.mark.asyncio
+async def test_non_scheduling_question_passes_no_context(prompts):
+    rag = _FakeRag(_chunks(score=0.9))
+    llm = _fake_llm()
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+    )
+    result = await answerer.try_answer(
+        question="когда придёт мой возврат?", ctx=_ctx()
+    )
+    assert result.handled is True
+    assert llm.answer_grounded.await_args.kwargs["scheduling_context"] is None
+    assert llm.verify_grounding.await_args.kwargs["scheduling_context"] is None
+
+
+@pytest.mark.asyncio
 async def test_weak_retrieval_falls_through(caplog, prompts):
     rag = _FakeRag(_chunks(score=0.2))
     llm = _fake_llm()

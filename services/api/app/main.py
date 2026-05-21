@@ -35,10 +35,7 @@ from services.api.app.admin_nl_ops import (
 from services.api.app.admin_rag_inspect import wire_admin_rag_inspect_routes
 from services.api.app.answer_trace import AnswerTraceRepository
 from services.api.app.answerers import AnswerContext, AnswerPipeline
-from services.api.app.answerers.datetime_answerer import DateTimeAnswerer
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
-from services.api.app.answerers.holiday_answerer import HolidayAnswerer
-from services.api.app.answerers.weather_answerer import WeatherAnswerer
 from services.api.app.answerers.weather_client import WeatherClient
 from services.api.app.backups import BackupError, BackupRepository
 from services.api.app.hitl import HitlTicketRepository
@@ -195,14 +192,12 @@ def _effective_bot_persona() -> tuple[str, str]:
 
 answer_pipeline = AnswerPipeline(
     [
-        DateTimeAnswerer(),
-        HolidayAnswerer(),
-        WeatherAnswerer(client=weather_client),
         GroundedRagAnswerer(
             rag_repository=rag_repository,
             openrouter_client=openrouter_client,
             persona_reader=_effective_bot_persona,
             project_prompt_repository=project_prompt_repository,
+            weather_client=weather_client,
         ),
     ]
 )

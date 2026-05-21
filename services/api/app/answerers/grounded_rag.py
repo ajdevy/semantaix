@@ -4,9 +4,11 @@ import logging
 from typing import Any, Protocol
 
 from services.api.app.answerers import AnswerContext, AnswerResult
+from services.api.app.answerers.scheduling_context import build_scheduling_context
 from services.api.app.answerers.service_catalog_intent import (
     is_service_catalog_query,
 )
+from services.api.app.answerers.weather_client import WeatherClient
 from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.openrouter_client import OpenRouterClient
 from services.api.app.project_prompts import (
@@ -51,11 +53,13 @@ class GroundedRagAnswerer:
         openrouter_client: OpenRouterClient,
         persona_reader: _PersonaReader,
         project_prompt_repository: ProjectPromptRepository,
+        weather_client: WeatherClient | None = None,
     ) -> None:
         self._rag = rag_repository
         self._llm = openrouter_client
         self._persona_reader = persona_reader
         self._prompts = project_prompt_repository
+        self._weather_client = weather_client
 
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
@@ -116,6 +120,9 @@ class GroundedRagAnswerer:
         profanity_lines = split_guardrail_lines(
             resolve_prompt(self._prompts, ctx.project_id, "guardrail_profanity")
         )
+        scheduling_context = await build_scheduling_context(
+            question=question, ctx=ctx, weather_client=self._weather_client
+        )
         logger.info(
             "grounded_rag_llm_request",
             extra={
@@ -124,6 +131,7 @@ class GroundedRagAnswerer:
                 "persona_last_name": last_name,
                 "snippet_count": len(chunks),
                 "today_iso": today_iso,
+                "scheduling_context_present": scheduling_context is not None,
             },
         )
         try:
@@ -134,6 +142,7 @@ class GroundedRagAnswerer:
                 persona_first_name=first_name,
                 persona_last_name=last_name,
                 system_prompt_template=grounding_template,
+                scheduling_context=scheduling_context,
             )
         except Exception as exc:
             return self._skip(
@@ -168,6 +177,7 @@ class GroundedRagAnswerer:
                 answer=answer,
                 snippets=chunks,
                 system_prompt=verifier_prompt,
+                scheduling_context=scheduling_context,
             )
         except Exception as exc:
             return self._skip(
