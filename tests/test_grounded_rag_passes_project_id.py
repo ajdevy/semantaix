@@ -22,6 +22,7 @@ class _RecordingRag:
         query: str,
         limit: int = 3,
         project_id: int | None = None,
+        catalog_mode: bool = False,
     ) -> list[RagChunk]:
         self.last_project_id = project_id
         return []
