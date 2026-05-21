@@ -42,6 +42,8 @@ class _FakeRag:
     def __init__(self, items: list[RagChunk]) -> None:
         self._items = items
         self.calls: list[str] = []
+        self.last_catalog_mode: bool | None = None
+        self.last_limit: int | None = None
 
     def retrieve(
         self,
@@ -49,9 +51,12 @@ class _FakeRag:
         query: str,
         limit: int = 3,
         project_id: int | None = None,
+        catalog_mode: bool = False,
     ) -> list[RagChunk]:
         self.calls.append(query)
         self.last_project_id = project_id
+        self.last_catalog_mode = catalog_mode
+        self.last_limit = limit
         return list(self._items)
 
 
@@ -435,3 +440,115 @@ async def test_per_project_prompt_overrides_reach_llm_and_guardrails(
     # The custom hedge "мнение" appears in the answer, so the guardrail
     # rejects what the verifier accepted — the answerer must fall through.
     assert result.handled is False
+
+
+_CATALOG_QUERY = "какие ещё услуги есть"
+
+
+@pytest.mark.asyncio
+async def test_catalog_query_bypasses_threshold_and_lists_offerings(prompts):
+    # Zero-overlap chunk (catalog retrieval returns it with score 0.0) would be
+    # rejected by the threshold gate for a normal query, but a catalog query
+    # must answer from it anyway.
+    rag = _FakeRag(
+        [
+            RagChunk(
+                id=1, source_id="kb-svc",
+                chunk_text="Багги-туры, морские прогулки и трансфер.",
+                score=0.0,
+            )
+        ]
+    )
+    llm = _fake_llm(answer="У нас есть багги-туры, морские прогулки и трансфер.")
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+    )
+    result = await answerer.try_answer(question=_CATALOG_QUERY, ctx=_ctx())
+    assert result.handled is True
+    assert "багги-туры" in result.text
+    # Retrieval was widened and switched to catalog mode.
+    assert rag.last_catalog_mode is True
+    assert rag.last_limit == 8
+
+
+@pytest.mark.asyncio
+async def test_catalog_query_with_no_chunks_escalates(caplog, prompts):
+    rag = _FakeRag([])
+    llm = _fake_llm()
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+    )
+    with caplog.at_level(
+        logging.INFO, logger="services.api.app.answerers.grounded_rag"
+    ):
+        result = await answerer.try_answer(question=_CATALOG_QUERY, ctx=_ctx())
+    assert result.handled is False
+    assert rag.last_catalog_mode is True
+    llm.answer_grounded.assert_not_awaited()
+    _assert_skip_log(
+        caplog,
+        reason="no_chunks",
+        question=_CATALOG_QUERY,
+        retrieved_count=0,
+        top_score=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_catalog_query_still_gated_by_verifier(caplog, prompts):
+    rag = _FakeRag(
+        [RagChunk(id=1, source_id="kb-svc", chunk_text="Прайс-лист.", score=0.0)]
+    )
+    llm = _fake_llm(verdict_label="NOT_GROUNDED", verdict_reason="hallucination")
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+    )
+    with caplog.at_level(
+        logging.INFO, logger="services.api.app.answerers.grounded_rag"
+    ):
+        result = await answerer.try_answer(question=_CATALOG_QUERY, ctx=_ctx())
+    assert result.handled is False
+    _assert_skip_log(
+        caplog,
+        reason="verifier_not_grounded",
+        question=_CATALOG_QUERY,
+        retrieved_count=1,
+        top_score=0.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_catalog_query_keeps_threshold_gate(caplog, prompts):
+    rag = _FakeRag(_chunks(score=0.2))
+    llm = _fake_llm()
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+    )
+    with caplog.at_level(
+        logging.INFO, logger="services.api.app.answerers.grounded_rag"
+    ):
+        result = await answerer.try_answer(
+            question="когда придёт мой возврат?", ctx=_ctx()
+        )
+    assert result.handled is False
+    assert rag.last_catalog_mode is False
+    assert rag.last_limit == 3
+    _assert_skip_log(
+        caplog,
+        reason="below_threshold",
+        question="когда придёт мой возврат?",
+        retrieved_count=1,
+        top_score=0.2,
+    )

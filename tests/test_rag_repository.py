@@ -106,6 +106,38 @@ def test_retrieve_stopword_only_query_falls_back(tmp_path):
         assert item.score < 1.0
 
 
+def test_retrieve_existential_copula_stripped_from_denominator(tmp_path):
+    """Regression: "какие ещё услуги есть" must clear the 0.6 threshold against a
+    chunk that mentions services. The copula "есть" (and interrogatives) are
+    filtered from the denominator, leaving "услуга" as the only scoring token.
+    """
+    repository = RagRepository(str(tmp_path / "rag.sqlite3"))
+    repository.ingest(
+        source_id="kb-svc",
+        text="Наши услуги: багги-туры, морские прогулки, трансфер.",
+    )
+    items = repository.retrieve(query="какие ещё услуги есть", limit=3)
+    assert len(items) == 1
+    assert items[0].source_id == "kb-svc"
+    assert items[0].score >= 0.6
+
+
+def test_catalog_mode_surfaces_zero_overlap_chunks(tmp_path):
+    """An item-selling project has no "услуга" wording, so a catalog query shares
+    no content words with its chunks. Default retrieval misses them; catalog mode
+    keeps them (score 0.0) so the grounded LLM can list the offerings.
+    """
+    repository = RagRepository(str(tmp_path / "rag.sqlite3"))
+    repository.ingest(
+        source_id="item-a",
+        text="Продаём багги по дюнам и катер на воде.",
+    )
+    assert repository.retrieve(query="что ещё есть", limit=8) == []
+    catalog = repository.retrieve(query="что ещё есть", limit=8, catalog_mode=True)
+    assert {item.source_id for item in catalog} == {"item-a"}
+    assert catalog[0].score == 0.0
+
+
 def _records(caplog: pytest.LogCaptureFixture, event: str) -> list:
     return [r for r in caplog.records if r.message == event]
 
