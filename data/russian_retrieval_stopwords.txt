@@ -28,6 +28,10 @@
 дать
 делать
 сделать
+# Existence / copula ("какие услуги есть", "что у вас есть" - the verb
+# carries no retrieval signal and would otherwise deflate the denominator)
+быть
+есть
 # Interrogatives
 что
 кто

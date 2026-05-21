@@ -4,6 +4,9 @@ import logging
 from typing import Any, Protocol
 
 from services.api.app.answerers import AnswerContext, AnswerResult
+from services.api.app.answerers.service_catalog_intent import (
+    is_service_catalog_query,
+)
 from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.openrouter_client import OpenRouterClient
 from services.api.app.project_prompts import (
@@ -16,6 +19,9 @@ from services.api.app.russian_text import get_russian_normalizer
 
 _SENTINEL = "ESCALATE_TO_HUMAN"
 _ANSWER_SNIPPET_MAX = 200
+# Catalog questions ("что ещё есть?") get a wider net so the grounded LLM can
+# list the project's offerings rather than escalating.
+_CATALOG_RETRIEVAL_LIMIT = 8
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +33,7 @@ class _RagReader(Protocol):
         query: str,
         limit: int = 3,
         project_id: int | None = None,
+        catalog_mode: bool = False,
     ) -> list[RagChunk]: ...
 
 
@@ -53,8 +60,14 @@ class GroundedRagAnswerer:
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
+        catalog_query = is_service_catalog_query(
+            text=question, normalizer=get_russian_normalizer()
+        )
         chunks = self._rag.retrieve(
-            query=question, limit=3, project_id=ctx.project_id
+            query=question,
+            limit=_CATALOG_RETRIEVAL_LIMIT if catalog_query else 3,
+            project_id=ctx.project_id,
+            catalog_mode=catalog_query,
         )
         if not chunks:
             return self._skip(
@@ -63,7 +76,10 @@ class GroundedRagAnswerer:
                 question=question,
                 chunks=chunks,
             )
-        if chunks[0].score < ctx.grounding_threshold:
+        # Catalog queries rarely share content words with the chunks they should
+        # surface, so the overlap score is meaningless here; skip the threshold
+        # gate and rely on the verifier/guardrails/ESCALATE sentinel downstream.
+        if not catalog_query and chunks[0].score < ctx.grounding_threshold:
             return self._skip(
                 reason="below_threshold",
                 ctx=ctx,

@@ -32,6 +32,7 @@ class _FakeRag:
         query: str,
         limit: int = 3,
         project_id: int | None = None,
+        catalog_mode: bool = False,
     ) -> list[RagChunk]:
         return list(self._items)
 
