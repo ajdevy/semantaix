@@ -156,6 +156,114 @@ class ApiClient:
         _raise_for_status(response)
         return response.json()
 
+    async def calendar_enable(
+        self,
+        *,
+        project_id: int,
+        actor: str,
+        actor_role: str,
+        internal_token: str,
+        project_timezone: str | None = None,
+        lookahead_days: int | None = None,
+    ) -> dict:
+        """Enable a project's calendar (story 11.08); operator or admin actor."""
+        body: dict[str, object] = {"actor": actor, "actor_role": actor_role}
+        if project_timezone is not None:
+            body["project_timezone"] = project_timezone
+        if lookahead_days is not None:
+            body["lookahead_days"] = lookahead_days
+        response = await self._bearer_post(
+            f"/calendar/projects/{project_id}/enable",
+            internal_token=internal_token,
+            json=body,
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def calendar_disable(
+        self,
+        *,
+        project_id: int,
+        actor: str,
+        actor_role: str,
+        internal_token: str,
+    ) -> dict:
+        """Disable a project's calendar (story 11.08); keeps the stored token."""
+        response = await self._bearer_post(
+            f"/calendar/projects/{project_id}/disable",
+            internal_token=internal_token,
+            json={"actor": actor, "actor_role": actor_role},
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def calendar_get_settings(
+        self,
+        *,
+        project_id: int,
+        internal_token: str,
+    ) -> dict:
+        """Fetch enablement + service rules for a project (story 11.08)."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.get(
+                f"{self._base_url}/calendar/projects/{project_id}/settings",
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
+    async def calendar_upsert_service(
+        self,
+        *,
+        project_id: int,
+        actor: str,
+        actor_role: str,
+        internal_token: str,
+        rule_id: int | None = None,
+        name: str | None = None,
+        duration_minutes: int | None = None,
+        working_hours: dict | None = None,
+        service_days: list | None = None,
+        date_exceptions: list | None = None,
+    ) -> dict:
+        """Create or update a service rule (story 11.08)."""
+        response = await self._bearer_post(
+            f"/calendar/projects/{project_id}/services",
+            internal_token=internal_token,
+            json={
+                "actor": actor,
+                "actor_role": actor_role,
+                "rule_id": rule_id,
+                "name": name,
+                "duration_minutes": duration_minutes,
+                "working_hours": working_hours,
+                "service_days": service_days,
+                "date_exceptions": date_exceptions,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def calendar_delete_service(
+        self,
+        *,
+        project_id: int,
+        rule_id: int,
+        actor: str,
+        actor_role: str,
+        internal_token: str,
+    ) -> dict:
+        """Delete a service rule (story 11.08)."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.request(
+                "DELETE",
+                f"{self._base_url}/calendar/projects/{project_id}/services/{rule_id}",
+                json={"actor": actor, "actor_role": actor_role},
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
     async def _bearer_post(
         self,
         path: str,

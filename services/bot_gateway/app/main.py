@@ -2015,6 +2015,7 @@ async def _process_telegram_update(
         api_client=api_client,
         send_dm=_send_dm,
         admin_username=settings.admin_telegram_username,
+        internal_token=settings.internal_service_token or "",
         operator_file_repository=operator_file_repository,
     )
     if admin_project_result is not None:

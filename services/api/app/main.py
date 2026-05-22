@@ -41,6 +41,10 @@ from services.api.app.answerers import AnswerContext, AnswerPipeline
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
 from services.api.app.answerers.weather_client import WeatherClient
 from services.api.app.backups import BackupError, BackupRepository
+from services.api.app.calendar.authorization import (
+    authorize_calendar_config,
+    authorize_calendar_disconnect,
+)
 from services.api.app.calendar.oauth import (
     CalendarOAuthClient,
     OAuthExchangeError,
@@ -49,7 +53,14 @@ from services.api.app.calendar.oauth_state_repository import (
     CalendarOAuthStateRepository,
     InvalidOAuthState,
 )
-from services.api.app.calendar.settings_repository import CalendarSettingsRepository
+from services.api.app.calendar.service_rule_validation import (
+    ServiceRuleValidationError,
+    validate_service_rule,
+)
+from services.api.app.calendar.settings_repository import (
+    CalendarSettingsRepository,
+    ServiceRule,
+)
 from services.api.app.calendar.token_repository import (
     CalendarTokenRepository,
     TokenNotFound,
@@ -3187,11 +3198,20 @@ async def calendar_oauth_callback(
     return HTMLResponse(_calendar_callback_html(ok=True), status_code=200)
 
 
+class CalendarDisconnectRequest(BaseModel):
+    project_id: int
+    operator: str
+    actor_role: str = "operator"
+
+
 @app.post("/calendar/disconnect")
 async def calendar_disconnect(
-    request: CalendarConnectRequest,
+    request: CalendarDisconnectRequest,
     _principal: Annotated[str, Depends(require_internal_token)],
 ) -> dict[str, object]:
+    # Operator-only path (FR-18/FR-21): an admin attempting to disconnect/delete
+    # is rejected. Disable keeps the token; only the operator removes it.
+    authorize_calendar_disconnect(actor_role=request.actor_role)
     if calendar_oauth_client is None or calendar_token_repository is None:
         raise HTTPException(status_code=503, detail="calendar_oauth_not_configured")
     try:
@@ -3212,3 +3232,219 @@ async def calendar_disconnect(
         extra={"project_id": request.project_id, "operator": request.operator},
     )
     return {"disconnected": True}
+
+
+# --- Calendar enable/disable + service config (story 11.08) ----------------
+#
+# Both the project's designated calendar operator AND an admin may enable,
+# disable, and define services (FR-21). Disable keeps the stored token. The
+# operator-vs-admin / admin-cannot-disconnect rule is enforced centrally via
+# ``services.api.app.calendar.authorization``.
+
+
+class CalendarEnableRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+    project_timezone: str = "Europe/Moscow"
+    lookahead_days: int = 60
+
+
+class CalendarDisableRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+
+
+class CalendarServiceRuleRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+    rule_id: int | None = None
+    name: str | None = None
+    duration_minutes: int | None = None
+    working_hours: dict | None = None
+    service_days: list | None = None
+    date_exceptions: list | None = None
+
+
+class CalendarServiceDeleteRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+
+
+def _service_rule_to_dict(rule: ServiceRule) -> dict[str, object]:
+    return {
+        "id": rule.id,
+        "project_id": rule.project_id,
+        "name": rule.name,
+        "duration_minutes": rule.duration_minutes,
+        "working_hours": rule.working_hours,
+        "service_days": rule.service_days,
+        "date_exceptions": rule.date_exceptions,
+        "updated_at": rule.updated_at,
+    }
+
+
+@app.post("/calendar/projects/{project_id}/enable")
+async def calendar_project_enable(
+    project_id: int,
+    request: CalendarEnableRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    authorize_calendar_config(
+        actor=request.actor,
+        actor_role=request.actor_role,
+        project_settings=project_settings,
+    )
+    # An operator enabling becomes the designated calendar operator; an admin
+    # enabling preserves whatever operator (if any) is already designated.
+    if request.actor_role == "operator":
+        calendar_operator: str | None = request.actor
+    else:
+        calendar_operator = (
+            project_settings.calendar_operator if project_settings else None
+        )
+    await asyncio.to_thread(
+        calendar_settings_repository.enable,
+        project_id,
+        calendar_operator=calendar_operator,
+        project_timezone=request.project_timezone,
+        lookahead_days=request.lookahead_days,
+    )
+    logger.info(
+        "calendar_project_enabled",
+        extra={"project_id": project_id, "actor_role": request.actor_role},
+    )
+    return {"enabled": True, "calendar_operator": calendar_operator}
+
+
+@app.post("/calendar/projects/{project_id}/disable")
+async def calendar_project_disable(
+    project_id: int,
+    request: CalendarDisableRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    authorize_calendar_config(
+        actor=request.actor,
+        actor_role=request.actor_role,
+        project_settings=project_settings,
+    )
+    # NB: disable flips enabled=0 only; the stored token is intentionally kept.
+    await asyncio.to_thread(calendar_settings_repository.disable, project_id)
+    logger.info(
+        "calendar_project_disabled",
+        extra={"project_id": project_id, "actor_role": request.actor_role},
+    )
+    return {"enabled": False}
+
+
+@app.get("/calendar/projects/{project_id}/settings")
+async def calendar_project_settings_view(
+    project_id: int,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    rules = await asyncio.to_thread(
+        calendar_settings_repository.list_service_rules, project_id
+    )
+    if project_settings is None:
+        enabled = False
+        calendar_operator: str | None = None
+        project_timezone = "Europe/Moscow"
+        lookahead_days = 60
+        updated_at: str | None = None
+    else:
+        enabled = project_settings.enabled
+        calendar_operator = project_settings.calendar_operator
+        project_timezone = project_settings.project_timezone
+        lookahead_days = project_settings.lookahead_days
+        updated_at = project_settings.updated_at
+    return {
+        "project_id": project_id,
+        "enabled": enabled,
+        "calendar_operator": calendar_operator,
+        "project_timezone": project_timezone,
+        "lookahead_days": lookahead_days,
+        "updated_at": updated_at,
+        "service_rules": [_service_rule_to_dict(rule) for rule in rules],
+    }
+
+
+@app.post("/calendar/projects/{project_id}/services")
+async def calendar_project_service_upsert(
+    project_id: int,
+    request: CalendarServiceRuleRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    authorize_calendar_config(
+        actor=request.actor,
+        actor_role=request.actor_role,
+        project_settings=project_settings,
+    )
+    try:
+        validate_service_rule(
+            duration_minutes=request.duration_minutes,
+            working_hours=request.working_hours,
+            service_days=request.service_days,
+            date_exceptions=request.date_exceptions,
+        )
+    except ServiceRuleValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.reason) from exc
+    rule_id = await asyncio.to_thread(
+        _upsert_service_rule_call,
+        project_id=project_id,
+        request=request,
+    )
+    logger.info(
+        "calendar_service_rule_upserted",
+        extra={"project_id": project_id, "rule_id": rule_id},
+    )
+    return {"id": rule_id}
+
+
+def _upsert_service_rule_call(
+    *, project_id: int, request: CalendarServiceRuleRequest
+) -> int:
+    return calendar_settings_repository.upsert_service_rule(
+        project_id=project_id,
+        name=request.name,
+        duration_minutes=request.duration_minutes,
+        working_hours=request.working_hours,
+        service_days=request.service_days,
+        date_exceptions=request.date_exceptions,
+        rule_id=request.rule_id,
+    )
+
+
+@app.delete("/calendar/projects/{project_id}/services/{rule_id}")
+async def calendar_project_service_delete(
+    project_id: int,
+    rule_id: int,
+    request: CalendarServiceDeleteRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    authorize_calendar_config(
+        actor=request.actor,
+        actor_role=request.actor_role,
+        project_settings=project_settings,
+    )
+    await asyncio.to_thread(
+        calendar_settings_repository.delete_service_rule, rule_id
+    )
+    logger.info(
+        "calendar_service_rule_deleted",
+        extra={"project_id": project_id, "rule_id": rule_id},
+    )
+    return {"deleted": True}
