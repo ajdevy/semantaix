@@ -32,9 +32,13 @@ class _FakeRag:
         query: str,
         limit: int = 3,
         project_id: int | None = None,
-        catalog_mode: bool = False,
     ) -> list[RagChunk]:
         return list(self._items)
+
+
+class _FakeCatalog:
+    async def get_digest(self, *, project_id: int | None) -> str:
+        return ""
 
 
 @pytest.mark.asyncio
@@ -63,6 +67,7 @@ async def test_confidential_chunk_redacts_metadata_but_grounds_normally(tmp_path
         project_prompt_repository=ProjectPromptRepository(
             str(tmp_path / "prompts.sqlite3")
         ),
+        catalog_digest_service=_FakeCatalog(),
     )
     result = await answerer.try_answer(question="сколько стоит ремонт?", ctx=_ctx())
 
@@ -102,6 +107,7 @@ async def test_non_confidential_chunk_passes_through_in_metadata(tmp_path):
         project_prompt_repository=ProjectPromptRepository(
             str(tmp_path / "prompts.sqlite3")
         ),
+        catalog_digest_service=_FakeCatalog(),
     )
     result = await answerer.try_answer(question="часы работы офиса?", ctx=_ctx())
 

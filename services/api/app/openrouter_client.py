@@ -28,6 +28,17 @@ _GROUNDING_SYSTEM_PROMPT_TEMPLATE = (
     "\"хз\") — либо точный ответ, либо `ESCALATE_TO_HUMAN`."
 )
 
+_CATALOG_DIGEST_SYSTEM_PROMPT = (
+    "Тебе дан фрагмент базы знаний компании (одно или несколько утверждений). "
+    "Составь краткий структурированный список РАЗНЫХ услуг, товаров или "
+    "предложений компании, которые в нём упомянуты. Каждый пункт — с новой "
+    "строки, начинай с «- », одна услуга на строку, без цен и лишних "
+    "подробностей, только название/суть предложения. Объединяй дубликаты и "
+    "близкие формулировки в один пункт. Не выдумывай того, чего нет в тексте. "
+    "Если в тексте нет ни одной услуги, товара или предложения — верни строго "
+    "`NO_OFFERINGS` без других слов."
+)
+
 _VERIFIER_SYSTEM_PROMPT = (
     "Given the question, the candidate answer, and the snippets, decide "
     "whether the answer is fully supported by the snippets (today's date "
@@ -122,6 +133,31 @@ class OpenRouterClient:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system},
             {"role": "user", "content": user_block},
+        ]
+        return await self._chat(
+            model=model or self.grounding_model, messages=messages
+        )
+
+    async def summarize_offerings(
+        self,
+        *,
+        knowledge_text: str,
+        model: str | None = None,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Extract a deduplicated offerings list from a block of knowledge text.
+
+        Used for one map or reduce step of the catalog-digest build; the
+        map-reduce loop itself lives in ``CatalogDigestService``.
+        """
+        chosen_system = (
+            system_prompt
+            if system_prompt is not None
+            else _CATALOG_DIGEST_SYSTEM_PROMPT
+        )
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": chosen_system},
+            {"role": "user", "content": knowledge_text},
         ]
         return await self._chat(
             model=model or self.grounding_model, messages=messages

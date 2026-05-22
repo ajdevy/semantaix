@@ -163,12 +163,12 @@ def test_internal_with_as_user_unknown_role_is_denied(env):
 # ---------------------------------------------------------------------------
 
 
-def test_list_returns_six_items_with_defaults_when_unset(env):
+def test_list_returns_all_items_with_defaults_when_unset(env):
     cookies = _login_cookie(env, "@admin")
     response = env["client"].get("/projects/default/prompts", cookies=cookies)
     body = response.json()
     assert body["project_slug"] == "default"
-    assert len(body["items"]) == 6
+    assert len(body["items"]) == 7
     for item in body["items"]:
         assert item["is_default"] is True
         assert item["version"] == 0

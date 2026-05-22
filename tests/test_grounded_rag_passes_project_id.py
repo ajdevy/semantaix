@@ -22,7 +22,6 @@ class _RecordingRag:
         query: str,
         limit: int = 3,
         project_id: int | None = None,
-        catalog_mode: bool = False,
     ) -> list[RagChunk]:
         self.last_project_id = project_id
         return []
@@ -30,6 +29,11 @@ class _RecordingRag:
 
 class _FakeLLM:
     pass
+
+
+class _FakeCatalog:
+    async def get_digest(self, *, project_id: int | None) -> str:
+        return ""
 
 
 @pytest.mark.asyncio
@@ -42,6 +46,7 @@ async def test_grounded_rag_forwards_project_id(tmp_path):
         project_prompt_repository=ProjectPromptRepository(
             str(tmp_path / "prompts.sqlite3")
         ),
+        catalog_digest_service=_FakeCatalog(),
     )
     ctx = AnswerContext(
         chat_id=1,
@@ -64,6 +69,7 @@ async def test_grounded_rag_forwards_none_when_unset(tmp_path):
         project_prompt_repository=ProjectPromptRepository(
             str(tmp_path / "prompts.sqlite3")
         ),
+        catalog_digest_service=_FakeCatalog(),
     )
     ctx = AnswerContext(
         chat_id=1, customer_username="@c", trace_id="t", now=datetime.now(UTC)
