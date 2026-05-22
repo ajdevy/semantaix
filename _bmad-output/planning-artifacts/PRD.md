@@ -4,11 +4,16 @@
 
 Semantaix is a Telegram-based AI assistant for customer support/sales that uses RAG to answer questions, escalates uncertain requests to a human operator, and continuously improves knowledge through moderation workflows.
 
-This PRD is scoped to the confirmed Option B implementation strategy:
+This PRD is scoped to the confirmed Option B implementation strategy. The MVP
+shipped on a SQLite-backed persistence model with lemma-overlap retrieval; the
+items below reflect the **as-built** stack:
 
-- FastAPI-centered architecture
+- FastAPI-centered microservices behind an nginx reverse proxy
 - Docker-first deployment model
-- PostgreSQL + Qdrant
+- **SQLite** as the system of record (one DB file per concern under `.data/`)
+- **Lemma-overlap retrieval** (Russian normalizer); Qdrant is provisioned in
+  compose and health-checked but not on the retrieval path, and Postgres is
+  available behind a compose profile but unused at runtime
 - Human-in-the-loop (HITL) fallback
 - Strong monitoring/logging/health checks
 - DigitalOcean-ready operations baseline
@@ -53,7 +58,9 @@ Acceptance criteria:
 
 ### FR-2 RAG Retrieval and Answering
 
-- System retrieves relevant context from Qdrant and composes response prompt.
+- System retrieves relevant context via lemma-overlap scoring over indexed chunks
+  (`rag_chunks`) and composes the response prompt. (Qdrant remains provisioned for a
+  future embedding-based retrieval path but is not used today.)
 - Responses must be grounded in retrieved content when available.
 
 Acceptance criteria:
@@ -69,7 +76,7 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- Escalation ticket lifecycle states are persisted (`open`, `claimed`, `answered`, `closed`).
+- Escalation ticket lifecycle states are persisted (`open` → `assigned` → `resolved`; operator reply auto-resolves).
 - Mapping from operator reply to user conversation is deterministic and auditable.
 - End-user delivery does not expose operator username or Telegram forward metadata.
 
@@ -88,8 +95,10 @@ Acceptance criteria:
 
 ### FR-5 Full Transcript Storage + Knowledge Candidate Extraction
 
-- All conversation messages are stored in PostgreSQL.
-- Separate extraction pipeline generates `knowledge_candidates` from useful snippets only.
+- All conversation messages are stored in SQLite (`semantaix_story1.db`:
+  `conversations`, `messages`).
+- Separate extraction pipeline generates `knowledge_moderation_candidates` from
+  useful snippets only.
 - Noise (small talk/duplicates) is filtered before candidate creation.
 
 Acceptance criteria:
@@ -124,18 +133,18 @@ Acceptance criteria:
 ### FR-8 Critical Telegram Incident Notifications
 
 - Critical incidents trigger Telegram notifications to `@ajdevy`.
-- Notification types include:
+- The incident engine is generic (fingerprint-based dedup); illustrative critical
+  sources include:
   - provider 429 spikes
   - provider 5xx spikes
-  - vector DB down
-  - Postgres down
-  - dead-letter queue growth
+  - data-store / dependency unavailability (e.g., Qdrant readiness failure)
   - HITL delivery failures
+  - failed answer-trace persistence (per FR-15)
 
 Acceptance criteria:
 
 - Alerts are deduplicated/throttled by policy window.
-- Delivery status is recorded in incident event history.
+- Delivery status is recorded in the `incident_events` history (`telegram_notify`).
 
 ### FR-9 Health Endpoints
 
@@ -188,17 +197,20 @@ Acceptance criteria:
 - Validity decision and failed check reasons are logged with trace metadata.
 - Decision contract includes retrieval sufficiency, grounding, confidence, and safety checks.
 
-### FR-14 Qdrant Backup and Restore Operations
+### FR-14 Backup and Restore Operations
 
-- System performs regular Qdrant backups.
+- System performs backups of the SQLite system-of-record as **tar.gz archives** of
+  the DB files. (The original plan scoped this to Qdrant snapshots; as built it backs
+  up the SQLite stores that hold the live data.)
 - Web UI shows backup list, last successful backup timestamp, and storage location.
-- Web UI provides restore action with confirmation and status reporting.
+- Web UI provides restore action with token confirmation and status reporting.
 
 Acceptance criteria:
 
-- Scheduled backup runs persist metadata in DB.
-- Last backup timestamp and location are visible in UI.
-- Restore operation is auditable and reports success/failure events.
+- Backup runs persist metadata in `semantaix_backups.db` (`backups` + `backup_events`).
+- Last backup timestamp and archive path are visible in UI.
+- Restore operation requires a confirmation token and is auditable, reporting
+  `restore_completed` / `restore_failed` events.
 
 ### FR-15 Tenant-Scoped Answer Transparency (“Why This Answer”)
 
@@ -207,7 +219,7 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- Trace records are durable, tenant-scoped, and **append-only** (corrections create new knowledge versions; they do not rewrite historical traces).
+- Trace records are durable and **append-only** (corrections create new knowledge versions; they do not rewrite historical traces). As built, `answer_traces` is a single global store (not tenant-partitioned); the trace-originated correction loop (`trace_corrections`) is tenant-scoped.
 - Missing or failed trace persistence raises an operational incident per the Epic 02 backbone.
 
 *Delivery:* see **Epic 08** (`epic-08-tenant-knowledge-ops-and-answer-traces.md`), Story 08.01–08.02; builds on **Epic 05** retrieval payloads and **Epic 03** guardrail decision fields.
@@ -268,20 +280,29 @@ Acceptance criteria:
 
 ## 6. Data Requirements
 
-- Core tables include:
-  - users
-  - conversations
-  - messages
-  - escalation_tickets
-  - incidents
-  - incident_events
-  - vector_backups
-  - system_settings
-  - knowledge_items
-  - knowledge_versions
-  - knowledge_candidates
-  - audit_logs
-  - answer_traces (Epic 08; tenant-scoped, append-only transparency records)
+Persistence is SQLite, one DB file per concern under `.data/`. All access is via
+`*Repository` classes. Core stores and their primary tables:
+
+| DB file | Primary tables |
+|---------|----------------|
+| `semantaix_story1.db` | `conversations`, `messages` |
+| `semantaix_hitl.db` | `hitl_tickets`, `hitl_runtime_config`, `project_prompts`, `project_prompt_versions`, `pending_prompt_edits` |
+| `semantaix_incidents.db` | `incidents`, `incident_events` |
+| `semantaix_knowledge.db` | `knowledge_candidates`, `knowledge_moderation_candidates` |
+| `semantaix_rag.db` | `rag_chunks`, `catalog_digests` |
+| `semantaix_answer_traces.db` | `answer_traces` (append-only transparency records) |
+| `semantaix_nl_ops.db` | `nl_op_sessions`, `admin_nl_op_sessions`, `nl_audit_logs`, `knowledge_versions`, `trace_corrections` |
+| `semantaix_operator_files.db` | `operator_files`, `operator_kb_session`, `operator_media_group_buffer` |
+| `semantaix_projects.db` | `projects` |
+| `semantaix_operators.db` | `operators` |
+| `semantaix_web_auth.db` | `web_auth_codes`, `web_sessions` |
+| `semantaix_admin_sessions.db` | `admin_login_codes`, `admin_sessions` |
+| `semantaix_backups.db` | `backups`, `backup_events` |
+
+Runtime configuration (operator routing, ack message, locale, grounding threshold,
+bot persona) lives in `hitl_runtime_config` rather than a separate `system_settings`
+table. Audit evidence for knowledge mutations and corrections lives in
+`nl_audit_logs`.
 
 ## 7. Success Metrics
 

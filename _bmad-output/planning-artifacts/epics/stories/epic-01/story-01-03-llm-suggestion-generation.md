@@ -16,7 +16,7 @@ Generate answer suggestions from latest conversation context and return through 
 ### Out of Scope
 - guardrail valid/invalid decision logic (Epic 03)
 - HITL escalation routing (Epic 04)
-- retrieval from Qdrant (Epic 05)
+- RAG retrieval (lemma-overlap; Epic 05)
 
 ## Implementation Notes
 - Use configurable model/provider settings.

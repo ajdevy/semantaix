@@ -5,8 +5,8 @@ Define and persist immutable **answer trace** records for each suggestion or del
 
 ## Scope
 ### In Scope
-- PostgreSQL entities for **`answer_traces`** (name may match final migration) keyed by `message_id` / `trace_id` lineage:
-  - **Retrieval**: list of `{chunk_id, source_ref, score, text_snippet_truncated}` (actual shape aligned to Qdrant payload from Epic 05).
+- SQLite table **`answer_traces`** (`semantaix_answer_traces.db`) keyed by a unique `trace_id`, with optional `hitl_ticket_id` linkage:
+  - **Retrieval**: `retrieval_json` — list of `{chunk_id, source_ref, score, text_snippet}` (snippet truncated to ~240 chars; shape aligned to the Epic 05 lemma-overlap retrieval payload).
   - **Routing**: model id, provider, temperature/top_p if applicable, latency ms.
   - **Guardrails**: validity outcome, failed check ids/reasons, `response_mode`, `guardrails_applied`.
   - **Grounding/confidence MVP**: grounded flag, numeric confidence if available, “no retrieval hit” indicator.
@@ -38,7 +38,10 @@ Define and persist immutable **answer trace** records for each suggestion or del
 
 ## Automated E2E verification
 
-**Deferred** — `answer_traces` persistence and writer hooks are not in the codebase yet. Track future pytest node IDs in `_bmad-output/implementation-artifacts/e2e-coverage.md` once implemented.
+Implemented (`services/api/app/answer_trace.py`). Covered by
+`tests/e2e/test_e2e_epic08_answer_trace.py::test_epic08_suggest_writes_queryable_trace`
+plus `tests/test_answer_trace_repository.py` and `tests/test_api_answer_trace_contract.py`.
+See `_bmad-output/implementation-artifacts/e2e-coverage.md`.
 
 ## Manual Verification
 1. Trigger a test answer through dev stack.

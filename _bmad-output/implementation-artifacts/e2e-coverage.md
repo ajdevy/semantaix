@@ -4,7 +4,7 @@
 
 “E2E” in this repository means **multi-step integration tests** over the real FastAPI application graph: `fastapi.testclient.TestClient`, **ephemeral SQLite** databases via patched repository paths / env vars, and **mocked external services** (OpenRouter, Telegram send). Tests run in **GitHub Actions** on every PR and push to `main`.
 
-Browser automation is **not** used. Admin HTML in `web_ui` is covered by a minimal HTTP smoke check only until Epic 08 trace UI exists.
+Browser automation is **not** used. Admin HTML in `web_ui` has an HTTP smoke check for the shell, plus the Epic 08 trace-UI E2E (`test_e2e_epic08_trace_ui.py`) that renders sources/policy/routing/confidence for a persisted trace.
 
 ## How to run
 

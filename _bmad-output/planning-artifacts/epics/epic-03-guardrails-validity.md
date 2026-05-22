@@ -10,7 +10,7 @@ Add deterministic validity checks so only acceptable suggestions are eligible fo
 
 ## Out of Scope
 - HITL operator workflow implementation
-- Qdrant ingestion/retrieval
+- RAG ingestion/retrieval (lemma-overlap; Epic 05)
 - Knowledge candidate moderation
 - Backup/restore
 
