@@ -68,7 +68,7 @@ development_status:
   11-01-calendar-schema-and-settings: done
   11-02-oauth-connect-api: done
   11-03-telegram-connect-command: done
-  11-04-token-lifecycle-and-resilience: backlog
+  11-04-token-lifecycle-and-resilience: done
   11-05-availability-engine: backlog
   11-06-service-resolution: backlog
   11-07-availability-answerer-and-wiring: backlog
