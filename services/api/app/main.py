@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 from cryptography.fernet import Fernet
 from fastapi import Depends, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
@@ -41,9 +42,18 @@ from services.api.app.answerers import AnswerContext, AnswerPipeline
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
 from services.api.app.answerers.weather_client import WeatherClient
 from services.api.app.backups import BackupError, BackupRepository
+from services.api.app.calendar.access_token_cache import AccessTokenProvider
 from services.api.app.calendar.authorization import (
     authorize_calendar_config,
     authorize_calendar_disconnect,
+)
+from services.api.app.calendar.availability_answerer import (
+    RESPONSE_MODE_ESCALATION,
+    CalendarAvailabilityAnswerer,
+)
+from services.api.app.calendar.calendar_client import CalendarFreeBusyClient
+from services.api.app.calendar.clarify_state_repository import (
+    CalendarClarifyStateRepository,
 )
 from services.api.app.calendar.oauth import (
     CalendarOAuthClient,
@@ -104,6 +114,7 @@ from services.api.app.projects import (
     ProjectSlugConflict,
 )
 from services.api.app.rag import RagRepository
+from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
 from services.api.app.trace_corrections import (
@@ -204,6 +215,60 @@ def _build_calendar_oauth_client(app_settings) -> CalendarOAuthClient | None:
 
 calendar_token_repository = _build_calendar_token_repository(settings)
 calendar_oauth_client = _build_calendar_oauth_client(settings)
+calendar_clarify_state_repository = CalendarClarifyStateRepository(
+    db_path=settings.calendar_db_path
+)
+
+
+class _SystemClock:
+    """Tz-aware UTC clock for the calendar token/freebusy collaborators."""
+
+    def now(self) -> datetime:
+        return datetime.now(UTC)
+
+
+calendar_system_clock = _SystemClock()
+calendar_http_client = httpx.AsyncClient(timeout=settings.calendar_http_timeout_seconds)
+
+
+def _build_calendar_token_provider() -> AccessTokenProvider | None:
+    """Single-flight access-token cache; ``None`` until OAuth + key are set."""
+    if calendar_oauth_client is None or calendar_token_repository is None:
+        return None
+    return AccessTokenProvider(
+        oauth_client=calendar_oauth_client,
+        token_repo=calendar_token_repository,
+        clock=calendar_system_clock,
+        lock_factory=asyncio.Lock,
+        incident_sink=incident_repository,
+        notifier=telegram_bot_sender,
+    )
+
+
+def _build_calendar_freebusy_client() -> CalendarFreeBusyClient | None:
+    """freeBusy httpx client; ``None`` until OAuth is configured."""
+    if calendar_oauth_client is None:
+        return None
+    return CalendarFreeBusyClient(
+        http_client=calendar_http_client,
+        clock=calendar_system_clock,
+        incident_sink=incident_repository,
+        timeout_seconds=settings.calendar_http_timeout_seconds,
+    )
+
+
+calendar_token_provider = _build_calendar_token_provider()
+calendar_freebusy_client = _build_calendar_freebusy_client()
+
+
+def _resolve_calendar_operator_chat_id(operator: str) -> int | None:
+    """Map the calendar operator's username to its Telegram chat_id (or None)."""
+    record = operator_repository.find_by_username(operator)
+    if record is None:
+        return None
+    return record.chat_id
+
+
 web_auth_repository = WebAuthRepository(db_path=settings.web_auth_db_path)
 admin_auth_service = AdminAuthService(
     web_auth_repository=web_auth_repository,
@@ -272,6 +337,18 @@ def _effective_bot_persona() -> tuple[str, str]:
 
 answer_pipeline = AnswerPipeline(
     [
+        # Calendar availability runs FIRST so an enabled project answers its own
+        # scheduling questions before they ever reach RAG. A disabled project
+        # (the default) is a cheap no-op skip, so this is a pure prepend with no
+        # behaviour change when calendar is off.
+        CalendarAvailabilityAnswerer(
+            settings_repo=calendar_settings_repository,
+            token_provider=calendar_token_provider,
+            freebusy_client=calendar_freebusy_client,
+            normalizer=get_russian_normalizer(),
+            clarify_store=calendar_clarify_state_repository,
+            operator_chat_resolver=_resolve_calendar_operator_chat_id,
+        ),
         GroundedRagAnswerer(
             rag_repository=rag_repository,
             openrouter_client=openrouter_client,
@@ -1587,6 +1664,146 @@ def _persist_answer_trace(
     return trace.trace_id
 
 
+def _resolve_calendar_escalation_assignee(calendar_operator: str | None) -> str:
+    """Route a calendar escalation to the project's calendar operator.
+
+    Falls back to the primary HITL operator when the configured calendar
+    operator is missing/unregistered/inactive — escalation must always land
+    somewhere, never drop.
+    """
+    primary = _effective_hitl_operator_username()
+    if not calendar_operator:
+        return primary
+    operator = operator_repository.find_by_username(calendar_operator)
+    if operator is not None and operator.is_active:
+        return operator.username
+    return primary
+
+
+async def _escalate_calendar_availability(
+    *,
+    request: InboundMessageRequest,
+    trace_id: str,
+    latency_ms: int,
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    """HITL escalation for a calendar availability question, routed to the
+    project's calendar operator with context."""
+    calendar_operator = metadata.get("calendar_operator")
+    escalation_context = metadata.get("escalation_context") or ""
+    operator_username = _resolve_calendar_escalation_assignee(
+        calendar_operator if isinstance(calendar_operator, str) else None
+    )
+    contextual_question = (
+        f"[{escalation_context}] {request.text}"
+        if escalation_context
+        else request.text
+    )
+
+    active_ticket = (
+        hitl_ticket_repository.find_active_for_chat(request.chat_id)
+        if request.chat_id is not None
+        else None
+    )
+    if active_ticket is not None:
+        logger.info(
+            "calendar_availability_escalation",
+            extra={
+                "trace_id": trace_id,
+                "chat_id": request.chat_id,
+                "calendar_operator": calendar_operator,
+                "escalation_reason": metadata.get("reason"),
+                "has_existing_ticket": True,
+                "existing_ticket_id": active_ticket.id,
+            },
+        )
+        await _notify_hitl_operator_with_question(
+            ticket_id=active_ticket.id,
+            question=f"[follow-up] {contextual_question}",
+            customer_username=request.customer_username,
+        )
+        persisted_trace_id = _persist_answer_trace(
+            trace_id=trace_id,
+            request_text=request.text,
+            response_mode="human_only",
+            guardrail_outcome="escalated",
+            guardrail_reasons=[],
+            guardrail_score=None,
+            retrieval=[],
+            latency_ms=latency_ms,
+            limitations=["awaiting_human_response", "coalesced_follow_up"],
+            hitl_ticket_id=active_ticket.id,
+        )
+        return {
+            "delivered": False,
+            "escalated": True,
+            "response_mode": "human_only",
+            "hitl_ticket_id": active_ticket.id,
+            "hitl_operator_username": (
+                active_ticket.operator_username or operator_username
+            ),
+            "trace_id": persisted_trace_id,
+            "coalesced": True,
+        }
+
+    ack_message = _effective_inbound_ack_message(
+        project_id=_resolve_inbound_project_id(request.chat_id)
+    )
+    if request.chat_id is not None:
+        await _safe_send_message(
+            chat_id=request.chat_id,
+            text=ack_message,
+            failure_summary="Inbound ack delivery failed",
+            failure_kind="inbound_ack_failed",
+        )
+    ticket = hitl_ticket_repository.create(
+        conversation_ref=request.text[:120],
+        reason="awaiting_human_response",
+        target_chat_id=request.chat_id,
+    )
+    hitl_ticket_repository.assign(
+        ticket_id=ticket.id,
+        operator_username=operator_username,
+    )
+    logger.info(
+        "calendar_availability_escalation",
+        extra={
+            "trace_id": trace_id,
+            "chat_id": request.chat_id,
+            "calendar_operator": calendar_operator,
+            "escalation_reason": metadata.get("reason"),
+            "has_existing_ticket": False,
+            "ticket_id": ticket.id,
+            "operator_username": operator_username,
+        },
+    )
+    await _notify_hitl_operator_with_question(
+        ticket_id=ticket.id,
+        question=contextual_question,
+        customer_username=request.customer_username,
+    )
+    persisted_trace_id = _persist_answer_trace(
+        trace_id=trace_id,
+        request_text=request.text,
+        response_mode="human_only",
+        guardrail_outcome="escalated",
+        guardrail_reasons=[],
+        guardrail_score=None,
+        retrieval=[],
+        latency_ms=latency_ms,
+        limitations=["awaiting_human_response", "calendar_escalation"],
+        hitl_ticket_id=ticket.id,
+    )
+    return {
+        "delivered": False,
+        "escalated": True,
+        "response_mode": "human_only",
+        "hitl_ticket_id": ticket.id,
+        "hitl_operator_username": operator_username,
+        "trace_id": persisted_trace_id,
+    }
+
+
 @app.post("/conversations/inbound")
 async def conversations_inbound(request: InboundMessageRequest) -> dict[str, object]:
     if not request.text.strip():
@@ -1640,6 +1857,20 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
 
     pipeline_result = await answer_pipeline.run(question=request.text, ctx=ctx)
     latency_ms = int((time.perf_counter() - started_at) * 1000)
+
+    if (
+        pipeline_result.handled
+        and pipeline_result.response_mode == RESPONSE_MODE_ESCALATION
+    ):
+        # Calendar owns this question but couldn't answer confidently (provider
+        # / token failure or twice-ambiguous). Escalate to a human routed to the
+        # project's calendar operator — never deliver a fabricated answer.
+        return await _escalate_calendar_availability(
+            request=request,
+            trace_id=trace_id,
+            latency_ms=latency_ms,
+            metadata=pipeline_result.metadata,
+        )
 
     if pipeline_result.handled:
         retrieval = pipeline_result.metadata.get("retrieval") or []
