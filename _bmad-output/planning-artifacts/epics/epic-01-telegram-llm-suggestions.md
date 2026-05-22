@@ -19,7 +19,7 @@ Read Telegram user messages and generate LLM answer suggestions with only minima
 - Incident management UI/notifier workflows
 - Guardrail validity engine
 - HITL escalation
-- Qdrant retrieval/indexing
+- RAG retrieval/indexing (lemma-overlap; Epic 05)
 - Knowledge extraction/moderation
 - Backup/restore
 

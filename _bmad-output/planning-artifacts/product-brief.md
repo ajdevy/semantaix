@@ -21,8 +21,8 @@ Teams answering repetitive customer and pre-sales questions in Telegram lose tim
 ## 5) Scope (MVP - Option B)
 - Docker-first multi-service architecture.
 - FastAPI core service + Telegram gateway + web admin UI.
-- Qdrant vector store + PostgreSQL for operational and conversational data.
-- RAG retrieval + confidence/fallback policy.
+- SQLite system of record (one DB file per concern) for operational and conversational data. (Qdrant and PostgreSQL are provisioned in compose but not on the runtime path; retrieval is lemma-overlap.)
+- RAG retrieval (lemma-overlap) + confidence/fallback policy.
 - Human escalation with configurable primary Telegram recipient.
 - Alerts tab in web UI (read/unread, ack/resolve, timeline).
 - Structured logging, health checks, and critical Telegram incident alerts.
@@ -45,7 +45,7 @@ Teams answering repetitive customer and pre-sales questions in Telegram lose tim
 - Observability: structured logs with trace correlation IDs.
 - Resilience: retry/backoff/circuit-breaker for provider failures.
 - Operability: Docker-based reproducible deployment on DigitalOcean.
-- Safety: only moderated/approved useful knowledge enters vector index.
+- Safety: only moderated/approved useful knowledge enters the RAG index.
 
 ## 9) Risks
 - Noisy conversation data contaminating retrieval quality.

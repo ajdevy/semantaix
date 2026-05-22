@@ -1,38 +1,186 @@
-# Semantaix Architecture (Option B Baseline)
+# Semantaix Architecture (As-Built)
+
+> This document reflects the system **as implemented**. Where the original Option B
+> plan assumed PostgreSQL + Qdrant-vector retrieval, the MVP shipped on **SQLite**
+> (one DB file per concern) with **lemma-overlap retrieval**. Postgres and Qdrant
+> remain provisioned in compose but are not on the runtime data path (see
+> [Provisioned-but-unused](#provisioned-but-unused-infrastructure)).
 
 ## Stack and Services
 
-- **API** (`services/api`): FastAPI core; conversation, knowledge, trace, and admin HTTP surfaces as they land per epic sequence.
-- **Bot gateway** (`services/bot_gateway`): Telegram webhook intake and outbound messaging orchestration.
-- **Web UI** (`services/web_ui`): Admin/tenant operator interface (alerts, settings, knowledge, transparency panels per epic).
-- **Workers / scheduler** (`services/ingest_worker`, `services/scheduler`): ingestion, reindex, and scheduled jobs as introduced in later epics.
-- **PostgreSQL**: system of record for conversations, messages, knowledge entities, audit, incidents, backups metadata.
-- **Qdrant**: vector retrieval store; chunk payloads must carry stable ids for trace lineage (**Epic 05**).
+Docker-first microservices: five FastAPI services behind an nginx reverse proxy.
 
-## Epic 04 — HITL Runtime Configuration and Delivery
+| Service | Port | Role |
+|---------|------|------|
+| `api` | 8000 | Core business logic for all epics (conversations, RAG, HITL, incidents, knowledge, traces, admin) |
+| `web_ui` | 8001 | Admin/operator shell UI (alerts, knowledge moderation, "Why this answer", files, projects/operators) |
+| `bot_gateway` | 8002 | Telegram webhook intake + outbound messaging orchestration |
+| `ingest_worker` | 8003 | Heartbeat placeholder |
+| `scheduler` | 8004 | Heartbeat placeholder |
 
-- HITL ticketing is persisted in SQLite during bootstrap (`hitl_tickets` + runtime config keys).
-- Runtime routing settings are read with DB-first precedence and `.env` fallback:
-  - `hitl_primary_operator_username`
-  - `telegram_alert_chat_id`
-- Bot gateway supports admin-only command updates:
-  - `/hitl_config @username <chat_id>`
-  - Admin gate uses `HITL_CONFIG_ADMIN_USERNAME` (currently `@ajdevy`).
-- API escalation and route paths consume runtime-configured operator mapping.
-- Outbound end-user delivery remains bot-authored via Telegram `sendMessage` with no operator metadata leakage.
+**Reverse proxy (nginx, port 80):**
 
-## Epic 08 — Data and API Touchpoints (Tenant Knowledge + Answer Traces)
+| Path | Target |
+|------|--------|
+| `/api/` | `api:8000` |
+| `/admin/` | `web_ui:8001` |
+| `/telegram/webhook` | `bot_gateway:8002/telegram/webhook` |
+| `/health/live` | served locally (200) |
 
-Layered **after** RAG (**Epic 05**), guardrails (**Epic 03**), moderation/reindex (**Epic 06**), and incidents (**Epic 02**).
+Every service exposes `/health/live`, `/health/ready`, `/health/startup` via
+`platform_common/app_factory.py`. Settings are centralized in a single
+Pydantic `Settings` class (`platform_common/settings.py`) shared across services.
 
-| Concern | Store / surface | Notes |
-|--------|------------------|--------|
-| Answer transparency | PostgreSQL **`answer_traces`** (working name): FK to `messages`, `tenant_id`, JSON payload for retrieval hits, guardrail summary, routing, confidence MVP | Append-only; written at decision time; failures → incidents |
-| Tenant knowledge | Existing **`knowledge_items` / `knowledge_versions`** (PRD §6); tenant_id column or equivalent isolation | NL ops (**Story 08.03**) create versions; reindex via Epic 05 pipeline |
-| Moderation alignment | **`knowledge_candidates`** + Epic 06 workflows | Tunable per tenant: direct publish vs candidate queue |
-| Correction linkage | Optional FK from trace to `knowledge_candidates` / version ids | Forward-only lineage for audits |
-| API | API routes: trace fetch by message; NL op session endpoints if not bot-only | All routes tenant-scoped |
-| UI | Web UI conversation detail → **Why this answer** panel (**Story 08.02**) | Read-only transparency |
-| Bot | Trusted tenant admin NL dialogues + confirmations (**Story 08.03**) | Rate limits + allowlists |
+## Data Stores (SQLite, system of record)
 
-No change to Docker-first deployment model; new tables and queues remain Postgres-backed with existing observability conventions (`trace_id`, structured logs).
+Each concern owns its own SQLite file under `.data/`. There is no relational
+RDBMS in the runtime path; SQLite files are the durable system of record.
+
+| DB file | Owner | Tables (primary) |
+|---------|-------|------------------|
+| `semantaix_story1.db` | bot_gateway | `conversations`, `messages` |
+| `semantaix_operator_files.db` | bot_gateway (RO cross-read by api) | `operator_files`, `operator_kb_session`, `operator_media_group_buffer` |
+| `semantaix_hitl.db` | api | `hitl_tickets`, `hitl_runtime_config`, `project_prompts`, `project_prompt_versions`, `pending_prompt_edits` |
+| `semantaix_knowledge.db` | api | `knowledge_candidates`, `knowledge_moderation_candidates` |
+| `semantaix_rag.db` | api | `rag_chunks`, `catalog_digests` |
+| `semantaix_answer_traces.db` | api | `answer_traces` |
+| `semantaix_incidents.db` | api | `incidents`, `incident_events` |
+| `semantaix_nl_ops.db` | api | `nl_op_sessions`, `admin_nl_op_sessions`, `nl_audit_logs`, `knowledge_versions`, `trace_corrections` |
+| `semantaix_web_auth.db` | api | `web_auth_codes`, `web_sessions` |
+| `semantaix_projects.db` | api | `projects` |
+| `semantaix_operators.db` | api | `operators` |
+| `semantaix_admin_sessions.db` | api | `admin_login_codes`, `admin_sessions` |
+| `semantaix_backups.db` | api | `backups`, `backup_events` |
+
+**WAL mode** is enabled on `semantaix_operator_files.db`,
+`semantaix_knowledge.db`, and `semantaix_web_auth.db` so the api service can open
+them read-only (and `ATTACH` the knowledge DB to the operator-files DB in a single
+query) while the owning service writes. All DB access is funneled through
+`*Repository` classes — no raw SQL outside repositories. Trace lineage uses stable
+`rag_chunks` ids (no external vector store id needed).
+
+## Conversation / Answer Pipeline (api)
+
+`POST /conversations/inbound` is the single entry point for every customer
+message. It builds an `AnswerContext` and runs an `AnswerPipeline`
+(`services/api/app/answerers/`). As built, the pipeline is a **single
+`GroundedRagAnswerer`** that internally folds in the capabilities that earlier
+plans split across separate answerers:
+
+- **Scheduling / date-time / holiday** intent (`scheduling_context.py`)
+- **Weather** lookups (`weather_client.py`, Open-Meteo)
+- **Service-catalog** intent (`service_catalog_intent.py`)
+- **Grounded RAG** answering with a four-layer validity gate:
+  1. **Retrieve** — lemma-overlap retrieval over `rag_chunks` (grounding threshold default `0.6`)
+  2. **Strict-grounding LLM** — emits the `ESCALATE_TO_HUMAN` sentinel when it cannot answer from context
+  3. **LLM verifier** — must return `GROUNDED`
+  4. **Regex guardrails + profanity** — `guardrails.py` (0.95 valid / 0.2 blocked) and Russian profanity filter
+
+If no layer produces a deliverable answer, the request **escalates to HITL**:
+ack the customer, coalesce onto an active ticket (or create + assign one), and DM
+the operator the verbatim question. The LLM is never user-visible unless it clears
+all four grounding layers.
+
+## RAG (api)
+
+- **Ingest** (`/rag/ingest`, `rag.py`): line-split into chunks, SHA-256 dedup
+  (`UNIQUE(source_id, chunk_hash)`), optional `is_confidential` / `project_id`.
+- **Retrieve** (`/rag/retrieve`): **lemma-overlap scoring**, not vector search.
+  `RussianNormalizer.lemmas` (razdel + slang dict + pymorphy3) tokenizes query and
+  chunks; score = matched-lemma overlap with retrieval-stopword discounting. No
+  embedding model and no Qdrant call are on this path.
+
+## HITL Escalation (api + bot_gateway)
+
+- Tickets persist in `semantaix_hitl.db`. Lifecycle is **`open` → `assigned` →
+  `resolved`** (operator reply auto-resolves).
+- Runtime routing config lives in `hitl_runtime_config` with **DB-first / `.env`
+  fallback** precedence (operator username + chat id, ack message, country/timezone/
+  location, grounding threshold, bot persona).
+- `bot_gateway` branches inbound messages: customer → `/conversations/inbound`;
+  operator (matches configured operator username) → resolve ticket id from
+  `reply_to_message` (or the single open assigned ticket) → `/hitl/tickets/{id}/reply`.
+- Admin command `/hitl_config @username <chat_id>` upserts runtime config; gated by
+  the configured admin username. Outbound delivery is bot-authored — no operator
+  metadata leaks to the end user.
+
+## Incidents (api)
+
+`incidents.py`: fingerprint-based dedup window (default 300 s), status lifecycle
+with an `incident_events` timeline (`created`, `deduplicated`, `auto_resolved`,
+`read`, `acknowledged`, `resolved`, `telegram_notify`). Critical incidents notify
+the on-call operator via Telegram. The Web UI Alerts surface reads deduplicated
+records.
+
+## Knowledge Moderation + NL Ops (api)
+
+- **Extraction → moderation**: `/knowledge/extract` pulls transcript lines into
+  `knowledge_moderation_candidates`; `/knowledge/candidates/*` approve (triggers RAG
+  reindex) or reject.
+- **NL knowledge ops** (`nl_knowledge_ops.py`): bot-first conversational
+  create/update/retire with preview + explicit confirm token, `knowledge_versions`
+  history, and `nl_audit_logs`. **Tenant-scoped** (`tenant_id` on sessions, versions,
+  audit logs). Tenants can be configured to route mutations into the moderation queue
+  instead of direct publish.
+
+## Answer Traces + Correction Loop (api + web_ui)
+
+- `answer_traces` is written at decision time (retrieval hits with scores, guardrail
+  outcome/reasons/score, model routing, confidence, `hitl_ticket_id`). Records are
+  **append-only**. Note: as built, traces are **global, not tenant-partitioned**.
+- Web UI conversation/trace detail renders a read-only **"Why this answer"** panel.
+- `trace_corrections.py`: from a trace, a tenant user submits a correction routed
+  either to direct publish or the moderation queue (`trace_corrections`, tenant-scoped),
+  cross-linked in `nl_audit_logs`. Past traces are never rewritten.
+
+## Operator Files (bot_gateway + api)
+
+Operators upload files via Telegram; `operator_files.py` registers them
+(`operator_files`, WAL), stores the binary, extracts text, and ingests chunks into
+RAG (with confidentiality flags). The api exposes `/admin/files`,
+`/admin/files/{short_id}`, `/admin/files/search` (`admin_files.py` +
+`operator_files_view.py`): admin sees all (incl. confidential), operator sees own
+only — enforced in SQL `WHERE` clauses. Accepts a cookie session **or**
+`Authorization: Bearer <internal_service_token>` + `as_user=` for bot→api calls.
+Bot commands: `/files [N]`, `/file <short_id>`, `/files_find <query>`.
+
+## Multi-Operator Projects + Web Auth (api + web_ui)
+
+- `projects` and `operators` tables scope knowledge and routing; `rag_chunks` and
+  candidates carry `project_id`. A default project is auto-created.
+- **Web auth** (`admin_auth.py` + `web_auth.py`): Telegram one-time code login.
+  `request_code` resolves chat id and DMs a 6-digit code (5-min TTL, 5-attempt cap);
+  `verify` consumes it, rotates prior sessions, sets an `HttpOnly; SameSite=Lax`
+  cookie (`semantaix_session`). Sessions do not expire (revoke-based). Service-to-
+  service calls use the internal service token.
+
+## Backup / Restore (api + web_ui)
+
+`backups.py`: backups are **tar.gz archives of the SQLite DB files** (not Qdrant
+snapshots). Runs are recorded in `backups` with a `backup_events` audit trail
+(`backup_started/completed/failed`, `restore_completed/failed`). Restore requires a
+confirmation token. The Web UI shows the latest successful backup metadata and the
+restore action.
+
+## Russian-First Text Handling (api)
+
+`RussianNormalizer` (`russian_text/`) wraps razdel tokenization + a static slang
+dictionary (`data/russian_slang.json`) + pymorphy3 lemmatization. It is the shared
+seam across **retrieval** (`rag.py` `_tokenize`), **guardrails** (hedge/policy lists
+in `data/russian_hedges.txt`, `data/russian_policy_phrases.txt`), and **profanity**
+filtering (`data/russian_profanity.txt`). New slang pairs added to the JSON improve
+retrieval, intent, and guardrails together.
+
+## Provisioned-but-unused Infrastructure
+
+- **Qdrant** (compose service, port 6333): provisioned and included in
+  health/readiness checks (`qdrant_url`), but **no vector indexing or query** runs
+  against it. Retrieval is lemma-overlap. Kept as the forward path for embedding-based
+  retrieval.
+- **PostgreSQL**: `database_url` defaults to a Postgres DSN in settings, and a
+  `postgres` service exists in compose behind `profiles: ["with-postgres"]`
+  (inactive by default). Nothing imports a Postgres driver; it is not on the runtime
+  path.
+
+The Docker-first deployment model and observability conventions (`trace_id`,
+structured logs, per-service health checks) are unchanged.

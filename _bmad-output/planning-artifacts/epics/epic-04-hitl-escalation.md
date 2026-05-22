@@ -12,7 +12,7 @@ Route invalid/uncertain cases to human operators and send operator responses bac
 - Incident emission integration into Epic 02 backbone
 
 ## Out of Scope
-- Qdrant ingestion/retrieval
+- RAG ingestion/retrieval (lemma-overlap; Epic 05)
 - Knowledge candidate extraction/moderation
 - Backup/restore
 

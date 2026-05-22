@@ -20,6 +20,7 @@ This directory contains the BMAD feature-based sequential epic layout.
 7. `epic-07-backup-restore-hardening.md`
 8. `epic-08-tenant-knowledge-ops-and-answer-traces.md`
 9. `epic-09-operator-kb-growth.md`
+10. `epic-10-multi-operator-projects.md`
 
 ## Recent Implementation Notes
 - **Epic 04 (HITL escalation):** runtime HITL recipient/chat routing can be updated by Telegram command `/hitl_config @username <chat_id>`.
@@ -32,4 +33,4 @@ From Epic 03 onward, every epic must integrate with the incident/alerts solution
 
 ## Automated E2E
 
-Story-aligned pytest identifiers and Epic 07/08 honest gaps live in **`_bmad-output/implementation-artifacts/e2e-coverage.md`**. CI runs **`pytest`** with coverage plus **`pytest -m e2e`**.
+Story-aligned pytest node ids (including Epic 07 backup/restore and Epic 08 traces/NL-ops/correction) live in **`_bmad-output/implementation-artifacts/e2e-coverage.md`**. CI runs **`pytest`** with coverage plus **`pytest -m e2e`**.

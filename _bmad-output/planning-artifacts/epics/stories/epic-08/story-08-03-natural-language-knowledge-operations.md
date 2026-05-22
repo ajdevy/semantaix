@@ -10,7 +10,7 @@ Let the **tenant** add, update, or retire knowledge by **talking with the bot** 
 - **Preview** step: show diff summary (text, tags, effective dates if any) before commit.
 - **Confirmation**: explicit yes/no (or button callback) required for mutating ops.
 - Persist **`knowledge_versions`** / tenant-scoped knowledge rows; enqueue reindex job consistent with **Epic 05** ingestion.
-- **audit_logs** for every committed op and for abandoned previews.
+- **`nl_audit_logs`** entries for every committed op and for abandoned previews.
 - Feature flag to disable NL ops in production per tenant.
 
 ### Out of Scope

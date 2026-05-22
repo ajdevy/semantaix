@@ -9,7 +9,7 @@ Close the loop: from a **specific answer trace**, let the tenant **correct** und
 - Branching:
   - **Direct publish** path when tenant policy allows (reindex immediately).
   - **Moderation** path: submit as `knowledge_candidate` per **Epic 06**; trace stores `correction_candidate_id` link.
-- **audit_logs**: who opened trace, who submitted correction, moderation decisions, reindex completion.
+- **`nl_audit_logs`**: who opened trace, who submitted correction, moderation decisions, reindex completion.
 - Notification (optional): tenant sees “your correction is live” or “pending review.”
 
 ### Out of Scope
