@@ -23,7 +23,7 @@ Tie the epic together: a `CalendarAvailabilityAnswerer` that implements the `Ans
 ## Implementation Notes
 - **Answerers DISPATCH, they don't error** (project-context): "not my intent" / disabled → `handled=False`; "my intent but degraded" → escalate (a *handled* HITL outcome), never silently fall through to RAG.
 - Escalation reuses the existing HITL path (Epic 04) but **routes to the project's calendar operator** and includes context "availability question; calendar error/uncertainty". Confirm routing override is supported or extend minimally.
-- The one-turn clarify state must be lightweight and scoped to the conversation; if implementing turn state is heavy, escalate immediately on ambiguity for v1 (decision recorded — but the preferred path is clarify-once).
+- **One clarifying turn is required** (FR-22): on `NoMatch`/`Ambiguous`/no-time, return a `handled` Russian clarifying message and record a lightweight one-turn state scoped to the conversation; on the next inbound, if still unresolved → escalate. Do **not** escalate immediately on first ambiguity — the bot asks exactly once before escalating.
 - All customer-facing copy is Russian (configurable as data); structured logs carry `trace_id`, never tokens/event content.
 - Never echo calendar event titles — only free/busy-derived availability.
 

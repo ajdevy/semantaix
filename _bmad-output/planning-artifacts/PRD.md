@@ -261,7 +261,7 @@ Read-only availability first: the bot answers customer questions like "is servic
 - The bot DMs a Google OAuth consent URL scoped **read-only** (`calendar.readonly` / free-busy). Google redirects to a callback endpoint that validates a **single-use, server-stored `state` token** (TTL mirrors the existing login-code: ~5 min, consumed on first use). Because the browser hitting the callback is **not** Telegram-authenticated, `state` is the sole binding between the browser callback and the initiating operator. The callback exchanges the auth code, stores an encrypted refresh token (**upsert on `(project, operator)`** — re-consent overwrites), and is **rate-limited** (unauthenticated endpoint that triggers token exchange); it renders a simple success/failure page to the operator's browser.
 - Access tokens are minted on demand and cached until near-expiry.
 - **Revocation & long-term expiry handling:** a refresh that fails — operator revoked access on Google, or the refresh token expired (Google's 7-day "Testing"-status, 6-month-unused, or per-client token-cap rules) — is detected on next use. The operator transitions to a **"reconnect needed"** state, is proactively notified via Telegram to re-run `/connect_calendar`, an **incident is emitted** (Epic-02 integration), and the dead token row is **cleared** (never left as a poison row). No customer-visible error.
-- Disconnect: best-effort call to Google's token-revocation endpoint, then delete the local token regardless (if revoke fails, still delete locally and log). Connect/disconnect are auditable operator actions.
+- Disconnect (**operator-only**): best-effort call to Google's token-revocation endpoint, then delete the local token regardless (if revoke fails, still delete locally and log). Connecting and disconnecting are auditable operator actions; an admin cannot disconnect (admins may only enable/disable per FR-21).
 
 Acceptance criteria:
 
@@ -305,12 +305,14 @@ Acceptance criteria:
 
 - The calendar capability is **default-off**; a project must explicitly enable it **and** designate a calendar operator.
 - The answer pipeline treats calendar as a tri-state: **(a) not enabled** → silent no-op (the calendar logic declines, the pipeline proceeds normally, no error); **(b) enabled but the calendar operator is not connected / in reconnect state** → a "calendar isn't connected yet" reply and/or HITL escalation, never a 500; **(c) connected** → compute and answer per FR-19.
+- **Enable/disable vs disconnect (permission model):** "**Disable**" turns the feature off for a project but **keeps** the stored token; "**disconnect/delete**" removes the integration and deletes the stored token (FR-18). Both the **calendar operator** and an **admin** may enable/disable a project's calendar. **Only the operator may disconnect/delete** the integration — an admin can turn it off but cannot delete the operator's connected calendar.
 - The enablement check is a **single cached project-settings read performed before intent detection or any API call**; its overhead is negligible. (The exact pipeline placement — a standalone answerer vs a `scheduling_context` signal — is decided in the architecture step, but the "config check precedes intent/API work" ordering is the binding requirement.)
 
 Acceptance criteria:
 
 - On a project with calendar disabled, calendar logic adds no customer-visible behavior, and the project-settings check precedes intent detection and any API call.
-- Enabling a project and connecting its calendar operator makes availability answers live; disabling reverts to the no-op state.
+- Enabling a project and connecting its calendar operator makes availability answers live; disabling reverts to the no-op state without deleting the stored token.
+- The operator and an admin can both enable/disable; an admin attempting to disconnect/delete the integration is rejected (operator-only).
 
 *Delivery:* **Epic 11.**
 

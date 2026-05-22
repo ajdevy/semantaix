@@ -11,6 +11,7 @@ Let a project's designated **calendar operator** connect their own Google Calend
 - Token lifecycle + resilience: access-token mint/cache, single-flight refresh (`asyncio.Lock`), refresh-token expiry/revocation detection → reconnect state + Telegram notice + incident emission + dead-token cleanup; explicit timeouts; Google `429` `Retry-After` bounded retry.
 - `CalendarAvailabilityAnswerer` placed **before** `GroundedRagAnswerer` in `AnswerPipeline`: opt-in tri-state gate (not-enabled → silent no-op; enabled-but-disconnected → "not connected" / escalate; connected → answer), Russian service resolution (FR-22), availability computation in project tz, escalate-on-uncertainty routed to the calendar operator.
 - Per-project, per-service config (the `hitl_runtime_config` config-in-DB pattern), editable without redeploy; RU public holidays honored via the existing `holidays` library.
+- **Enable/disable + service-config surface (operator + admin):** both the designated **calendar operator** and an **admin** can enable/disable a project's calendar and define services (Telegram commands + internal api endpoints). **Disable keeps the stored token; only the operator may disconnect/delete** the integration (an admin can turn it off but cannot delete it).
 
 ## Out of Scope
 - **Booking / event creation / modification** (read-only availability only).
@@ -18,7 +19,8 @@ Let a project's designated **calendar operator** connect their own Google Calend
 - **Multi-calendar selection** (v1 = the operator's primary calendar only).
 - **freeBusy result caching** (v1 makes one live call per question to avoid stale "free").
 - Vector/embedding work, RAG changes, or any change to the existing four-layer grounding pipeline beyond inserting the calendar answerer ahead of it.
-- A web admin UI for calendar settings (config is via the `hitl_runtime_config`-style DB pattern + future admin surface; not built here).
+- A **web** admin UI for calendar settings (enable/disable + service config ship as Telegram commands + internal api endpoints in story 11.08; a web `/admin/*` surface is deferred).
+- Natural-language calendar configuration (the epic-10-style NL dialog for calendar setup is a possible follow-up, not in v1).
 
 ## Dependencies
 - **Epic 01 / refactor** — `AnswerPipeline` + `Answerer` Protocol; `scheduling_context` intent regex + `RussianNormalizer` (reused for intent + FR-22 service resolution).
