@@ -15,13 +15,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import httpx
+from google.auth.exceptions import RefreshError
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SCOPES = ("https://www.googleapis.com/auth/calendar.readonly",)
+_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 _REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 _REVOKE_TIMEOUT_SECONDS = 10.0
 
@@ -30,11 +35,27 @@ class OAuthExchangeError(Exception):
     """Raised when Google rejects the authorization-code exchange."""
 
 
+class TokenRefreshFailed(Exception):
+    """Raised when a refresh token is invalid / revoked / expired.
+
+    Signals the access-token cache that the stored refresh token is dead and
+    the operator must re-consent — never retried, never logged with the token.
+    """
+
+
 @dataclass(frozen=True)
 class OAuthTokens:
     refresh_token: str
     access_token: str | None
     expiry: str | None
+
+
+@dataclass(frozen=True)
+class AccessToken:
+    """A freshly minted short-lived access token plus its tz-aware expiry."""
+
+    access_token: str
+    expiry: datetime
 
 
 class CalendarOAuthClient:
@@ -100,6 +121,36 @@ class CalendarOAuthClient:
             access_token=getattr(credentials, "token", None),
             expiry=expiry.isoformat() if expiry is not None else None,
         )
+
+    def refresh(self, *, refresh_token: str) -> AccessToken:
+        """Sync refresh-token → access-token exchange (call via ``asyncio.to_thread``).
+
+        Uses ``google-auth`` ``Credentials.refresh`` (the focused crypto/auth
+        primitive — never hand-roll the dance). Raises ``TokenRefreshFailed`` on
+        ``invalid_grant`` / revoked / expired refresh tokens so the cache can
+        clear the poison row and move the operator to ``reconnect_needed``.
+        """
+        credentials = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            token_uri=_TOKEN_ENDPOINT,
+            client_id=self._client_id,
+            client_secret=self._client_secret,
+            scopes=self._scopes,
+        )
+        try:
+            credentials.refresh(Request())
+        except RefreshError as exc:
+            logger.warning("calendar_oauth_refresh_failed")
+            raise TokenRefreshFailed("refresh_failed") from exc
+        token = credentials.token
+        expiry = credentials.expiry
+        if not token or expiry is None:
+            logger.warning("calendar_oauth_refresh_incomplete")
+            raise TokenRefreshFailed("refresh_incomplete")
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=UTC)
+        return AccessToken(access_token=token, expiry=expiry)
 
     async def revoke(self, *, refresh_token: str) -> None:
         """Best-effort revocation; swallow+log failure (caller still deletes)."""

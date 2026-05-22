@@ -6,11 +6,14 @@ from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
+from google.auth.exceptions import RefreshError
 
 from services.api.app.calendar.oauth import (
+    AccessToken,
     CalendarOAuthClient,
     OAuthExchangeError,
     OAuthTokens,
+    TokenRefreshFailed,
 )
 
 _OAUTH_MODULE = "services.api.app.calendar.oauth"
@@ -91,6 +94,62 @@ def test_exchange_code_raises_when_no_refresh_token(monkeypatch):
     )
     with pytest.raises(OAuthExchangeError, match="no_refresh_token"):
         _client().exchange_code(code="auth-code")
+
+
+def _patch_credentials(monkeypatch, *, token, expiry, refresh_exc=None):
+    credentials = Mock()
+    credentials.token = token
+    credentials.expiry = expiry
+    if refresh_exc is not None:
+        credentials.refresh = Mock(side_effect=refresh_exc)
+    else:
+        credentials.refresh = Mock()
+    monkeypatch.setattr(
+        f"{_OAUTH_MODULE}.Credentials",
+        lambda **kwargs: credentials,
+    )
+    monkeypatch.setattr(f"{_OAUTH_MODULE}.Request", lambda: Mock())
+    return credentials
+
+
+def test_refresh_returns_access_token_with_aware_expiry(monkeypatch):
+    expiry = datetime(2026, 5, 23, 12, 0, tzinfo=UTC)
+    credentials = _patch_credentials(monkeypatch, token="access-new", expiry=expiry)
+    token = _client().refresh(refresh_token="refresh-xyz")
+    assert token == AccessToken(access_token="access-new", expiry=expiry)
+    credentials.refresh.assert_called_once()
+
+
+def test_refresh_makes_naive_expiry_utc_aware(monkeypatch):
+    naive_expiry = datetime(2026, 5, 23, 12, 0)
+    _patch_credentials(monkeypatch, token="access-new", expiry=naive_expiry)
+    token = _client().refresh(refresh_token="refresh-xyz")
+    assert token.expiry == datetime(2026, 5, 23, 12, 0, tzinfo=UTC)
+
+
+def test_refresh_raises_on_refresh_error(monkeypatch):
+    _patch_credentials(
+        monkeypatch,
+        token=None,
+        expiry=None,
+        refresh_exc=RefreshError("invalid_grant"),
+    )
+    with pytest.raises(TokenRefreshFailed, match="refresh_failed"):
+        _client().refresh(refresh_token="refresh-xyz")
+
+
+def test_refresh_raises_when_no_token(monkeypatch):
+    _patch_credentials(
+        monkeypatch, token=None, expiry=datetime(2026, 5, 23, tzinfo=UTC)
+    )
+    with pytest.raises(TokenRefreshFailed, match="refresh_incomplete"):
+        _client().refresh(refresh_token="refresh-xyz")
+
+
+def test_refresh_raises_when_no_expiry(monkeypatch):
+    _patch_credentials(monkeypatch, token="access-new", expiry=None)
+    with pytest.raises(TokenRefreshFailed, match="refresh_incomplete"):
+        _client().refresh(refresh_token="refresh-xyz")
 
 
 @pytest.mark.asyncio
