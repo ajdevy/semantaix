@@ -72,5 +72,5 @@ development_status:
   11-05-availability-engine: done
   11-06-service-resolution: done
   11-07-availability-answerer-and-wiring: backlog
-  11-08-enable-disable-and-service-config: backlog
+  11-08-enable-disable-and-service-config: done
   epic-11-retrospective: optional
