@@ -146,3 +146,85 @@ def test_epic11_oauth_connect_full_flow(env, caplog):
     for secret in (_REFRESH_TOKEN, _AUTH_CODE):
         assert secret not in bodies
         assert secret not in app_logs
+
+
+@pytest.mark.story("11-03")
+def test_epic11_operator_connect_calendar_webhook_dms_consent_url(
+    env, monkeypatch
+):
+    """Story 11.03 — operator `/connect_calendar` webhook → consent-URL DM.
+
+    Drives the bot_gateway webhook; the bot's ApiClient initiate call is routed
+    to the api TestClient (which mints a real consent URL via the mocked Flow),
+    and the operator DM is captured. Asserts the consent URL reaches the
+    operator and that the bound state never leaks into the captured DM logs.
+    """
+    from services.bot_gateway.app import main as bot_main
+    from services.bot_gateway.app.main import app as bot_app
+
+    api_client = env["client"]
+
+    async def routed_initiate(*, project_id, operator, internal_token):
+        resp = api_client.post(
+            "/calendar/connect/initiate",
+            json={"project_id": project_id, "operator": operator},
+            headers={"Authorization": f"Bearer {internal_token}"},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def fake_resolve(*, username, api_client, primary_operator_username):
+        from services.bot_gateway.app.operator_resolver import ResolvedOperator
+
+        return ResolvedOperator(
+            username=_OPERATOR,
+            chat_id=500,
+            project_id=_PROJECT_ID,
+            is_active=True,
+            source="registry",
+        )
+
+    sent_dms: list[tuple[int, str]] = []
+
+    async def fake_send_dm(chat_id: int, text: str) -> None:
+        sent_dms.append((chat_id, text))
+
+    monkeypatch.setattr(bot_main.settings, "internal_service_token", _INTERNAL_TOKEN)
+    monkeypatch.setattr(
+        bot_main.api_client, "initiate_calendar_connect", routed_initiate
+    )
+    monkeypatch.setattr(
+        "services.bot_gateway.app.calendar_commands.resolve_operator_for_sender",
+        fake_resolve,
+    )
+    monkeypatch.setattr(bot_main, "_send_dm", fake_send_dm)
+
+    bot_client = TestClient(bot_app)
+    webhook = bot_client.post(
+        "/telegram/webhook",
+        json={
+            "update_id": 9001,
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 500},
+                "from": {"id": 42, "username": "calendar_op"},
+                "text": "/connect_calendar",
+            },
+        },
+    )
+
+    assert webhook.status_code == 200
+    body = webhook.json()
+    assert body["route"] == "calendar_connect"
+    assert body["decision"] == "url_sent"
+
+    assert len(sent_dms) == 1
+    chat_id, text = sent_dms[0]
+    assert chat_id == 500
+    consent_url = next(
+        line for line in text.splitlines() if line.startswith("https://")
+    )
+    state = parse_qs(urlparse(consent_url).query)["state"][0]
+    assert state  # a state was bound to the consent URL
+    # The bound state must not leak into the webhook response body.
+    assert state not in webhook.text
