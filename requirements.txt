@@ -18,3 +18,5 @@ beautifulsoup4==4.12.3
 striprtf==0.0.27
 EbookLib==0.18
 cryptography==44.0.0
+google-auth==2.38.0
+google-auth-oauthlib==1.2.1

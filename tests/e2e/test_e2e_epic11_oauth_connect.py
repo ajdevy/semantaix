@@ -1,0 +1,148 @@
+"""Epic 11 / story 11.02 — OAuth connect E2E: initiate → callback → disconnect.
+
+Drives the full api surface with Google's token exchange mocked: mint a consent
+URL, simulate Google's redirect to the callback (which exchanges the code and
+stores an encrypted refresh token), confirm the row exists, then disconnect.
+Asserts no token / ``code`` leaks into any response body or captured logs.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, Mock
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
+
+from services.api.app import main as api_main
+from services.api.app.calendar.oauth import CalendarOAuthClient
+from services.api.app.calendar.oauth_state_repository import (
+    CalendarOAuthStateRepository,
+)
+from services.api.app.calendar.settings_repository import CalendarSettingsRepository
+from services.api.app.calendar.token_repository import (
+    CalendarTokenRepository,
+    TokenNotFound,
+)
+from services.api.app.main import app as api_app
+
+pytestmark = [pytest.mark.e2e, pytest.mark.epic("11"), pytest.mark.story("11-02")]
+
+_INTERNAL_TOKEN = "e2e-internal-token"
+_AUTH = {"Authorization": f"Bearer {_INTERNAL_TOKEN}"}
+_PROJECT_ID = 11
+_OPERATOR = "@calendar_op"
+_REFRESH_TOKEN = "e2e-refresh-token-secret"
+_AUTH_CODE = "e2e-auth-code-secret"
+
+
+@pytest.fixture
+def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
+    api_main._calendar_oauth_hits.clear()
+    calendar_db = str(tmp_path / "calendar.sqlite3")
+    settings_repo = CalendarSettingsRepository(db_path=calendar_db)
+    state_repo = CalendarOAuthStateRepository(db_path=calendar_db)
+    token_repo = CalendarTokenRepository(
+        db_path=calendar_db, fernet=Fernet(Fernet.generate_key())
+    )
+    oauth_client = CalendarOAuthClient(
+        client_id="cid",
+        client_secret="secret",
+        redirect_uri="https://example.test/calendar/oauth/callback",
+    )
+
+    monkeypatch.setattr(api_main.settings, "internal_service_token", _INTERNAL_TOKEN)
+    monkeypatch.setattr(api_main, "calendar_settings_repository", settings_repo)
+    monkeypatch.setattr(api_main, "calendar_oauth_state_repository", state_repo)
+    monkeypatch.setattr(api_main, "calendar_token_repository", token_repo)
+    monkeypatch.setattr(api_main, "calendar_oauth_client", oauth_client)
+
+    # Mock Google's Flow: authorization_url echoes the state into a fake
+    # consent URL; fetch_token yields canned credentials. (The real
+    # authorization_url is also exercised by the unit tests.)
+    flow = Mock()
+    flow.fetch_token = Mock()
+    flow.credentials = SimpleNamespace(
+        refresh_token=_REFRESH_TOKEN,
+        token="e2e-access",
+        expiry=datetime(2026, 5, 23, 12, 0, tzinfo=UTC),
+    )
+    flow.authorization_url = Mock(
+        side_effect=lambda **kw: (
+            f"https://accounts.google.test/o/oauth2/auth?state={kw['state']}"
+            "&scope=calendar.readonly",
+            kw["state"],
+        )
+    )
+    monkeypatch.setattr(
+        "services.api.app.calendar.oauth.Flow.from_client_config",
+        lambda config, scopes: flow,
+    )
+    revoke = AsyncMock()
+    monkeypatch.setattr(oauth_client, "revoke", revoke)
+
+    settings_repo.enable(_PROJECT_ID, calendar_operator=_OPERATOR)
+    client = TestClient(api_app)
+    yield {"client": client, "token_repo": token_repo, "revoke": revoke}
+    api_main._calendar_oauth_hits.clear()
+
+
+def test_epic11_oauth_connect_full_flow(env, caplog):
+    client = env["client"]
+    token_repo = env["token_repo"]
+
+    with caplog.at_level(logging.DEBUG):
+        # 1) initiate → consent URL bound to a single-use state.
+        initiate = client.post(
+            "/calendar/connect/initiate",
+            json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+            headers=_AUTH,
+        )
+        assert initiate.status_code == 200
+        consent_url = initiate.json()["consent_url"]
+        state = parse_qs(urlparse(consent_url).query)["state"][0]
+
+        # 2) simulated Google redirect → callback exchanges + stores token.
+        callback = client.get(
+            "/calendar/oauth/callback",
+            params={"state": state, "code": _AUTH_CODE},
+        )
+        assert callback.status_code == 200
+        assert "подключ" in callback.text.lower()
+
+        # 3) token stored (encrypted) and decryptable via the repo.
+        assert token_repo.get_refresh_token(_PROJECT_ID, _OPERATOR) == _REFRESH_TOKEN
+
+        # 4) disconnect → revoke + delete.
+        disconnect = client.post(
+            "/calendar/disconnect",
+            json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+            headers=_AUTH,
+        )
+        assert disconnect.status_code == 200
+        assert disconnect.json() == {"disconnected": True}
+
+    env["revoke"].assert_awaited_once_with(refresh_token=_REFRESH_TOKEN)
+    with pytest.raises(TokenNotFound):
+        token_repo.get_refresh_token(_PROJECT_ID, _OPERATOR)
+
+    # No token / code in any response body or in our application's logs. (The
+    # httpx test-client emits a DEBUG access log carrying the request URL — a
+    # harness artifact, not our code — so we scope the assertion to records
+    # our application emitted.)
+    bodies = initiate.text + callback.text + disconnect.text
+    app_logs = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name.startswith("services.api")
+    )
+    for secret in (_REFRESH_TOKEN, _AUTH_CODE):
+        assert secret not in bodies
+        assert secret not in app_logs

@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import logging
 import re
@@ -7,7 +8,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
+from cryptography.fernet import Fernet
 from fastapi import Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from platform_common.app_factory import create_service_app
@@ -38,11 +41,20 @@ from services.api.app.answerers import AnswerContext, AnswerPipeline
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
 from services.api.app.answerers.weather_client import WeatherClient
 from services.api.app.backups import BackupError, BackupRepository
+from services.api.app.calendar.oauth import (
+    CalendarOAuthClient,
+    OAuthExchangeError,
+)
 from services.api.app.calendar.oauth_state_repository import (
     CalendarOAuthStateRepository,
+    InvalidOAuthState,
 )
 from services.api.app.calendar.settings_repository import CalendarSettingsRepository
-from services.api.app.calendar.token_repository import init_token_schema
+from services.api.app.calendar.token_repository import (
+    CalendarTokenRepository,
+    TokenNotFound,
+    init_token_schema,
+)
 from services.api.app.catalog_digest import (
     CatalogDigestRepository,
     CatalogDigestService,
@@ -148,6 +160,39 @@ calendar_oauth_state_repository = CalendarOAuthStateRepository(
     db_path=settings.calendar_db_path
 )
 init_token_schema(settings.calendar_db_path)
+
+
+def _build_calendar_token_repository(app_settings) -> CalendarTokenRepository | None:
+    """Encrypted refresh-token store; ``None`` until an encryption key is set.
+
+    The token table is bootstrapped above regardless, so reads of an empty
+    store stay cheap; the connect endpoints return 503 while the key is unset.
+    """
+    if not app_settings.calendar_token_encryption_key:
+        return None
+    return CalendarTokenRepository(
+        db_path=app_settings.calendar_db_path,
+        fernet=Fernet(app_settings.calendar_token_encryption_key),
+    )
+
+
+def _build_calendar_oauth_client(app_settings) -> CalendarOAuthClient | None:
+    """Google OAuth client; ``None`` until client_id/secret/redirect_uri are set."""
+    if not (
+        app_settings.google_oauth_client_id
+        and app_settings.google_oauth_client_secret
+        and app_settings.google_oauth_redirect_uri
+    ):
+        return None
+    return CalendarOAuthClient(
+        client_id=app_settings.google_oauth_client_id,
+        client_secret=app_settings.google_oauth_client_secret,
+        redirect_uri=app_settings.google_oauth_redirect_uri,
+    )
+
+
+calendar_token_repository = _build_calendar_token_repository(settings)
+calendar_oauth_client = _build_calendar_oauth_client(settings)
 web_auth_repository = WebAuthRepository(db_path=settings.web_auth_db_path)
 admin_auth_service = AdminAuthService(
     web_auth_repository=web_auth_repository,
@@ -278,6 +323,25 @@ def require_admin_or_internal(
         if session is not None:
             return session.admin_username
     raise HTTPException(status_code=401, detail="admin_auth_required")
+
+
+def require_internal_token(
+    authorization: Annotated[str | None, Header()] = None,
+) -> str:
+    """Service-to-service auth via ``Authorization: Bearer <internal_service_token>``.
+
+    Mirrors the admin-files internal path but without ``as_user`` — the
+    calendar connect/disconnect calls come from bot_gateway, not a web role.
+    """
+    expected = settings.internal_service_token
+    if (
+        expected
+        and authorization
+        and authorization.startswith("Bearer ")
+        and hmac.compare_digest(authorization.removeprefix("Bearer "), expected)
+    ):
+        return "internal"
+    raise HTTPException(status_code=401, detail="internal_auth_required")
 
 
 def _project_to_dict(project: Project) -> dict[str, object]:
@@ -3000,3 +3064,151 @@ def restore_backup(backup_id: int, request: BackupRestoreRequest) -> dict[str, o
         "backup_id": result.backup_id,
         "restored_paths": result.restored_paths,
     }
+
+
+# ---------------------------------------------------------------------------
+# Epic 11 / story 11.02 — Google Calendar OAuth connect flow
+# ---------------------------------------------------------------------------
+
+_CALENDAR_OAUTH_RATE_LIMIT = 10
+_CALENDAR_OAUTH_RATE_WINDOW_SECONDS = 60.0
+# In-memory coarse throttle: {bucket_key: [monotonic timestamps]}. Bounds the
+# abuse surface of the unauthenticated callback (each hit triggers a token
+# exchange) and the internal initiate. Per-state single-use bounds replay; this
+# bounds volume.
+_calendar_oauth_hits: dict[str, list[float]] = {}
+
+
+def _calendar_oauth_rate_limited(bucket: str) -> bool:
+    now = time.monotonic()
+    window_start = now - _CALENDAR_OAUTH_RATE_WINDOW_SECONDS
+    hits = [ts for ts in _calendar_oauth_hits.get(bucket, []) if ts > window_start]
+    if len(hits) >= _CALENDAR_OAUTH_RATE_LIMIT:
+        _calendar_oauth_hits[bucket] = hits
+        return True
+    hits.append(now)
+    _calendar_oauth_hits[bucket] = hits
+    return False
+
+
+def _calendar_callback_html(*, ok: bool) -> str:
+    if ok:
+        title = "Календарь подключён"
+        body = "Доступ к календарю предоставлен. Можете вернуться в Telegram."
+    else:
+        title = "Не удалось подключить календарь"
+        body = (
+            "Ссылка устарела или произошла ошибка. "
+            "Запросите новую ссылку в Telegram и попробуйте снова."
+        )
+    return (
+        "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
+        f"<title>{title}</title></head><body><h1>{title}</h1>"
+        f"<p>{body}</p></body></html>"
+    )
+
+
+class CalendarConnectRequest(BaseModel):
+    project_id: int
+    operator: str
+
+
+@app.post("/calendar/connect/initiate")
+async def calendar_connect_initiate(
+    request: CalendarConnectRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+    http_request: Request,
+) -> dict[str, object]:
+    if calendar_oauth_client is None:
+        raise HTTPException(status_code=503, detail="calendar_oauth_not_configured")
+    client_host = http_request.client.host if http_request.client else "unknown"
+    if _calendar_oauth_rate_limited(f"initiate:{client_host}"):
+        raise HTTPException(status_code=429, detail="rate_limited")
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, request.project_id
+    )
+    if project_settings is None or not project_settings.enabled:
+        raise HTTPException(status_code=400, detail="calendar_not_enabled")
+    if project_settings.calendar_operator != request.operator:
+        raise HTTPException(status_code=400, detail="not_calendar_operator")
+    state = await asyncio.to_thread(
+        calendar_oauth_state_repository.create,
+        project_id=request.project_id,
+        operator=request.operator,
+        ttl_seconds=settings.calendar_oauth_state_ttl_seconds,
+        now=datetime.now(UTC),
+    )
+    consent_url = calendar_oauth_client.build_consent_url(state=state)
+    logger.info(
+        "calendar_oauth_initiated",
+        extra={"project_id": request.project_id, "operator": request.operator},
+    )
+    return {"consent_url": consent_url}
+
+
+@app.get("/calendar/oauth/callback", response_class=HTMLResponse)
+async def calendar_oauth_callback(
+    http_request: Request,
+    state: str | None = None,
+    code: str | None = None,
+) -> HTMLResponse:
+    if calendar_oauth_client is None or calendar_token_repository is None:
+        return HTMLResponse(_calendar_callback_html(ok=False), status_code=503)
+    client_host = http_request.client.host if http_request.client else "unknown"
+    if _calendar_oauth_rate_limited(f"callback:{client_host}"):
+        return HTMLResponse(_calendar_callback_html(ok=False), status_code=429)
+    if not state or not code:
+        return HTMLResponse(_calendar_callback_html(ok=False), status_code=400)
+    try:
+        pending = await asyncio.to_thread(
+            calendar_oauth_state_repository.consume, state, now=datetime.now(UTC)
+        )
+    except InvalidOAuthState:
+        logger.warning("calendar_oauth_callback_invalid_state")
+        return HTMLResponse(_calendar_callback_html(ok=False), status_code=400)
+    try:
+        tokens = await asyncio.to_thread(calendar_oauth_client.exchange_code, code=code)
+    except OAuthExchangeError:
+        logger.warning(
+            "calendar_oauth_callback_exchange_failed",
+            extra={"project_id": pending.project_id, "operator": pending.operator},
+        )
+        return HTMLResponse(_calendar_callback_html(ok=False), status_code=400)
+    await asyncio.to_thread(
+        calendar_token_repository.upsert,
+        pending.project_id,
+        pending.operator,
+        tokens.refresh_token,
+    )
+    logger.info(
+        "calendar_oauth_connected",
+        extra={"project_id": pending.project_id, "operator": pending.operator},
+    )
+    return HTMLResponse(_calendar_callback_html(ok=True), status_code=200)
+
+
+@app.post("/calendar/disconnect")
+async def calendar_disconnect(
+    request: CalendarConnectRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    if calendar_oauth_client is None or calendar_token_repository is None:
+        raise HTTPException(status_code=503, detail="calendar_oauth_not_configured")
+    try:
+        refresh_token = await asyncio.to_thread(
+            calendar_token_repository.get_refresh_token,
+            request.project_id,
+            request.operator,
+        )
+    except TokenNotFound:
+        refresh_token = None
+    if refresh_token is not None:
+        await calendar_oauth_client.revoke(refresh_token=refresh_token)
+    await asyncio.to_thread(
+        calendar_token_repository.delete, request.project_id, request.operator
+    )
+    logger.info(
+        "calendar_oauth_disconnected",
+        extra={"project_id": request.project_id, "operator": request.operator},
+    )
+    return {"disconnected": True}
