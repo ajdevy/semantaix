@@ -70,7 +70,7 @@ development_status:
   11-03-telegram-connect-command: done
   11-04-token-lifecycle-and-resilience: done
   11-05-availability-engine: done
-  11-06-service-resolution: backlog
+  11-06-service-resolution: done
   11-07-availability-answerer-and-wiring: backlog
   11-08-enable-disable-and-service-config: backlog
   epic-11-retrospective: optional
