@@ -42,7 +42,6 @@ class _FakeRag:
     def __init__(self, items: list[RagChunk]) -> None:
         self._items = items
         self.calls: list[str] = []
-        self.last_catalog_mode: bool | None = None
         self.last_limit: int | None = None
 
     def retrieve(
@@ -51,11 +50,9 @@ class _FakeRag:
         query: str,
         limit: int = 3,
         project_id: int | None = None,
-        catalog_mode: bool = False,
     ) -> list[RagChunk]:
         self.calls.append(query)
         self.last_project_id = project_id
-        self.last_catalog_mode = catalog_mode
         self.last_limit = limit
         return list(self._items)
 
@@ -72,6 +69,16 @@ def _fake_llm(
         return_value=GroundingVerdict(label=verdict_label, reason=verdict_reason)
     )
     return llm
+
+
+class _FakeCatalogDigest:
+    def __init__(self, digest: str = "") -> None:
+        self._digest = digest
+        self.calls: list[int | None] = []
+
+    async def get_digest(self, *, project_id: int | None) -> str:
+        self.calls.append(project_id)
+        return self._digest
 
 
 def _assert_skip_log(
@@ -111,6 +118,7 @@ async def test_strong_retrieval_grounded_verifier_delivers_answer(caplog, prompt
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     with caplog.at_level(
         logging.INFO, logger="services.api.app.answerers.grounded_rag"
@@ -160,6 +168,7 @@ async def test_scheduling_intent_passes_context_to_llm_calls(prompts):
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
         weather_client=None,
     )
     result = await answerer.try_answer(
@@ -182,6 +191,7 @@ async def test_non_scheduling_question_passes_no_context(prompts):
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     result = await answerer.try_answer(
         question="когда придёт мой возврат?", ctx=_ctx()
@@ -200,6 +210,7 @@ async def test_weak_retrieval_falls_through(caplog, prompts):
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -224,6 +235,7 @@ async def test_empty_retrieval_falls_through(caplog, prompts):
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -247,6 +259,7 @@ async def test_sentinel_response_escalates(caplog, prompts):
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -270,6 +283,7 @@ async def test_verifier_not_grounded_escalates(caplog, prompts):
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -295,6 +309,7 @@ async def test_guardrail_hedge_escalates_even_when_verifier_grounded(caplog, pro
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -326,6 +341,7 @@ async def test_profane_llm_output_escalates(caplog, prompts):
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -349,6 +365,7 @@ async def test_llm_generator_exception_falls_through(caplog, prompts):
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -373,6 +390,7 @@ async def test_llm_verifier_exception_falls_through(caplog, prompts):
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     with caplog.at_level(logging.INFO, logger="services.api.app.answerers.grounded_rag"):
         result = await answerer.try_answer(question="q", ctx=_ctx())
@@ -418,6 +436,7 @@ async def test_per_project_prompt_overrides_reach_llm_and_guardrails(
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     ctx = AnswerContext(
         chat_id=1,
@@ -446,36 +465,34 @@ _CATALOG_QUERY = "какие ещё услуги есть"
 
 
 @pytest.mark.asyncio
-async def test_catalog_query_bypasses_threshold_and_lists_offerings(prompts):
-    # Zero-overlap chunk (catalog retrieval returns it with score 0.0) would be
-    # rejected by the threshold gate for a normal query, but a catalog query
-    # must answer from it anyway.
-    rag = _FakeRag(
-        [
-            RagChunk(
-                id=1, source_id="kb-svc",
-                chunk_text="Багги-туры, морские прогулки и трансфер.",
-                score=0.0,
-            )
-        ]
-    )
+async def test_catalog_query_grounds_on_digest_and_lists_offerings(prompts):
+    # Catalog queries ground on the digest, not lemma retrieval — so the answer
+    # reflects the whole offerings set even with no lexical overlap.
+    rag = _FakeRag([])
     llm = _fake_llm(answer="У нас есть багги-туры, морские прогулки и трансфер.")
+    catalog = _FakeCatalogDigest(
+        digest="- Багги-туры\n- Морские прогулки\n- Трансфер"
+    )
     answerer = GroundedRagAnswerer(
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=catalog,
     )
     result = await answerer.try_answer(question=_CATALOG_QUERY, ctx=_ctx())
     assert result.handled is True
     assert "багги-туры" in result.text
-    # Retrieval was widened and switched to catalog mode.
-    assert rag.last_catalog_mode is True
-    assert rag.last_limit == 8
+    # Digest was consulted for this project; lemma retrieval was bypassed.
+    assert catalog.calls == [None]
+    assert rag.calls == []
+    # The digest is what the LLM grounded on.
+    snippets = llm.answer_grounded.await_args.kwargs["snippets"]
+    assert snippets[0].chunk_text == "- Багги-туры\n- Морские прогулки\n- Трансфер"
 
 
 @pytest.mark.asyncio
-async def test_catalog_query_with_no_chunks_escalates(caplog, prompts):
+async def test_catalog_query_empty_digest_escalates(caplog, prompts):
     rag = _FakeRag([])
     llm = _fake_llm()
     answerer = GroundedRagAnswerer(
@@ -483,17 +500,17 @@ async def test_catalog_query_with_no_chunks_escalates(caplog, prompts):
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(digest=""),
     )
     with caplog.at_level(
         logging.INFO, logger="services.api.app.answerers.grounded_rag"
     ):
         result = await answerer.try_answer(question=_CATALOG_QUERY, ctx=_ctx())
     assert result.handled is False
-    assert rag.last_catalog_mode is True
     llm.answer_grounded.assert_not_awaited()
     _assert_skip_log(
         caplog,
-        reason="no_chunks",
+        reason="catalog_empty",
         question=_CATALOG_QUERY,
         retrieved_count=0,
         top_score=None,
@@ -502,15 +519,14 @@ async def test_catalog_query_with_no_chunks_escalates(caplog, prompts):
 
 @pytest.mark.asyncio
 async def test_catalog_query_still_gated_by_verifier(caplog, prompts):
-    rag = _FakeRag(
-        [RagChunk(id=1, source_id="kb-svc", chunk_text="Прайс-лист.", score=0.0)]
-    )
+    rag = _FakeRag([])
     llm = _fake_llm(verdict_label="NOT_GROUNDED", verdict_reason="hallucination")
     answerer = GroundedRagAnswerer(
         rag_repository=rag,
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(digest="- Багги-туры"),
     )
     with caplog.at_level(
         logging.INFO, logger="services.api.app.answerers.grounded_rag"
@@ -522,7 +538,7 @@ async def test_catalog_query_still_gated_by_verifier(caplog, prompts):
         reason="verifier_not_grounded",
         question=_CATALOG_QUERY,
         retrieved_count=1,
-        top_score=0.0,
+        top_score=1.0,
     )
 
 
@@ -535,6 +551,7 @@ async def test_non_catalog_query_keeps_threshold_gate(caplog, prompts):
         openrouter_client=llm,
         persona_reader=lambda: ("Анна", "Иванова"),
         project_prompt_repository=prompts,
+        catalog_digest_service=_FakeCatalogDigest(),
     )
     with caplog.at_level(
         logging.INFO, logger="services.api.app.answerers.grounded_rag"
@@ -543,7 +560,6 @@ async def test_non_catalog_query_keeps_threshold_gate(caplog, prompts):
             question="когда придёт мой возврат?", ctx=_ctx()
         )
     assert result.handled is False
-    assert rag.last_catalog_mode is False
     assert rag.last_limit == 3
     _assert_skip_log(
         caplog,

@@ -228,6 +228,43 @@ async def test_answer_grounded_uses_overridden_system_prompt_template(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_summarize_offerings_uses_default_prompt_and_grounding_model(monkeypatch):
+    http_client = _http_mock(monkeypatch, content="- Тур на багги\n- Прокат лодок")
+    client = OpenRouterClient()
+    client.api_key = "token"
+    client.grounding_model = "digest-model"
+
+    result = await client.summarize_offerings(
+        knowledge_text="Мы возим на багги. Сдаём лодки в аренду."
+    )
+
+    assert result == "- Тур на багги\n- Прокат лодок"
+    sent = http_client.post.call_args.kwargs["json"]
+    assert sent["model"] == "digest-model"
+    system = sent["messages"][0]["content"]
+    assert "NO_OFFERINGS" in system
+    assert sent["messages"][1]["content"] == "Мы возим на багги. Сдаём лодки в аренду."
+
+
+@pytest.mark.asyncio
+async def test_summarize_offerings_respects_overrides(monkeypatch):
+    http_client = _http_mock(monkeypatch, content="NO_OFFERINGS")
+    client = OpenRouterClient()
+    client.api_key = "token"
+
+    result = await client.summarize_offerings(
+        knowledge_text="Сегодня хорошая погода.",
+        model="override-model",
+        system_prompt="List offerings or NONE.",
+    )
+
+    assert result == "NO_OFFERINGS"
+    sent = http_client.post.call_args.kwargs["json"]
+    assert sent["model"] == "override-model"
+    assert sent["messages"][0]["content"] == "List offerings or NONE."
+
+
+@pytest.mark.asyncio
 async def test_verify_grounding_uses_overridden_system_prompt(monkeypatch):
     http_client = _http_mock(monkeypatch, content="GROUNDED: ok.")
     client = OpenRouterClient()

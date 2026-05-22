@@ -32,7 +32,7 @@ def _repo(tmp_path) -> ProjectPromptRepository:
 
 def test_prompt_names_constants_are_consistent():
     assert PROMPT_NAMES == frozenset(PROMPT_NAME_LIST)
-    assert len(PROMPT_NAME_LIST) == 6
+    assert len(PROMPT_NAME_LIST) == 7
 
 
 def test_init_schema_is_idempotent(tmp_path):
@@ -60,6 +60,12 @@ def test_default_prompt_for_grounding_returns_constant():
 def test_default_prompt_for_verifier_returns_constant():
     text = default_prompt("verifier_system")
     assert "GROUNDED" in text
+
+
+def test_default_prompt_for_catalog_digest_returns_constant():
+    text = default_prompt("catalog_digest_system")
+    assert isinstance(text, str)
+    assert "NO_OFFERINGS" in text
 
 
 def test_default_prompt_for_inbound_ack_returns_settings_value():

@@ -21,9 +21,6 @@ from services.api.app.russian_text import get_russian_normalizer
 
 _SENTINEL = "ESCALATE_TO_HUMAN"
 _ANSWER_SNIPPET_MAX = 200
-# Catalog questions ("что ещё есть?") get a wider net so the grounded LLM can
-# list the project's offerings rather than escalating.
-_CATALOG_RETRIEVAL_LIMIT = 8
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +32,11 @@ class _RagReader(Protocol):
         query: str,
         limit: int = 3,
         project_id: int | None = None,
-        catalog_mode: bool = False,
     ) -> list[RagChunk]: ...
+
+
+class _CatalogDigestProvider(Protocol):
+    async def get_digest(self, *, project_id: int | None) -> str: ...
 
 
 class _PersonaReader(Protocol):
@@ -53,12 +53,14 @@ class GroundedRagAnswerer:
         openrouter_client: OpenRouterClient,
         persona_reader: _PersonaReader,
         project_prompt_repository: ProjectPromptRepository,
+        catalog_digest_service: _CatalogDigestProvider,
         weather_client: WeatherClient | None = None,
     ) -> None:
         self._rag = rag_repository
         self._llm = openrouter_client
         self._persona_reader = persona_reader
         self._prompts = project_prompt_repository
+        self._catalog_digest = catalog_digest_service
         self._weather_client = weather_client
 
     async def try_answer(
@@ -67,29 +69,44 @@ class GroundedRagAnswerer:
         catalog_query = is_service_catalog_query(
             text=question, normalizer=get_russian_normalizer()
         )
-        chunks = self._rag.retrieve(
-            query=question,
-            limit=_CATALOG_RETRIEVAL_LIMIT if catalog_query else 3,
-            project_id=ctx.project_id,
-            catalog_mode=catalog_query,
-        )
-        if not chunks:
-            return self._skip(
-                reason="no_chunks",
-                ctx=ctx,
-                question=question,
-                chunks=chunks,
+        if catalog_query:
+            # Aggregate questions ("что ещё есть?") need the whole offerings set,
+            # not a few lemma-overlapping lines. Ground on the catalog digest —
+            # an LLM-built summary of every non-confidential chunk in scope.
+            digest = await self._catalog_digest.get_digest(project_id=ctx.project_id)
+            if not digest.strip():
+                return self._skip(
+                    reason="catalog_empty",
+                    ctx=ctx,
+                    question=question,
+                    chunks=[],
+                )
+            chunks = [
+                RagChunk(
+                    id=0,
+                    source_id=f"catalog_digest:{ctx.project_id}",
+                    chunk_text=digest,
+                    score=1.0,
+                )
+            ]
+        else:
+            chunks = self._rag.retrieve(
+                query=question, limit=3, project_id=ctx.project_id
             )
-        # Catalog queries rarely share content words with the chunks they should
-        # surface, so the overlap score is meaningless here; skip the threshold
-        # gate and rely on the verifier/guardrails/ESCALATE sentinel downstream.
-        if not catalog_query and chunks[0].score < ctx.grounding_threshold:
-            return self._skip(
-                reason="below_threshold",
-                ctx=ctx,
-                question=question,
-                chunks=chunks,
-            )
+            if not chunks:
+                return self._skip(
+                    reason="no_chunks",
+                    ctx=ctx,
+                    question=question,
+                    chunks=chunks,
+                )
+            if chunks[0].score < ctx.grounding_threshold:
+                return self._skip(
+                    reason="below_threshold",
+                    ctx=ctx,
+                    question=question,
+                    chunks=chunks,
+                )
 
         logger.info(
             "grounded_rag_pipeline_entry",

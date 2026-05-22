@@ -134,7 +134,6 @@ class RagRepository:
         query: str,
         limit: int = 3,
         project_id: int | None = None,
-        catalog_mode: bool = False,
     ) -> list[RagChunk]:
         init_schema(self.db_path)
         query_tokens = _tokenize(query)
@@ -167,7 +166,6 @@ class RagRepository:
                 "denominator": denominator,
                 "project_id_filter": project_id,
                 "limit": limit,
-                "catalog_mode": catalog_mode,
             },
         )
 
@@ -190,10 +188,7 @@ class RagRepository:
             chunk_text = str(row["chunk_text"])
             chunk_tokens = _tokenize(chunk_text)
             matched = scoring_tokens.intersection(chunk_tokens)
-            # Catalog queries ("что ещё есть") share no content words with the
-            # item/service chunks they should surface, so keep zero-overlap
-            # chunks (score 0.0) and let the grounded LLM synthesise the list.
-            if not matched and not catalog_mode:
+            if not matched:
                 continue
             score = len(matched) / max(denominator, 1)
             chunk_project_id = (

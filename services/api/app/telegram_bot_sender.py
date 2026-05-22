@@ -23,28 +23,21 @@ class TelegramBotSender:
     async def send_message(self, *, chat_id: int, text: str) -> int:
         self._require_token()
 
-        # One retry on transient failure (5xx or network error). 4xx is
-        # client error (bad chat_id, blocked bot, message too long) — those
-        # never become valid on retry, so we surface them immediately.
-        # Idempotency note: Telegram does not dedupe sendMessage calls by
-        # content, so a successful-but-disconnected first attempt would
-        # double-post. We rely on api-side idempotency
-        # (answer_traces.trace_id) to make that case rare; this retry is
-        # specifically for fully-failed first attempts.
+        # sendMessage is NOT idempotent and Telegram offers no dedup key, so a
+        # retry can only be safe when we KNOW the first attempt never reached
+        # Telegram. That is true only for connection-establishment failures
+        # (ConnectError / ConnectTimeout): the request body was never sent.
+        # Everything else — read timeouts, mid-stream transport errors, and any
+        # HTTP status (4xx or 5xx) — may have been raised *after* Telegram
+        # already delivered the message, so retrying would double-post the same
+        # text to the customer. We surface those immediately instead.
         url = f"{self._base_url}/bot{self.bot_token}/sendMessage"
         body = {"chat_id": chat_id, "text": text}
         async with httpx.AsyncClient(timeout=15) as client:
             try:
                 response = await client.post(url, json=body)
                 response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code if exc.response is not None else 0
-                if status >= 500:
-                    response = await client.post(url, json=body)
-                    response.raise_for_status()
-                else:
-                    raise
-            except httpx.TransportError:
+            except (httpx.ConnectError, httpx.ConnectTimeout):
                 response = await client.post(url, json=body)
                 response.raise_for_status()
             payload = response.json()

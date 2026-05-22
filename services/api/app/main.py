@@ -38,6 +38,10 @@ from services.api.app.answerers import AnswerContext, AnswerPipeline
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
 from services.api.app.answerers.weather_client import WeatherClient
 from services.api.app.backups import BackupError, BackupRepository
+from services.api.app.catalog_digest import (
+    CatalogDigestRepository,
+    CatalogDigestService,
+)
 from services.api.app.hitl import HitlTicketRepository
 from services.api.app.incidents import IncidentRepository
 from services.api.app.knowledge import KnowledgeCandidateRepository
@@ -122,6 +126,11 @@ weather_client = WeatherClient(base_url=settings.weather_provider_base_url)
 project_repository = ProjectRepository(settings.projects_db_path)
 operator_repository = OperatorRepository(settings.operators_db_path)
 project_prompt_repository = ProjectPromptRepository(settings.hitl_ticket_db_path)
+catalog_digest_service = CatalogDigestService(
+    repository=CatalogDigestRepository(settings.rag_db_path),
+    openrouter_client=openrouter_client,
+    project_prompt_repository=project_prompt_repository,
+)
 admin_auth_repository = AdminAuthRepository(settings.admin_session_db_path)
 admin_nl_ops_repository = AdminNlOpsRepository(settings.nl_ops_db_path)
 web_auth_repository = WebAuthRepository(db_path=settings.web_auth_db_path)
@@ -197,6 +206,7 @@ answer_pipeline = AnswerPipeline(
             openrouter_client=openrouter_client,
             persona_reader=_effective_bot_persona,
             project_prompt_repository=project_prompt_repository,
+            catalog_digest_service=catalog_digest_service,
             weather_client=weather_client,
         ),
     ]

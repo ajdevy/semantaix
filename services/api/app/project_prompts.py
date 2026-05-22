@@ -20,6 +20,7 @@ PROMPT_NAME_LIST: tuple[str, ...] = (
     "grounding_system",
     "verifier_system",
     "inbound_ack",
+    "catalog_digest_system",
     "guardrail_hedges",
     "guardrail_policy",
     "guardrail_profanity",
@@ -115,6 +116,8 @@ def default_prompt(prompt_name: str) -> str:
         return openrouter_client._GROUNDING_SYSTEM_PROMPT_TEMPLATE
     if prompt_name == "verifier_system":
         return openrouter_client._VERIFIER_SYSTEM_PROMPT
+    if prompt_name == "catalog_digest_system":
+        return openrouter_client._CATALOG_DIGEST_SYSTEM_PROMPT
     if prompt_name == "inbound_ack":
         from platform_common.settings import get_settings
 

@@ -27,6 +27,11 @@ class _StubLLM:
         return GroundingVerdict(label="GROUNDED", reason="ok")
 
 
+class _StubCatalog:
+    async def get_digest(self, *, project_id: int | None) -> str:
+        return ""
+
+
 @pytest.mark.story("10-06")
 @pytest.mark.asyncio
 async def test_rag_scope_isolates_projects(tmp_path):
@@ -52,6 +57,7 @@ async def test_rag_scope_isolates_projects(tmp_path):
         project_prompt_repository=ProjectPromptRepository(
             str(tmp_path / "prompts.sqlite3")
         ),
+        catalog_digest_service=_StubCatalog(),
     )
 
     from datetime import UTC, datetime
