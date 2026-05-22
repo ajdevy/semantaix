@@ -1,0 +1,80 @@
+sequenceDiagram
+    autonumber
+    actor C as Customer
+    participant TG as Telegram
+    participant BG as bot_gateway<br/>/telegram/webhook
+    participant API as api<br/>/conversations/inbound
+    participant RAG as RAG / Qdrant
+    participant LLM as OpenRouter LLM
+    participant GR as Guardrails<br/>(regex + profanity)
+    participant H as HITL store (SQLite)
+    actor OP as Operator
+
+    %% ---------- Ingress ----------
+    C->>TG: send message
+    TG->>BG: webhook update
+    BG->>BG: derive trace_id, normalize, persist
+    alt sender is operator
+        BG-->>OP: (handled as operator reply — see below)
+    else sender is customer
+        BG->>API: POST forward_inbound {text, chat_id, username, trace_id}
+    end
+
+    %% ---------- Idempotency ----------
+    opt duplicate delivery (same Telegram update_id)
+        API-->>BG: cached result (no side effects)
+    end
+
+    %% ---------- Answer pipeline ----------
+    API->>API: build AnswerContext, run AnswerPipeline
+    API->>RAG: retrieve(question, limit=3)
+    RAG-->>API: top-3 chunks + scores
+
+    alt no chunks OR top score < grounding_threshold (0.6)
+        Note over API: escalate
+    else grounded enough
+        API->>LLM: answer_grounded(question, snippets, scheduling_ctx)
+        LLM-->>API: answer  |  ESCALATE_TO_HUMAN
+        alt answer == ESCALATE_TO_HUMAN
+            Note over API: escalate
+        else got candidate answer
+            API->>LLM: verify_grounding(question, answer, snippets)
+            LLM-->>API: GROUNDED | NOT_GROUNDED
+            alt NOT_GROUNDED
+                Note over API: escalate
+            else GROUNDED
+                API->>GR: evaluate_suggestion + profanity check
+                GR-->>API: valid? / score
+                alt blocked (hedge, policy, length, profanity)
+                    Note over API: escalate
+                else all 4 gates passed
+                    API->>TG: send grounded answer
+                    TG->>C: answer
+                    API->>API: persist trace (response_mode=grounded_rag)
+                end
+            end
+        end
+    end
+
+    %% ---------- Escalation / HITL ----------
+    alt escalated (any gate failed)
+        alt active ticket already open for chat
+            API->>H: find_active_for_chat(chat_id)
+            API-->>OP: DM follow-up question (no new ack, no new ticket)
+        else new escalation
+            API->>TG: ack ("our team will help")
+            TG->>C: ack
+            API->>H: create ticket + assign operator
+            API-->>OP: DM "HITL #id | from <customer> | <question>"
+            API->>API: persist trace (response_mode=human_only, escalated)
+        end
+    end
+
+    %% ---------- Operator reply path ----------
+    OP->>TG: reply (quoting "HITL ticket #id")
+    TG->>BG: webhook update (sender = operator)
+    BG->>BG: extract ticket_id (from quote / single open ticket)
+    BG->>API: POST deliver_operator_reply(ticket_id, reply_text)
+    API->>H: verify assignee, resolve(ticket_id)
+    API->>TG: send operator reply to customer
+    TG->>C: operator reply
