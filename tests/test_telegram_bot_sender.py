@@ -162,13 +162,23 @@ def _http_status_error(status: int) -> httpx.HTTPStatusError:
 
 
 @pytest.mark.asyncio
-async def test_send_message_retries_once_on_5xx(monkeypatch):
-    """Telegram 5xx is the only thing the retry should mask. A second
-    attempt after a transient outage avoids spurious incident reports;
-    api-side idempotency (answer_traces.trace_id) prevents the second
-    attempt becoming a duplicate user-visible message even when the first
-    actually went through and the disconnect happened on the response."""
+async def test_send_message_does_not_retry_on_5xx(monkeypatch):
+    """sendMessage is NOT idempotent and Telegram has no dedup key, so a 5xx
+    (which may have been raised AFTER the message was already delivered) must
+    not be retried — doing so double-posts to the customer."""
     client = _FlakyClient(first_error=_http_status_error(503))
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
+    sender = TelegramBotSender(bot_token="token")
+    with pytest.raises(httpx.HTTPStatusError):
+        await sender.send_message(chat_id=10, text="hi")
+    assert client.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_send_message_retries_once_on_connect_error(monkeypatch):
+    """A ConnectError means the connection was never established, so the
+    request never reached Telegram — safe to retry without double-posting."""
+    client = _FlakyClient(first_error=httpx.ConnectError("dns failed"))
     monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
     sender = TelegramBotSender(bot_token="token")
     assert await sender.send_message(chat_id=10, text="hi") == 77
@@ -176,12 +186,24 @@ async def test_send_message_retries_once_on_5xx(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_message_retries_once_on_transport_error(monkeypatch):
-    client = _FlakyClient(first_error=httpx.ConnectError("dns failed"))
+async def test_send_message_retries_once_on_connect_timeout(monkeypatch):
+    client = _FlakyClient(first_error=httpx.ConnectTimeout("connect timed out"))
     monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
     sender = TelegramBotSender(bot_token="token")
     assert await sender.send_message(chat_id=10, text="hi") == 77
     assert client.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_send_message_does_not_retry_on_read_timeout(monkeypatch):
+    """A ReadTimeout happens after the request was sent — Telegram may have
+    already delivered the message, so retrying would double-post."""
+    client = _FlakyClient(first_error=httpx.ReadTimeout("read timed out"))
+    monkeypatch.setattr(sender_module.httpx, "AsyncClient", lambda timeout: client)
+    sender = TelegramBotSender(bot_token="token")
+    with pytest.raises(httpx.ReadTimeout):
+        await sender.send_message(chat_id=10, text="hi")
+    assert client.call_count == 1
 
 
 @pytest.mark.asyncio
