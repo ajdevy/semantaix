@@ -184,3 +184,37 @@ retrieval, intent, and guardrails together.
 
 The Docker-first deployment model and observability conventions (`trace_id`,
 structured logs, per-service health checks) are unchanged.
+
+## Calendar Availability & Scheduling (api + bot_gateway + web redirect) — Epic 11 (planned)
+
+Read-only availability first (PRD **FR-18–FR-22**), opt-in per project and default-off. New `services/api/app/calendar/` package; new SQLite store `semantaix_calendar.db`. Follows the project-context rules: httpx transport, sync SQLite via `asyncio.to_thread`, injected clock + http client, per-layer failure conventions, 100% coverage, one PR per story.
+
+**Components (`services/api/app/calendar/`):**
+
+| Component | Type | Responsibility |
+|---|---|---|
+| `CalendarAvailabilityAnswerer` | Answerer (Protocol) | Orchestrates gate → intent → service-resolve → freeBusy → availability → answer/escalate. Placed **before** `GroundedRagAnswerer` in the pipeline. |
+| `CalendarOAuthClient` | Client | `google-auth-oauthlib` Flow (code exchange) + `google-auth` `Credentials.refresh()`; **sync, via `asyncio.to_thread`** (google-auth owns token transport). |
+| `CalendarFreeBusyClient` | Client (httpx) | `POST /freeBusy` over an **injected** `httpx.AsyncClient` with explicit timeout; returns a frozen `FreeBusy` dataclass (busy intervals only). |
+| `compute_availability(...)` | Pure function | `(now, busy_blocks, service_rule, project_tz, requested_start) → AvailabilityResult`. Clock injected, tz-aware, no I/O — the 100%-coverage core; slot-fit `[start, start+duration)`. |
+| `service_resolver` | Pure function | FR-22: lemma-match free Russian text → service via `RussianNormalizer`; `resolved | none | ambiguous`. |
+| `CalendarTokenRepository` | Repository (sync sqlite3) | Fernet-encrypted refresh tokens, **upsert on `(project_id, operator)`**; raises `TokenNotFound` / `TokenRefreshFailed`. |
+| `CalendarOAuthStateRepository` | Repository (sync sqlite3) | Single-use `state` with TTL; atomic `consume(state)`. |
+| `CalendarSettingsRepository` | Repository (sync sqlite3) | Per-project enablement, calendar operator, project timezone, look-ahead; per-service rules. |
+
+**Data store** `semantaix_calendar.db`: `calendar_project_settings`, `calendar_operator_tokens`, `calendar_oauth_pending_state`, `calendar_service_rules` (see PRD §6).
+
+**Connect flow:** operator `/connect_calendar` (bot_gateway, operator-gated, mirrors `kb_intent.py`) → api mints single-use `state` + consent URL → bot DMs URL → operator consents → Google redirects to the **api callback route** (browser-facing, public via nginx, rate-limited; `state` is the sole browser↔operator binding) → validate+consume `state` → `to_thread(Flow.fetch_token)` → encrypt+upsert token → HTML + Telegram confirmation.
+
+**Availability flow:** inbound → pipeline → `CalendarAvailabilityAnswerer`: (1) **gate** — cached settings read; disabled → `handled=False`; (2) **intent** — reuse the scheduling regex; non-scheduling → `handled=False`; (3) **service resolve** (FR-22) — none/ambiguous → one clarifying turn, else escalate; (4) **token** — `to_thread(repo.get)`; missing/reconnect → "not connected"/escalate; (5) **freeBusy** — refresh under per-operator lock if near expiry, one httpx call with timeout; (6) **`compute_availability`** in project tz → Russian answer; any failure → escalate to the calendar operator.
+
+**Resilience & rate limiting:**
+
+- **Token expiration:** access token cached with expiry; refresh within a skew window guarded by a **per-operator `asyncio.Lock`** (single-flight). Refresh-token expiry (Google 7-day "Testing", 6-month-unused, token-cap) or revocation is caught on the failing refresh → operator → reconnect state + Telegram notice + **incident** + dead row cleared. No customer-visible error.
+- **API timeouts:** explicit timeouts on the httpx `freeBusy` call and the `to_thread`-wrapped google-auth calls; a timeout is a provider error → **escalate, never guess**; repeated occurrences emit incidents.
+- **Rate limiting:** *inbound* — the unauthenticated OAuth callback and `/connect_calendar` are rate-limited per operator; *outbound* — Google `429` → respect `Retry-After` with one bounded retry then escalate; volume bounded by **one `freeBusy` call per question** (no result caching in v1, also avoids stale "free").
+- **Incidents (Epic-02 integration):** OAuth exchange failure, refresh failure, freeBusy provider error/timeout, 429 exhaustion.
+
+**Key decisions:** (1) **standalone answerer** before `GroundedRagAnswerer`, not a `scheduling_context` signal (deterministic answer; cheap opt-in gate = fast `handled=False`); (2) **callback in `api`** (co-located with token store/client; avoids cross-service handoff of the auth `code`); (3) **google-auth owns token transport, httpx owns `freeBusy`** ("hand-roll the request, never the cryptography"; reject `google-api-python-client`); (4) **availability is a pure clock-injected tz-aware function**, repos sync via `to_thread`.
+
+**Deferred:** multi-operator selection (v1 = one calendar operator/project), multi-calendar selection (v1 = primary calendar), freeBusy result caching, booking/event-creation (read-only first).

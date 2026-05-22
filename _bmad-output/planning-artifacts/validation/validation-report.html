@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Validation Report — Semantaix PRD (Calendar)</title>
+<style>
+  :root{--bg:#0f1115;--card:#171a21;--ink:#e6e8ec;--muted:#9aa3b2;--line:#262b35;
+    --crit:#ff5c5c;--high:#ff9f43;--med:#ffd24a;--low:#7bd88f;--good:#4aa8ff;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:920px;margin:0 auto;padding:32px 22px 80px}
+  h1{font-size:24px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:20px}
+  .sub code{color:#c8d0db}
+  .grade{display:inline-block;padding:6px 14px;border-radius:999px;font-weight:700;letter-spacing:.3px;margin:6px 0 18px}
+  .grade-fair{background:rgba(255,210,74,.14);color:var(--med);border:1px solid rgba(255,210,74,.4)}
+  .synth{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:22px}
+  .cards{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:22px}
+  .chip{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:8px 12px;font-size:13px}
+  .chip b{color:#fff}
+  .v-strong{color:var(--low)}.v-adequate{color:var(--good)}.v-thin{color:var(--med)}.v-broken{color:var(--crit)}
+  .counts{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 22px}
+  .count{flex:1;min-width:120px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;text-align:center}
+  .count .n{font-size:26px;font-weight:800;display:block}
+  .count.c .n{color:var(--crit)}.count.h .n{color:var(--high)}.count.m .n{color:var(--med)}.count.l .n{color:var(--low)}
+  details{background:var(--card);border:1px solid var(--line);border-radius:10px;margin:0 0 10px;padding:0 16px}
+  summary{cursor:pointer;font-weight:700;padding:13px 0;list-style:none}
+  summary::-webkit-details-marker{display:none}
+  .sev{display:inline-block;min-width:64px;font-size:11px;font-weight:800;letter-spacing:.4px;text-transform:uppercase;padding:2px 8px;border-radius:5px;margin-right:8px}
+  .sev.crit{background:rgba(255,92,92,.16);color:var(--crit)}
+  .sev.high{background:rgba(255,159,67,.16);color:var(--high)}
+  .sev.med{background:rgba(255,210,74,.14);color:var(--med)}
+  .sev.low{background:rgba(123,216,143,.14);color:var(--low)}
+  .f{border-top:1px solid var(--line);padding:13px 0}
+  .f:first-child{border-top:none}
+  .f .ttl{font-weight:600}
+  .f .loc{color:var(--muted);font-size:12px}
+  .f .fix{color:#c8d0db;font-size:13.5px;margin-top:4px}
+  .f .fix b{color:#fff}
+  footer{color:var(--muted);font-size:12px;margin-top:26px;border-top:1px solid var(--line);padding-top:14px}
+  a{color:var(--good)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Validation Report — Semantaix PRD</h1>
+  <div class="sub">Calendar Availability &amp; Scheduling (FR-18–FR-21) · PRD: <code>_bmad-output/planning-artifacts/PRD.md</code> · Run 2026-05-22</div>
+  <span class="grade grade-fair">GRADE: FAIR</span>
+
+  <div class="synth">
+    <p><b>PRD body is decision-ready; the new calendar FRs aren't yet.</b> The Calendar feature group is unusually strong on its safety thesis (escalate-on-uncertainty, read-only scope, encrypted token storage, default-off) and has <b>no conflicts</b> with the decision log. But the adversarial pass rates it <b>NOT READY for architecture</b>: the crypto prose outruns the product spec.</p>
+    <p>Four load-bearing questions are unanswered — <b>whose</b> calendar answers (multi-operator), <b>which</b> service a free-text Russian question maps to, <b>whose</b> timezone interprets the customer's time, and recovery when a token is revoked Google-side. Two operational time-bombs the "read-only first" framing hides — Google OAuth app-verification for the sensitive scope, and refresh-token long-term expiry — must be named as release dependencies.</p>
+  </div>
+
+  <div class="cards">
+    <span class="chip">Decision-readiness <b class="v-strong">strong</b></span>
+    <span class="chip">Substance <b class="v-strong">strong</b></span>
+    <span class="chip">Strategic coherence <b class="v-strong">strong</b></span>
+    <span class="chip">Done-ness clarity <b class="v-adequate">adequate</b></span>
+    <span class="chip">Scope honesty <b class="v-strong">strong</b></span>
+    <span class="chip">Downstream usability <b class="v-adequate">adequate</b></span>
+    <span class="chip">Shape fit <b class="v-strong">strong</b></span>
+  </div>
+
+  <div class="counts">
+    <div class="count c"><span class="n">4</span>Critical</div>
+    <div class="count h"><span class="n">6</span>High</div>
+    <div class="count m"><span class="n">6</span>Medium</div>
+    <div class="count l"><span class="n">6</span>Low</div>
+  </div>
+
+  <details open>
+    <summary>Critical (4) — resolve before epic-11 stories</summary>
+    <div class="f"><div><span class="sev crit">crit</span><span class="ttl">C1 — Multi-operator selection undefined</span> <span class="loc">FR-18/19/20/§6</span></div><div class="fix">Tokens stored per-operator + multi-operator scoping cited, but nothing says which operator's calendar answers a question. <b>Fix:</b> bind service→operator or define union/intersect + zero/multi-match behavior.</div></div>
+    <div class="f"><div><span class="sev crit">crit</span><span class="ttl">C2 — "Service" entity + free-text→service mapping undefined</span> <span class="loc">FR-19/20</span></div><div class="fix">No requirement for resolving free Russian text to a service row (lemma match via RussianNormalizer), nor no/ambiguous-match paths. <b>Fix:</b> add a service-resolution FR.</div></div>
+    <div class="f"><div><span class="sev crit">crit</span><span class="ttl">C3 — Customer timezone source unspecified</span> <span class="loc">FR-19/§8</span></div><div class="fix">Telegram doesn't expose customer tz; boundary answers become coin-flips. <b>Fix:</b> interpret times in project tz; escalate ambiguous customer-local times.</div></div>
+    <div class="f"><div><span class="sev crit">crit</span><span class="ttl">C4 — Google-side token revocation: no detection/notify/incident/cleanup</span> <span class="loc">FR-18/21/NFR-3</span></div><div class="fix">Silent indefinite degradation; violates Epic-02 incident-integration mandate. <b>Fix:</b> detect-on-next-use → reconnect state + operator notice + incident + token cleanup.</div></div>
+  </details>
+
+  <details open>
+    <summary>High (6)</summary>
+    <div class="f"><div><span class="sev high">high</span><span class="ttl">H1 — Google OAuth consent-screen verification ignored</span> <span class="loc">FR-18/NFR-3</span></div><div class="fix"><code>calendar.readonly</code> is a sensitive scope: unverified app → warning + ~100-user cap until Google verification (multi-week external dependency). <b>Fix:</b> add to §9 release readiness.</div></div>
+    <div class="f"><div><span class="sev high">high</span><span class="ttl">H2 — OAuth <code>state</code> TTL/storage/single-use unspecified</span> <span class="loc">FR-18/§6</span></div><div class="fix">"Validates state" is untestable without binding+TTL+single-use; mirror the 5-min login-code pattern; §6 has no pending-state table.</div></div>
+    <div class="f"><div><span class="sev high">high</span><span class="ttl">H3 — Refresh-token long-term expiry unhandled</span> <span class="loc">FR-18/NFR-3</span></div><div class="fix">7-day (Testing status) / 6-month-unused / token-cap rules → operators silently disconnect, compounding H1.</div></div>
+    <div class="f"><div><span class="sev high">high</span><span class="ttl">H4 — Token collision / reconnect overwrite semantics</span> <span class="loc">FR-18/§6</span></div><div class="fix">Re-consent upsert? operator in two projects? shared Google account? Composite-key conflict behavior absent.</div></div>
+    <div class="f"><div><span class="sev high">high</span><span class="ttl">H5 — FR-21 "no measurable latency" guarantee premature</span> <span class="loc">FR-21</span></div><div class="fix">Answerer-vs-scheduling_context placement undecided governs ordering; decide placement or soften the guarantee + give a number.</div></div>
+    <div class="f"><div><span class="sev high">high</span><span class="ttl">H6 — Callback public exposure &amp; identity binding</span> <span class="loc">FR-18</span></div><div class="fix">Browser at callback isn't a Telegram-authenticated user — binding rests entirely on <code>state</code>; no rate-limit / browser-response requirement. "authenticated operator" overstates.</div></div>
+  </details>
+
+  <details>
+    <summary>Medium (6)</summary>
+    <div class="f"><div><span class="sev med">med</span><span class="ttl">Customer-facing wording language</span> <span class="loc">FR-19/21</span></div><div class="fix">English strings vs Russian-first; per "content is DATA" they belong in <code>data/*</code>. State quoted strings are illustrative.</div></div>
+    <div class="f"><div><span class="sev med">med</span><span class="ttl">M1 — Free/busy result staleness/caching TTL</span> <span class="loc">FR-19</span></div><div class="fix">Cached freeBusy → just-booked slot still reads free. State TTL or "one live call per question."</div></div>
+    <div class="f"><div><span class="sev med">med</span><span class="ttl">M2 — Working-hours/service-days granularity vague</span> <span class="loc">FR-20</span></div><div class="fix">Days-of-week vs dates vs holiday closures (repo has <code>holidays</code>) vs lunch windows. AC omits "dates."</div></div>
+    <div class="f"><div><span class="sev med">med</span><span class="ttl">M3 — "Duration"/slot-fitting semantics undefined</span> <span class="loc">FR-19/20</span></div><div class="fix">"relevant window" undefined → FR-19 AC not deterministically implementable.</div></div>
+    <div class="f"><div><span class="sev med">med</span><span class="ttl">M5 — Escalation routing unspecified</span> <span class="loc">FR-19/FR-3</span></div><div class="fix">Route to connected calendar operator or hitl_primary_operator, with what context? Interacts with C1.</div></div>
+    <div class="f"><div><span class="sev med">med</span><span class="ttl">M6 — Alerts/incidents not extended for calendar failures</span> <span class="loc">§7/FR-8</span></div><div class="fix">Violates the "every epic integrates with incidents" rule. Overlaps C4.</div></div>
+    <div class="f"><div><span class="sev med">med</span><span class="ttl">No Glossary; "service" overloaded</span> <span class="loc">FR-19/20</span></div><div class="fix">microservice vs bookable offering; project/operator/tenant undefined. Add a short Glossary.</div></div>
+  </details>
+
+  <details>
+    <summary>Low (6)</summary>
+    <div class="f"><div><span class="sev low">low</span><span class="ttl">No [NOTE FOR PM] on the multi-operator decision</span> <span class="loc">FR-19/20</span></div></div>
+    <div class="f"><div><span class="sev low">low</span><span class="ttl">freeBusy look-ahead horizon unspecified</span> <span class="loc">FR-19</span></div></div>
+    <div class="f"><div><span class="sev low">low</span><span class="ttl">NFR-4 still a placeholder (no latency numbers)</span> <span class="loc">§5</span></div></div>
+    <div class="f"><div><span class="sev low">low</span><span class="ttl">FR-15 "Tenant-Scoped" terminology lag</span> <span class="loc">FR-15/§2.2</span></div></div>
+    <div class="f"><div><span class="sev low">low</span><span class="ttl">L1 — Disconnect: Google revoke vs local delete</span> <span class="loc">FR-18</span></div></div>
+    <div class="f"><div><span class="sev low">low</span><span class="ttl">L2 — "bookable" wording leaks write-intent</span> <span class="loc">FR-20</span></div></div>
+    <div class="f"><div><span class="sev low">low</span><span class="ttl">L4 — Multiple Google calendars per account — which is "busy"?</span> <span class="loc">FR-18/19</span></div></div>
+    <div class="f"><div><span class="sev low">low</span><span class="ttl">L3 — availability-answer-rate metric lacks a target</span> <span class="loc">§7</span></div></div>
+  </details>
+
+  <footer>
+    Rubric: <code>.claude/skills/bmad-prd/assets/prd-validation-checklist.md</code> ·
+    Reviewer files: <code>review-rubric.md</code>, <code>review-adversarial-general.md</code> ·
+    Generated 2026-05-22T00:00:00Z
+  </footer>
+</div>
+</body>
+</html>
