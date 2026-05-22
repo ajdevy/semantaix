@@ -77,6 +77,25 @@ async def test_answer_grounded_uses_grounding_model_and_sends_context(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_answer_grounded_system_prompt_suppresses_date_unless_asked(monkeypatch):
+    http_client = _http_mock(monkeypatch, content="ok")
+    client = OpenRouterClient()
+    client.api_key = "token"
+    await client.answer_grounded(
+        question="какие услуги есть",
+        snippets=[_snippet()],
+        today_iso="2026-05-11",
+        persona_first_name="Анна",
+        persona_last_name="Иванова",
+    )
+    system = http_client.post.call_args.kwargs["json"]["messages"][0]["content"]
+    # The date is reference-only: the model must not volunteer it in answers
+    # unless the customer explicitly asks about timing.
+    assert "не упоминай её в ответе" in system
+    assert "если пользователь явно не" in system
+
+
+@pytest.mark.asyncio
 async def test_answer_grounded_appends_scheduling_context(monkeypatch):
     http_client = _http_mock(monkeypatch, content="ok")
     client = OpenRouterClient()
