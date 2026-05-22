@@ -38,6 +38,11 @@ from services.api.app.answerers import AnswerContext, AnswerPipeline
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
 from services.api.app.answerers.weather_client import WeatherClient
 from services.api.app.backups import BackupError, BackupRepository
+from services.api.app.calendar.oauth_state_repository import (
+    CalendarOAuthStateRepository,
+)
+from services.api.app.calendar.settings_repository import CalendarSettingsRepository
+from services.api.app.calendar.token_repository import init_token_schema
 from services.api.app.catalog_digest import (
     CatalogDigestRepository,
     CatalogDigestService,
@@ -133,6 +138,16 @@ catalog_digest_service = CatalogDigestService(
 )
 admin_auth_repository = AdminAuthRepository(settings.admin_session_db_path)
 admin_nl_ops_repository = AdminNlOpsRepository(settings.nl_ops_db_path)
+# Epic 11: bootstrap the calendar DB idempotently. Calendar stays opt-in and
+# disabled for every project until a settings row is explicitly enabled. The
+# token table is created without an encryption key; crypto ops require one.
+calendar_settings_repository = CalendarSettingsRepository(
+    db_path=settings.calendar_db_path
+)
+calendar_oauth_state_repository = CalendarOAuthStateRepository(
+    db_path=settings.calendar_db_path
+)
+init_token_schema(settings.calendar_db_path)
 web_auth_repository = WebAuthRepository(db_path=settings.web_auth_db_path)
 admin_auth_service = AdminAuthService(
     web_auth_repository=web_auth_repository,

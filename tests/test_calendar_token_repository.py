@@ -1,0 +1,117 @@
+import logging
+import sqlite3
+
+import pytest
+from cryptography.fernet import Fernet
+
+from services.api.app.calendar.token_repository import (
+    STATUS_CONNECTED,
+    STATUS_RECONNECT_NEEDED,
+    CalendarTokenRepository,
+    TokenNotFound,
+    init_token_schema,
+)
+
+
+def _repo(tmp_path) -> CalendarTokenRepository:
+    return CalendarTokenRepository(
+        db_path=str(tmp_path / "calendar.sqlite3"),
+        fernet=Fernet(Fernet.generate_key()),
+    )
+
+
+def test_init_schema_creates_table(tmp_path):
+    path = str(tmp_path / "calendar.sqlite3")
+    _repo_path = CalendarTokenRepository(
+        db_path=path, fernet=Fernet(Fernet.generate_key())
+    )
+    _repo_path.init_schema()
+    with sqlite3.connect(path) as connection:
+        names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert "calendar_operator_tokens" in names
+
+
+def test_init_token_schema_without_key(tmp_path):
+    path = str(tmp_path / "calendar.sqlite3")
+    init_token_schema(path)
+    init_token_schema(path)  # idempotent
+    with sqlite3.connect(path) as connection:
+        names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert "calendar_operator_tokens" in names
+
+
+def test_encrypt_decrypt_round_trip(tmp_path):
+    repo = _repo(tmp_path)
+    repo.upsert(1, "@op", "secret-refresh-token")
+    assert repo.get_refresh_token(1, "@op") == "secret-refresh-token"
+
+
+def test_get_refresh_token_raises_when_missing(tmp_path):
+    repo = _repo(tmp_path)
+    with pytest.raises(TokenNotFound):
+        repo.get_refresh_token(1, "@nobody")
+
+
+def test_upsert_overwrites(tmp_path):
+    repo = _repo(tmp_path)
+    repo.upsert(1, "@op", "first-token")
+    repo.upsert(1, "@op", "second-token")
+    assert repo.get_refresh_token(1, "@op") == "second-token"
+
+
+def test_set_status_and_delete(tmp_path):
+    path = str(tmp_path / "calendar.sqlite3")
+    repo = CalendarTokenRepository(db_path=path, fernet=Fernet(Fernet.generate_key()))
+    repo.upsert(1, "@op", "token")
+    repo.set_status(1, "@op", STATUS_RECONNECT_NEEDED)
+    with sqlite3.connect(path) as connection:
+        status = connection.execute(
+            "SELECT status FROM calendar_operator_tokens "
+            "WHERE project_id = ? AND operator = ?",
+            (1, "@op"),
+        ).fetchone()[0]
+    assert status == STATUS_RECONNECT_NEEDED
+    assert STATUS_CONNECTED == "connected"
+
+    repo.delete(1, "@op")
+    with pytest.raises(TokenNotFound):
+        repo.get_refresh_token(1, "@op")
+
+
+def test_stored_blob_is_not_plaintext(tmp_path):
+    path = str(tmp_path / "calendar.sqlite3")
+    repo = CalendarTokenRepository(db_path=path, fernet=Fernet(Fernet.generate_key()))
+    plaintext = "super-secret-refresh-token"
+    repo.upsert(1, "@op", plaintext)
+    with sqlite3.connect(path) as connection:
+        stored = connection.execute(
+            "SELECT refresh_token_encrypted FROM calendar_operator_tokens "
+            "WHERE project_id = ? AND operator = ?",
+            (1, "@op"),
+        ).fetchone()[0]
+    assert plaintext.encode("utf-8") not in bytes(stored)
+    assert stored != plaintext
+
+
+def test_token_and_key_never_logged(tmp_path, caplog):
+    key = Fernet.generate_key()
+    repo = CalendarTokenRepository(db_path=str(tmp_path / "c.sqlite3"), fernet=Fernet(key))
+    plaintext = "leaky-refresh-token"
+    with caplog.at_level(logging.DEBUG):
+        repo.upsert(1, "@op", plaintext)
+        repo.get_refresh_token(1, "@op")
+        repo.set_status(1, "@op", STATUS_RECONNECT_NEEDED)
+        repo.delete(1, "@op")
+    logged = caplog.text
+    assert plaintext not in logged
+    assert key.decode("utf-8") not in logged
