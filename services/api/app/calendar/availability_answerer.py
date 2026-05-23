@@ -334,8 +334,19 @@ class CalendarAvailabilityAnswerer:
         reason: str,
         project_settings: CalendarProjectSettings | None,
     ) -> AnswerResult:
-        """Ask exactly once (FR-22); on a second unresolved turn, escalate."""
-        already_asked = ctx.chat_id is not None and await asyncio.to_thread(
+        """Ask exactly once (FR-22); on a second unresolved turn, escalate.
+
+        Without a ``chat_id`` we cannot track the one-turn clarify state, so we
+        cannot honor the FR-22 contract — escalate immediately rather than risk
+        looping clarify on every inbound.
+        """
+        if ctx.chat_id is None:
+            return self._escalate(
+                ctx=ctx,
+                reason=f"{reason}_no_chat_id",
+                project_settings=project_settings,
+            )
+        already_asked = await asyncio.to_thread(
             self._clarify.is_armed, ctx.chat_id
         )
         if already_asked:
@@ -344,10 +355,9 @@ class CalendarAvailabilityAnswerer:
                 reason=f"{reason}_after_clarify",
                 project_settings=project_settings,
             )
-        if ctx.chat_id is not None:
-            await asyncio.to_thread(
-                self._clarify.arm, ctx.chat_id, trace_id=ctx.trace_id
-            )
+        await asyncio.to_thread(
+            self._clarify.arm, ctx.chat_id, trace_id=ctx.trace_id
+        )
         logger.info(
             "calendar_availability_clarify",
             extra={"trace_id": ctx.trace_id, "reason": reason},

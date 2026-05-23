@@ -96,6 +96,18 @@ class CalendarFreeBusyClient:
             self._emit_incident(trace_id=trace_id, reason="provider_unavailable")
             raise CalendarProviderError("provider_unavailable")
 
+        # Safety: only 2xx may proceed to parsing. Any non-2xx that slipped past
+        # the retry path (e.g. 401/403/400) must escalate — never let an empty
+        # ``calendars`` dict produce a fabricated "available" answer.
+        if not response.is_success:
+            self._emit_incident(
+                trace_id=trace_id,
+                reason=f"non_success_status_{response.status_code}",
+            )
+            raise CalendarProviderError(
+                f"non_success_status_{response.status_code}"
+            )
+
         return self._parse(response, calendar_id=calendar_id)
 
     async def _attempt(

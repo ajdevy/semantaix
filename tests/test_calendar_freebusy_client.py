@@ -36,6 +36,7 @@ class _FakeIncidentSink:
 def _ok_response(busy: list[dict], *, calendar_id: str = "primary") -> Mock:
     response = Mock()
     response.status_code = 200
+    response.is_success = True
     response.json.return_value = {"calendars": {calendar_id: {"busy": busy}}}
     return response
 
@@ -44,6 +45,9 @@ def _status_response(status: int, *, retry_after: str | None = None) -> Mock:
     response = Mock()
     response.status_code = status
     response.headers = {} if retry_after is None else {"Retry-After": retry_after}
+    # ``httpx.Response.is_success`` is True only for 2xx. The freeBusy client
+    # uses this to enforce "non-2xx escalates, never fabricate availability".
+    response.is_success = 200 <= status < 300
     return response
 
 
@@ -197,3 +201,83 @@ async def test_timeout_succeeds_after_one_retry():
     )
     result = await _query(_client(http_client))
     assert result.busy == ()
+
+
+@pytest.mark.asyncio
+async def test_401_raises_without_retry_and_emits_incident():
+    # 401 is not a retryable condition. The non-2xx safety check must escalate
+    # so an empty ``calendars`` dict never becomes a fabricated "available".
+    http_client = AsyncMock()
+    http_client.post = AsyncMock(return_value=_status_response(401))
+    sink = _FakeIncidentSink()
+    with pytest.raises(CalendarProviderError):
+        await _query(_client(http_client, sink))
+    assert http_client.post.await_count == 1
+    assert len(sink.incidents) == 1
+    assert "401" in sink.incidents[0]["fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_401_with_retry_after_header_still_raises_without_retry():
+    # A Retry-After header is meaningless on a 401 — it must NOT trigger a retry.
+    http_client = AsyncMock()
+    http_client.post = AsyncMock(
+        return_value=_status_response(401, retry_after="30")
+    )
+    sink = _FakeIncidentSink()
+    with pytest.raises(CalendarProviderError):
+        await _query(_client(http_client, sink))
+    assert http_client.post.await_count == 1
+    assert len(sink.incidents) == 1
+
+
+@pytest.mark.asyncio
+async def test_403_raises_without_retry_and_emits_incident():
+    http_client = AsyncMock()
+    http_client.post = AsyncMock(return_value=_status_response(403))
+    sink = _FakeIncidentSink()
+    with pytest.raises(CalendarProviderError):
+        await _query(_client(http_client, sink))
+    assert http_client.post.await_count == 1
+    assert len(sink.incidents) == 1
+    assert "403" in sink.incidents[0]["fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_403_with_retry_after_header_still_raises_without_retry():
+    http_client = AsyncMock()
+    http_client.post = AsyncMock(
+        return_value=_status_response(403, retry_after="60")
+    )
+    sink = _FakeIncidentSink()
+    with pytest.raises(CalendarProviderError):
+        await _query(_client(http_client, sink))
+    assert http_client.post.await_count == 1
+    assert len(sink.incidents) == 1
+
+
+@pytest.mark.asyncio
+async def test_400_raises_without_retry_and_emits_incident():
+    # A 4xx other than 429 (e.g. 400) must escalate, never fabricate availability.
+    http_client = AsyncMock()
+    http_client.post = AsyncMock(return_value=_status_response(400))
+    sink = _FakeIncidentSink()
+    with pytest.raises(CalendarProviderError):
+        await _query(_client(http_client, sink))
+    assert http_client.post.await_count == 1
+    assert len(sink.incidents) == 1
+
+
+@pytest.mark.asyncio
+async def test_non_2xx_after_429_retry_raises():
+    # Initial attempt 429 -> retry. Retry returns 401 (non-retryable, non-2xx):
+    # the post-retry 2xx check must escalate.
+    http_client = AsyncMock()
+    http_client.post = AsyncMock(
+        side_effect=[_status_response(429, retry_after="1"), _status_response(401)]
+    )
+    sink = _FakeIncidentSink()
+    with pytest.raises(CalendarProviderError):
+        await _query(_client(http_client, sink))
+    assert http_client.post.await_count == 2
+    assert len(sink.incidents) == 1

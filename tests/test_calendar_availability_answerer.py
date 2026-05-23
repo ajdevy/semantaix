@@ -357,7 +357,10 @@ async def test_no_time_clarifies_then_escalates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_clarify_without_chat_id_does_not_arm() -> None:
+async def test_clarify_without_chat_id_escalates_first_turn() -> None:
+    # FR-22 contract requires tracking one clarifying turn; without a chat id we
+    # cannot track that state, so the answerer must escalate immediately rather
+    # than loop clarify on every inbound.
     clarify = _FakeClarify()
     answerer = _build(settings_repo=_FakeSettings(), clarify=clarify)
     result = await answerer.try_answer(
@@ -370,7 +373,13 @@ async def test_clarify_without_chat_id_does_not_arm() -> None:
             project_id=11,
         ),
     )
-    assert result.metadata["clarify"] is True
+    assert result.handled is True
+    assert result.response_mode == RESPONSE_MODE_ESCALATION
+    assert result.metadata["escalate"] is True
+    assert result.metadata["reason"] == "no_requested_time_no_chat_id"
+    assert result.metadata["calendar_operator"] == _OPERATOR
+    assert result.text is None
+    # No state was armed (we don't have a chat id to key it on).
     assert clarify.arm_calls == []
 
 
