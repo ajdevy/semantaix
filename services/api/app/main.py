@@ -415,6 +415,7 @@ answer_pipeline = AnswerPipeline(
             project_prompt_repository=project_prompt_repository,
             catalog_digest_service=catalog_digest_service,
             weather_client=weather_client,
+            project_services_reader=project_services_repository,
         ),
     ]
 )

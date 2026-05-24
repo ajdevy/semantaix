@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Protocol
 
 from services.api.app.answerers import AnswerContext, AnswerResult
+from services.api.app.answerers.catalog_merge import merge_structured_with_digest
 from services.api.app.answerers.scheduling_context import build_scheduling_context
 from services.api.app.answerers.service_catalog_intent import (
     is_service_catalog_query,
 )
 from services.api.app.answerers.weather_client import WeatherClient
+from services.api.app.calendar.project_services_repository import ProjectService
 from services.api.app.guardrails import evaluate_suggestion
 from services.api.app.openrouter_client import OpenRouterClient
 from services.api.app.project_prompts import (
@@ -43,6 +46,10 @@ class _PersonaReader(Protocol):
     def __call__(self) -> tuple[str, str]: ...
 
 
+class _ProjectServicesReader(Protocol):
+    def list_for_project(self, *, project_id: int) -> list[ProjectService]: ...
+
+
 class GroundedRagAnswerer:
     name = "grounded_rag"
 
@@ -55,6 +62,7 @@ class GroundedRagAnswerer:
         project_prompt_repository: ProjectPromptRepository,
         catalog_digest_service: _CatalogDigestProvider,
         weather_client: WeatherClient | None = None,
+        project_services_reader: _ProjectServicesReader | None = None,
     ) -> None:
         self._rag = rag_repository
         self._llm = openrouter_client
@@ -62,19 +70,41 @@ class GroundedRagAnswerer:
         self._prompts = project_prompt_repository
         self._catalog_digest = catalog_digest_service
         self._weather_client = weather_client
+        self._project_services_reader = project_services_reader
 
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
+        normalizer = get_russian_normalizer()
         catalog_query = is_service_catalog_query(
-            text=question, normalizer=get_russian_normalizer()
+            text=question, normalizer=normalizer
         )
         if catalog_query:
             # Aggregate questions ("что ещё есть?") need the whole offerings set,
-            # not a few lemma-overlapping lines. Ground on the catalog digest —
-            # an LLM-built summary of every non-confidential chunk in scope.
-            digest = await self._catalog_digest.get_digest(project_id=ctx.project_id)
-            if not digest.strip():
+            # not a few lemma-overlapping lines. Story 12.06 (FR-25): read the
+            # structured ``project_services`` rows first (humanistic prose, no
+            # field labels), then merge with the LLM-built digest, deduping
+            # digest sentences that the structured rows already cover.
+            structured_rows: list[ProjectService] = []
+            if (
+                self._project_services_reader is not None
+                and ctx.project_id is not None
+            ):
+                structured_rows = await asyncio.to_thread(
+                    self._project_services_reader.list_for_project,
+                    project_id=ctx.project_id,
+                )
+            digest = await self._catalog_digest.get_digest(
+                project_id=ctx.project_id
+            )
+            merged_chunk, source_id_suffix = merge_structured_with_digest(
+                structured_rows=structured_rows,
+                digest_text=digest,
+                normalizer=normalizer,
+                trace_id=ctx.trace_id,
+                project_id=ctx.project_id,
+            )
+            if source_id_suffix == "empty" or not merged_chunk.strip():
                 return self._skip(
                     reason="catalog_empty",
                     ctx=ctx,
@@ -84,8 +114,8 @@ class GroundedRagAnswerer:
             chunks = [
                 RagChunk(
                     id=0,
-                    source_id=f"catalog_digest:{ctx.project_id}",
-                    chunk_text=digest,
+                    source_id=f"{source_id_suffix}:{ctx.project_id}",
+                    chunk_text=merged_chunk,
                     score=1.0,
                 )
             ]
