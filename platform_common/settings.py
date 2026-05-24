@@ -98,6 +98,13 @@ class AppSettings(BaseSettings):
     admin_session_ttl_seconds: int = 86400
     admin_internal_token: str = ""
     web_ui_admin_cookie_secure: bool = False
+    calendar_db_path: str = ".data/semantaix_calendar.db"
+    calendar_token_encryption_key: str | None = None
+    google_oauth_client_id: str | None = None
+    google_oauth_client_secret: str | None = None
+    google_oauth_redirect_uri: str | None = None
+    calendar_oauth_state_ttl_seconds: int = 300
+    calendar_http_timeout_seconds: float = 10.0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

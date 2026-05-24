@@ -1,0 +1,76 @@
+# generated: 2026-05-23
+# last_updated: 2026-05-23
+# project: Semantaix
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Story Status:
+#   - backlog: Story only exists in epic/story planning files
+#   - ready-for-dev: Implementation story doc created in story_location (via bmad-create-story)
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via bmad-code-review)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Feature-sequential: only ONE feature epic in implementation at a time (epics/README.md hard rule).
+# - Epics 01-10 already shipped (as-built); tracked at epic level as `done`.
+# - Epic 11 is the active feature. Stories are `backlog` until `bmad-create-story` emits an
+#   implementation story doc into story_location; then `ready-for-dev` → `in-progress` → `review` → `done`.
+# - One PR per story; 100% coverage gate on platform_common/ + services/.
+# - Dependency order (epics/stories/epic-11/README.md): 11-01 blocks all; 11-02 → {11-03, 11-04};
+#   11-05 ∥ 11-06 ∥ 11-08 after 11-01; 11-07 depends on 11-04/11-05/11-06/11-08.
+
+generated: 2026-05-23
+last_updated: 2026-05-23
+project: Semantaix
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  # --- Shipped epics (as-built) ---
+  epic-01: done
+  epic-01-retrospective: optional
+  epic-02: done
+  epic-02-retrospective: optional
+  epic-03: done
+  epic-03-retrospective: optional
+  epic-04: done
+  epic-04-retrospective: optional
+  epic-05: done
+  epic-05-retrospective: done
+  epic-06: done
+  epic-06-retrospective: optional
+  epic-07: done
+  epic-07-retrospective: optional
+  epic-08: done
+  epic-08-retrospective: optional
+  epic-09: done
+  epic-09-retrospective: optional
+  epic-10: done
+  epic-10-retrospective: optional
+
+  # --- Active feature epic ---
+  epic-11: done
+  11-01-calendar-schema-and-settings: done
+  11-02-oauth-connect-api: done
+  11-03-telegram-connect-command: done
+  11-04-token-lifecycle-and-resilience: done
+  11-05-availability-engine: done
+  11-06-service-resolution: done
+  11-07-availability-answerer-and-wiring: done
+  11-08-enable-disable-and-service-config: done
+  epic-11-retrospective: optional

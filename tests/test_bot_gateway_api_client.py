@@ -381,6 +381,263 @@ async def test_find_operator_by_username_reraises_non_404(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_initiate_calendar_connect_posts_with_bearer(monkeypatch):
+    http = _http_mock(monkeypatch, response_json={"consent_url": "https://c"})
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.initiate_calendar_connect(
+        project_id=11, operator="@op", internal_token="svc-token"
+    )
+    assert result == {"consent_url": "https://c"}
+    args = http.post.await_args
+    assert args.args[0] == "http://api:8000/calendar/connect/initiate"
+    assert args.kwargs["json"] == {"project_id": 11, "operator": "@op"}
+    assert args.kwargs["headers"] == {"Authorization": "Bearer svc-token"}
+
+
+@pytest.mark.asyncio
+async def test_initiate_calendar_connect_raises_api_error(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(
+            status_code=400, body={"detail": "not_calendar_operator"}
+        ),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.initiate_calendar_connect(
+            project_id=11, operator="@op", internal_token="t"
+        )
+    assert info.value.detail == "not_calendar_operator"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_calendar_posts_with_bearer(monkeypatch):
+    http = _http_mock(monkeypatch, response_json={"disconnected": True})
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.disconnect_calendar(
+        project_id=11, operator="@op", internal_token="svc-token"
+    )
+    assert result == {"disconnected": True}
+    args = http.post.await_args
+    assert args.args[0] == "http://api:8000/calendar/disconnect"
+    assert args.kwargs["json"] == {"project_id": 11, "operator": "@op"}
+    assert args.kwargs["headers"] == {"Authorization": "Bearer svc-token"}
+
+
+@pytest.mark.asyncio
+async def test_disconnect_calendar_raises_api_error(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(
+            status_code=503, body={"detail": "calendar_oauth_not_configured"}
+        ),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.disconnect_calendar(
+            project_id=11, operator="@op", internal_token="t"
+        )
+    assert info.value.detail == "calendar_oauth_not_configured"
+
+
+def _http_method_mock(monkeypatch, *, method: str, response_json: dict):
+    response = Mock()
+    response.json.return_value = response_json
+    response.raise_for_status = Mock()
+
+    http_client = AsyncMock()
+    setattr(http_client, method, AsyncMock(return_value=response))
+
+    cm = AsyncMock()
+    cm.__aenter__.return_value = http_client
+    cm.__aexit__.return_value = None
+    monkeypatch.setattr(
+        "services.bot_gateway.app.api_client.httpx.AsyncClient",
+        lambda timeout: cm,
+    )
+    return getattr(http_client, method)
+
+
+# --- story 11.08 calendar config methods ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_calendar_enable_posts_with_optional_fields(monkeypatch):
+    http = _http_mock(monkeypatch, response_json={"enabled": True})
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.calendar_enable(
+        project_id=11,
+        actor="@op",
+        actor_role="operator",
+        internal_token="svc",
+        project_timezone="Europe/Moscow",
+        lookahead_days=30,
+    )
+    assert result == {"enabled": True}
+    args = http.post.await_args
+    assert args.args[0] == "http://api:8000/calendar/projects/11/enable"
+    assert args.kwargs["json"] == {
+        "actor": "@op",
+        "actor_role": "operator",
+        "project_timezone": "Europe/Moscow",
+        "lookahead_days": 30,
+    }
+    assert args.kwargs["headers"] == {"Authorization": "Bearer svc"}
+
+
+@pytest.mark.asyncio
+async def test_calendar_enable_omits_unset_optionals(monkeypatch):
+    http = _http_mock(monkeypatch, response_json={"enabled": True})
+    client = ApiClient(base_url="http://api:8000")
+    await client.calendar_enable(
+        project_id=11, actor="@op", actor_role="admin", internal_token="svc"
+    )
+    assert http.post.await_args.kwargs["json"] == {
+        "actor": "@op",
+        "actor_role": "admin",
+    }
+
+
+@pytest.mark.asyncio
+async def test_calendar_enable_raises_api_error(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=403, body={"detail": "x"}),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError):
+        await client.calendar_enable(
+            project_id=11, actor="@op", actor_role="operator", internal_token="t"
+        )
+
+
+@pytest.mark.asyncio
+async def test_calendar_disable_posts(monkeypatch):
+    http = _http_mock(monkeypatch, response_json={"enabled": False})
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.calendar_disable(
+        project_id=11, actor="@op", actor_role="operator", internal_token="svc"
+    )
+    assert result == {"enabled": False}
+    args = http.post.await_args
+    assert args.args[0] == "http://api:8000/calendar/projects/11/disable"
+    assert args.kwargs["json"] == {"actor": "@op", "actor_role": "operator"}
+
+
+@pytest.mark.asyncio
+async def test_calendar_disable_raises_api_error(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=403, body={"detail": "x"}),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError):
+        await client.calendar_disable(
+            project_id=11, actor="@op", actor_role="admin", internal_token="t"
+        )
+
+
+@pytest.mark.asyncio
+async def test_calendar_get_settings_uses_get(monkeypatch):
+    get = _http_method_mock(
+        monkeypatch, method="get", response_json={"enabled": True}
+    )
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.calendar_get_settings(project_id=11, internal_token="svc")
+    assert result == {"enabled": True}
+    args = get.await_args
+    assert args.args[0] == "http://api:8000/calendar/projects/11/settings"
+    assert args.kwargs["headers"] == {"Authorization": "Bearer svc"}
+
+
+@pytest.mark.asyncio
+async def test_calendar_get_settings_raises_api_error(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        method="get",
+        response=_error_response(status_code=401, body={"detail": "x"}),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError):
+        await client.calendar_get_settings(project_id=11, internal_token="t")
+
+
+@pytest.mark.asyncio
+async def test_calendar_upsert_service_posts_full_payload(monkeypatch):
+    http = _http_mock(monkeypatch, response_json={"id": 7})
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.calendar_upsert_service(
+        project_id=11,
+        actor="@op",
+        actor_role="operator",
+        internal_token="svc",
+        rule_id=3,
+        name="x",
+        duration_minutes=60,
+        working_hours={"mon": ["09:00", "18:00"]},
+        service_days=["mon"],
+        date_exceptions=["2026-01-01"],
+    )
+    assert result == {"id": 7}
+    args = http.post.await_args
+    assert args.args[0] == "http://api:8000/calendar/projects/11/services"
+    assert args.kwargs["json"]["rule_id"] == 3
+    assert args.kwargs["json"]["working_hours"] == {"mon": ["09:00", "18:00"]}
+
+
+@pytest.mark.asyncio
+async def test_calendar_upsert_service_raises_api_error(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=400, body={"detail": "invalid_duration"}),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.calendar_upsert_service(
+            project_id=11, actor="@op", actor_role="operator", internal_token="t"
+        )
+    assert info.value.detail == "invalid_duration"
+
+
+@pytest.mark.asyncio
+async def test_calendar_delete_service_uses_request_delete(monkeypatch):
+    request = _http_method_mock(
+        monkeypatch, method="request", response_json={"deleted": True}
+    )
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.calendar_delete_service(
+        project_id=11,
+        rule_id=3,
+        actor="@op",
+        actor_role="operator",
+        internal_token="svc",
+    )
+    assert result == {"deleted": True}
+    args = request.await_args
+    assert args.args[0] == "DELETE"
+    assert args.args[1] == "http://api:8000/calendar/projects/11/services/3"
+    assert args.kwargs["json"] == {"actor": "@op", "actor_role": "operator"}
+
+
+@pytest.mark.asyncio
+async def test_calendar_delete_service_raises_api_error(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        method="request",
+        response=_error_response(status_code=403, body={"detail": "x"}),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError):
+        await client.calendar_delete_service(
+            project_id=11,
+            rule_id=3,
+            actor="@op",
+            actor_role="admin",
+            internal_token="t",
+        )
+
+
+@pytest.mark.asyncio
 async def test_set_persona_includes_optional_description_fields(monkeypatch):
     http = _http_mock(monkeypatch, response_json={"first_name": "x", "last_name": "y"})
     client = ApiClient(base_url="http://api:8000")

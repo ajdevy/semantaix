@@ -21,12 +21,14 @@ This directory contains the BMAD feature-based sequential epic layout.
 8. `epic-08-tenant-knowledge-ops-and-answer-traces.md`
 9. `epic-09-operator-kb-growth.md`
 10. `epic-10-multi-operator-projects.md`
+11. `epic-11-calendar-availability-scheduling.md` *(planned)*
 
 ## Recent Implementation Notes
 - **Epic 04 (HITL escalation):** runtime HITL recipient/chat routing can be updated by Telegram command `/hitl_config @username <chat_id>`.
 - **Access control:** only `HITL_CONFIG_ADMIN_USERNAME` (currently `@ajdevy`) is authorized to apply runtime HITL configuration changes.
 - **Epic 09 (Operator KB growth):** the trusted HITL operator can grow the knowledge base from Telegram via slash command `/kb_add [confidential]` or Russian free-text intent (e.g. "добавь в базу", "сохрани в kb"). Supports PDF/DOCX/PPTX/TXT, image OCR (tesseract), and audio/video transcription (faster-whisper) — all local, zero external API spend. Uploads auto-publish (no second-human review); `confidential` uploads ground answers but redact `source_id` and `chunk_text` in answer-trace metadata.
 - **Access control:** only the effective operator (runtime `hitl_primary_operator_username` or env default) can trigger `/kb_add`; non-operator messages are ignored with reason `unauthorized_kb`.
+- **Epic 11 (Calendar availability & scheduling) — planned:** opt-in per project (default-off). The project's designated calendar operator connects their own Google Calendar via `/connect_calendar` (read-only OAuth); the bot answers customer availability questions by intersecting `freeBusy` with per-service rules in the project timezone. Read-only first (no booking). Uncertainty escalates to the calendar operator. See `epic-11-calendar-availability-scheduling.md` + `stories/epic-11/`.
 
 ## Carry-forward Constraint
 From Epic 03 onward, every epic must integrate with the incident/alerts solution from Epic 02.

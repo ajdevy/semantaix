@@ -1,0 +1,310 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
+
+from services.api.app import main as api_main
+from services.api.app.calendar.oauth import CalendarOAuthClient, OAuthExchangeError
+from services.api.app.calendar.oauth_state_repository import (
+    CalendarOAuthStateRepository,
+)
+from services.api.app.calendar.settings_repository import CalendarSettingsRepository
+from services.api.app.calendar.token_repository import (
+    CalendarTokenRepository,
+    TokenNotFound,
+)
+from services.api.app.main import app as api_app
+
+_INTERNAL_TOKEN = "test-internal-token"
+_AUTH = {"Authorization": f"Bearer {_INTERNAL_TOKEN}"}
+_PROJECT_ID = 7
+_OPERATOR = "@op"
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit() -> Iterator[None]:
+    api_main._calendar_oauth_hits.clear()
+    yield
+    api_main._calendar_oauth_hits.clear()
+
+
+@pytest.fixture
+def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
+    calendar_db = str(tmp_path / "calendar.sqlite3")
+    settings_repo = CalendarSettingsRepository(db_path=calendar_db)
+    state_repo = CalendarOAuthStateRepository(db_path=calendar_db)
+    token_repo = CalendarTokenRepository(
+        db_path=calendar_db, fernet=Fernet(Fernet.generate_key())
+    )
+    oauth_client = CalendarOAuthClient(
+        client_id="cid",
+        client_secret="secret",
+        redirect_uri="https://example.test/calendar/oauth/callback",
+    )
+
+    monkeypatch.setattr(api_main.settings, "internal_service_token", _INTERNAL_TOKEN)
+    monkeypatch.setattr(api_main.settings, "calendar_oauth_state_ttl_seconds", 300)
+    monkeypatch.setattr(api_main, "calendar_settings_repository", settings_repo)
+    monkeypatch.setattr(api_main, "calendar_oauth_state_repository", state_repo)
+    monkeypatch.setattr(api_main, "calendar_token_repository", token_repo)
+    monkeypatch.setattr(api_main, "calendar_oauth_client", oauth_client)
+
+    client = TestClient(api_app)
+    yield {
+        "client": client,
+        "settings_repo": settings_repo,
+        "state_repo": state_repo,
+        "token_repo": token_repo,
+        "oauth_client": oauth_client,
+    }
+
+
+def _enable_project(settings_repo: CalendarSettingsRepository, operator: str) -> None:
+    settings_repo.enable(_PROJECT_ID, calendar_operator=operator)
+
+
+def _stub_exchange(monkeypatch, *, refresh_token: str = "refresh-1") -> None:
+    flow = Mock()
+    flow.fetch_token = Mock()
+    flow.credentials = SimpleNamespace(
+        refresh_token=refresh_token, token="access", expiry=None
+    )
+    monkeypatch.setattr(
+        "services.api.app.calendar.oauth.Flow.from_client_config",
+        lambda config, scopes: flow,
+    )
+
+
+# --- initiate -------------------------------------------------------------
+
+
+def test_initiate_requires_internal_token(env):
+    resp = env["client"].post(
+        "/calendar/connect/initiate",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+    )
+    assert resp.status_code == 401
+
+
+def test_initiate_returns_consent_url(env):
+    _enable_project(env["settings_repo"], _OPERATOR)
+    resp = env["client"].post(
+        "/calendar/connect/initiate",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    url = resp.json()["consent_url"]
+    assert "calendar.readonly" in url
+    assert "state=" in url
+    # No token / code echoed.
+    assert "refresh" not in resp.text.lower()
+
+
+def test_initiate_400_when_project_disabled(env):
+    resp = env["client"].post(
+        "/calendar/connect/initiate",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "calendar_not_enabled"
+
+
+def test_initiate_400_when_wrong_operator(env):
+    _enable_project(env["settings_repo"], "@someone-else")
+    resp = env["client"].post(
+        "/calendar/connect/initiate",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "not_calendar_operator"
+
+
+def test_initiate_503_when_oauth_not_configured(env, monkeypatch):
+    monkeypatch.setattr(api_main, "calendar_oauth_client", None)
+    resp = env["client"].post(
+        "/calendar/connect/initiate",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 503
+
+
+def test_initiate_rate_limited(env):
+    _enable_project(env["settings_repo"], _OPERATOR)
+    for _ in range(api_main._CALENDAR_OAUTH_RATE_LIMIT):
+        ok = env["client"].post(
+            "/calendar/connect/initiate",
+            json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+            headers=_AUTH,
+        )
+        assert ok.status_code == 200
+    limited = env["client"].post(
+        "/calendar/connect/initiate",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+        headers=_AUTH,
+    )
+    assert limited.status_code == 429
+
+
+# --- callback -------------------------------------------------------------
+
+
+def _mint_state(env) -> str:
+    return env["state_repo"].create(
+        project_id=_PROJECT_ID,
+        operator=_OPERATOR,
+        ttl_seconds=300,
+        now=datetime.now(UTC),
+    )
+
+
+def test_callback_happy_stores_encrypted_token_and_success_html(env, monkeypatch):
+    _stub_exchange(monkeypatch, refresh_token="refresh-secret")
+    state = _mint_state(env)
+    resp = env["client"].get(
+        "/calendar/oauth/callback", params={"state": state, "code": "auth-code"}
+    )
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "подключ" in resp.text.lower()
+    assert "refresh-secret" not in resp.text
+    assert "auth-code" not in resp.text
+    # Stored encrypted: round-trips through the repo, ciphertext on disk.
+    assert env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR) == "refresh-secret"
+
+
+def test_callback_400_html_on_unknown_state(env):
+    resp = env["client"].get(
+        "/calendar/oauth/callback", params={"state": "forged", "code": "c"}
+    )
+    assert resp.status_code == 400
+    assert "text/html" in resp.headers["content-type"]
+    assert "ошибка" in resp.text.lower()
+
+
+def test_callback_400_html_on_replayed_state(env, monkeypatch):
+    _stub_exchange(monkeypatch)
+    state = _mint_state(env)
+    first = env["client"].get(
+        "/calendar/oauth/callback", params={"state": state, "code": "c"}
+    )
+    assert first.status_code == 200
+    replay = env["client"].get(
+        "/calendar/oauth/callback", params={"state": state, "code": "c"}
+    )
+    assert replay.status_code == 400
+
+
+def test_callback_400_html_on_expired_state(env):
+    # Mint a state in the past with a tiny TTL so it is already expired when
+    # the callback consumes it with the real clock.
+    state = env["state_repo"].create(
+        project_id=_PROJECT_ID,
+        operator=_OPERATOR,
+        ttl_seconds=1,
+        now=datetime.now(UTC) - timedelta(hours=1),
+    )
+    resp = env["client"].get(
+        "/calendar/oauth/callback", params={"state": state, "code": "c"}
+    )
+    assert resp.status_code == 400
+
+
+def test_callback_400_when_missing_params(env):
+    resp = env["client"].get("/calendar/oauth/callback")
+    assert resp.status_code == 400
+
+
+def test_callback_400_on_exchange_failure_stores_nothing(env, monkeypatch):
+    state = _mint_state(env)
+    monkeypatch.setattr(
+        env["oauth_client"],
+        "exchange_code",
+        Mock(side_effect=OAuthExchangeError("exchange_failed")),
+    )
+    resp = env["client"].get(
+        "/calendar/oauth/callback", params={"state": state, "code": "bad"}
+    )
+    assert resp.status_code == 400
+    with pytest.raises(TokenNotFound):
+        env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR)
+
+
+def test_callback_503_when_not_configured(env, monkeypatch):
+    monkeypatch.setattr(api_main, "calendar_token_repository", None)
+    resp = env["client"].get(
+        "/calendar/oauth/callback", params={"state": "s", "code": "c"}
+    )
+    assert resp.status_code == 503
+
+
+def test_callback_rate_limited(env, monkeypatch):
+    _stub_exchange(monkeypatch)
+    for _ in range(api_main._CALENDAR_OAUTH_RATE_LIMIT):
+        env["client"].get(
+            "/calendar/oauth/callback", params={"state": "x", "code": "c"}
+        )
+    limited = env["client"].get(
+        "/calendar/oauth/callback", params={"state": "x", "code": "c"}
+    )
+    assert limited.status_code == 429
+
+
+# --- disconnect -----------------------------------------------------------
+
+
+def test_disconnect_requires_internal_token(env):
+    resp = env["client"].post(
+        "/calendar/disconnect",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+    )
+    assert resp.status_code == 401
+
+
+def test_disconnect_revokes_and_deletes(env, monkeypatch):
+    env["token_repo"].upsert(_PROJECT_ID, _OPERATOR, "refresh-secret")
+    revoke = AsyncMock()
+    monkeypatch.setattr(env["oauth_client"], "revoke", revoke)
+    resp = env["client"].post(
+        "/calendar/disconnect",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"disconnected": True}
+    revoke.assert_awaited_once_with(refresh_token="refresh-secret")
+    with pytest.raises(TokenNotFound):
+        env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR)
+
+
+def test_disconnect_when_no_token_skips_revoke(env, monkeypatch):
+    revoke = AsyncMock()
+    monkeypatch.setattr(env["oauth_client"], "revoke", revoke)
+    resp = env["client"].post(
+        "/calendar/disconnect",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    revoke.assert_not_called()
+
+
+def test_disconnect_503_when_not_configured(env, monkeypatch):
+    monkeypatch.setattr(api_main, "calendar_oauth_client", None)
+    resp = env["client"].post(
+        "/calendar/disconnect",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 503

@@ -16,6 +16,7 @@ from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.bot_gateway.app.admin_commands import handle_admin_project_command
 from services.bot_gateway.app.admin_nl_dialog import handle_admin_nl_dialog
 from services.bot_gateway.app.api_client import ApiClient, ApiError
+from services.bot_gateway.app.calendar_commands import handle_calendar_command
 from services.bot_gateway.app.kb_intent import KbIntent, detect_kb_intent
 from services.bot_gateway.app.kb_session import OperatorKbSessionRepository
 from services.bot_gateway.app.media_group_buffer import (
@@ -136,6 +137,11 @@ _HELP_TEXT = (
     "⚙️ Маршрутизация HITL (админ)\n"
     "• /hitl_config @username chat_id — назначить оператора "
     "и чат для алертов.\n"
+    "\n"
+    "📅 Календарь\n"
+    "• /connect_calendar — подключить свой календарь "
+    "(бот пришлёт ссылку для входа Google).\n"
+    "• /disconnect_calendar — отключить календарь и удалить сохранённый доступ.\n"
     "\n"
     "💬 Ответ клиенту\n"
     "• Просто ответьте на сообщение бота, в котором указан "
@@ -1976,6 +1982,23 @@ async def _process_telegram_update(
         response.update(admin_command_result)
         return response
 
+    calendar_command_result = await handle_calendar_command(
+        normalized=normalized,
+        api_client=api_client,
+        send_dm=_send_dm,
+        primary_operator_username=_effective_operator_username(),
+        internal_token=settings.internal_service_token or "",
+    )
+    if calendar_command_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(calendar_command_result)
+        _log_routed(
+            trace_id=trace_id,
+            result=calendar_command_result,
+            fallback="calendar_command",
+        )
+        return response
+
     prompt_command_result = await handle_prompt_command(
         normalized=normalized,
         api_client=api_client,
@@ -1992,6 +2015,7 @@ async def _process_telegram_update(
         api_client=api_client,
         send_dm=_send_dm,
         admin_username=settings.admin_telegram_username,
+        internal_token=settings.internal_service_token or "",
         operator_file_repository=operator_file_repository,
     )
     if admin_project_result is not None:

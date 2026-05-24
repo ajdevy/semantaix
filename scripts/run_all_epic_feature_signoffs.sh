@@ -25,4 +25,7 @@ for epic in 01 02 03 04 05 06 07 08 09; do
   bash "${ROOT_DIR}/scripts/epic${epic}_signoff_demo.sh"
 done
 
+echo "== Epic 11 live demo =="
+bash "${ROOT_DIR}/scripts/epic11_signoff.sh"
+
 echo "All epic feature signoffs completed OK."

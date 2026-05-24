@@ -1,3 +1,4 @@
+import asyncio
 import hmac
 import logging
 import re
@@ -7,7 +8,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
+import httpx
+from cryptography.fernet import Fernet
 from fastapi import Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from platform_common.app_factory import create_service_app
@@ -38,6 +42,40 @@ from services.api.app.answerers import AnswerContext, AnswerPipeline
 from services.api.app.answerers.grounded_rag import GroundedRagAnswerer
 from services.api.app.answerers.weather_client import WeatherClient
 from services.api.app.backups import BackupError, BackupRepository
+from services.api.app.calendar.access_token_cache import AccessTokenProvider
+from services.api.app.calendar.authorization import (
+    authorize_calendar_config,
+    authorize_calendar_disconnect,
+)
+from services.api.app.calendar.availability_answerer import (
+    RESPONSE_MODE_ESCALATION,
+    CalendarAvailabilityAnswerer,
+)
+from services.api.app.calendar.calendar_client import CalendarFreeBusyClient
+from services.api.app.calendar.clarify_state_repository import (
+    CalendarClarifyStateRepository,
+)
+from services.api.app.calendar.oauth import (
+    CalendarOAuthClient,
+    OAuthExchangeError,
+)
+from services.api.app.calendar.oauth_state_repository import (
+    CalendarOAuthStateRepository,
+    InvalidOAuthState,
+)
+from services.api.app.calendar.service_rule_validation import (
+    ServiceRuleValidationError,
+    validate_service_rule,
+)
+from services.api.app.calendar.settings_repository import (
+    CalendarSettingsRepository,
+    ServiceRule,
+)
+from services.api.app.calendar.token_repository import (
+    CalendarTokenRepository,
+    TokenNotFound,
+    init_token_schema,
+)
 from services.api.app.catalog_digest import (
     CatalogDigestRepository,
     CatalogDigestService,
@@ -76,6 +114,7 @@ from services.api.app.projects import (
     ProjectSlugConflict,
 )
 from services.api.app.rag import RagRepository
+from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
 from services.api.app.trace_corrections import (
@@ -133,6 +172,103 @@ catalog_digest_service = CatalogDigestService(
 )
 admin_auth_repository = AdminAuthRepository(settings.admin_session_db_path)
 admin_nl_ops_repository = AdminNlOpsRepository(settings.nl_ops_db_path)
+# Epic 11: bootstrap the calendar DB idempotently. Calendar stays opt-in and
+# disabled for every project until a settings row is explicitly enabled. The
+# token table is created without an encryption key; crypto ops require one.
+calendar_settings_repository = CalendarSettingsRepository(
+    db_path=settings.calendar_db_path
+)
+calendar_oauth_state_repository = CalendarOAuthStateRepository(
+    db_path=settings.calendar_db_path
+)
+init_token_schema(settings.calendar_db_path)
+
+
+def _build_calendar_token_repository(app_settings) -> CalendarTokenRepository | None:
+    """Encrypted refresh-token store; ``None`` until an encryption key is set.
+
+    The token table is bootstrapped above regardless, so reads of an empty
+    store stay cheap; the connect endpoints return 503 while the key is unset.
+    """
+    if not app_settings.calendar_token_encryption_key:
+        return None
+    return CalendarTokenRepository(
+        db_path=app_settings.calendar_db_path,
+        fernet=Fernet(app_settings.calendar_token_encryption_key),
+    )
+
+
+def _build_calendar_oauth_client(app_settings) -> CalendarOAuthClient | None:
+    """Google OAuth client; ``None`` until client_id/secret/redirect_uri are set."""
+    if not (
+        app_settings.google_oauth_client_id
+        and app_settings.google_oauth_client_secret
+        and app_settings.google_oauth_redirect_uri
+    ):
+        return None
+    return CalendarOAuthClient(
+        client_id=app_settings.google_oauth_client_id,
+        client_secret=app_settings.google_oauth_client_secret,
+        redirect_uri=app_settings.google_oauth_redirect_uri,
+    )
+
+
+calendar_token_repository = _build_calendar_token_repository(settings)
+calendar_oauth_client = _build_calendar_oauth_client(settings)
+calendar_clarify_state_repository = CalendarClarifyStateRepository(
+    db_path=settings.calendar_db_path
+)
+
+
+class _SystemClock:
+    """Tz-aware UTC clock for the calendar token/freebusy collaborators."""
+
+    def now(self) -> datetime:
+        return datetime.now(UTC)
+
+
+calendar_system_clock = _SystemClock()
+calendar_http_client = httpx.AsyncClient(timeout=settings.calendar_http_timeout_seconds)
+
+
+def _build_calendar_token_provider() -> AccessTokenProvider | None:
+    """Single-flight access-token cache; ``None`` until OAuth + key are set."""
+    if calendar_oauth_client is None or calendar_token_repository is None:
+        return None
+    return AccessTokenProvider(
+        oauth_client=calendar_oauth_client,
+        token_repo=calendar_token_repository,
+        clock=calendar_system_clock,
+        lock_factory=asyncio.Lock,
+        incident_sink=incident_repository,
+        notifier=telegram_bot_sender,
+    )
+
+
+def _build_calendar_freebusy_client() -> CalendarFreeBusyClient | None:
+    """freeBusy httpx client; ``None`` until OAuth is configured."""
+    if calendar_oauth_client is None:
+        return None
+    return CalendarFreeBusyClient(
+        http_client=calendar_http_client,
+        clock=calendar_system_clock,
+        incident_sink=incident_repository,
+        timeout_seconds=settings.calendar_http_timeout_seconds,
+    )
+
+
+calendar_token_provider = _build_calendar_token_provider()
+calendar_freebusy_client = _build_calendar_freebusy_client()
+
+
+def _resolve_calendar_operator_chat_id(operator: str) -> int | None:
+    """Map the calendar operator's username to its Telegram chat_id (or None)."""
+    record = operator_repository.find_by_username(operator)
+    if record is None:
+        return None
+    return record.chat_id
+
+
 web_auth_repository = WebAuthRepository(db_path=settings.web_auth_db_path)
 admin_auth_service = AdminAuthService(
     web_auth_repository=web_auth_repository,
@@ -201,6 +337,18 @@ def _effective_bot_persona() -> tuple[str, str]:
 
 answer_pipeline = AnswerPipeline(
     [
+        # Calendar availability runs FIRST so an enabled project answers its own
+        # scheduling questions before they ever reach RAG. A disabled project
+        # (the default) is a cheap no-op skip, so this is a pure prepend with no
+        # behaviour change when calendar is off.
+        CalendarAvailabilityAnswerer(
+            settings_repo=calendar_settings_repository,
+            token_provider=calendar_token_provider,
+            freebusy_client=calendar_freebusy_client,
+            normalizer=get_russian_normalizer(),
+            clarify_store=calendar_clarify_state_repository,
+            operator_chat_resolver=_resolve_calendar_operator_chat_id,
+        ),
         GroundedRagAnswerer(
             rag_repository=rag_repository,
             openrouter_client=openrouter_client,
@@ -263,6 +411,25 @@ def require_admin_or_internal(
         if session is not None:
             return session.admin_username
     raise HTTPException(status_code=401, detail="admin_auth_required")
+
+
+def require_internal_token(
+    authorization: Annotated[str | None, Header()] = None,
+) -> str:
+    """Service-to-service auth via ``Authorization: Bearer <internal_service_token>``.
+
+    Mirrors the admin-files internal path but without ``as_user`` — the
+    calendar connect/disconnect calls come from bot_gateway, not a web role.
+    """
+    expected = settings.internal_service_token
+    if (
+        expected
+        and authorization
+        and authorization.startswith("Bearer ")
+        and hmac.compare_digest(authorization.removeprefix("Bearer "), expected)
+    ):
+        return "internal"
+    raise HTTPException(status_code=401, detail="internal_auth_required")
 
 
 def _project_to_dict(project: Project) -> dict[str, object]:
@@ -1497,6 +1664,146 @@ def _persist_answer_trace(
     return trace.trace_id
 
 
+def _resolve_calendar_escalation_assignee(calendar_operator: str | None) -> str:
+    """Route a calendar escalation to the project's calendar operator.
+
+    Falls back to the primary HITL operator when the configured calendar
+    operator is missing/unregistered/inactive — escalation must always land
+    somewhere, never drop.
+    """
+    primary = _effective_hitl_operator_username()
+    if not calendar_operator:
+        return primary
+    operator = operator_repository.find_by_username(calendar_operator)
+    if operator is not None and operator.is_active:
+        return operator.username
+    return primary
+
+
+async def _escalate_calendar_availability(
+    *,
+    request: InboundMessageRequest,
+    trace_id: str,
+    latency_ms: int,
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    """HITL escalation for a calendar availability question, routed to the
+    project's calendar operator with context."""
+    calendar_operator = metadata.get("calendar_operator")
+    escalation_context = metadata.get("escalation_context") or ""
+    operator_username = _resolve_calendar_escalation_assignee(
+        calendar_operator if isinstance(calendar_operator, str) else None
+    )
+    contextual_question = (
+        f"[{escalation_context}] {request.text}"
+        if escalation_context
+        else request.text
+    )
+
+    active_ticket = (
+        hitl_ticket_repository.find_active_for_chat(request.chat_id)
+        if request.chat_id is not None
+        else None
+    )
+    if active_ticket is not None:
+        logger.info(
+            "calendar_availability_escalation",
+            extra={
+                "trace_id": trace_id,
+                "chat_id": request.chat_id,
+                "calendar_operator": calendar_operator,
+                "escalation_reason": metadata.get("reason"),
+                "has_existing_ticket": True,
+                "existing_ticket_id": active_ticket.id,
+            },
+        )
+        await _notify_hitl_operator_with_question(
+            ticket_id=active_ticket.id,
+            question=f"[follow-up] {contextual_question}",
+            customer_username=request.customer_username,
+        )
+        persisted_trace_id = _persist_answer_trace(
+            trace_id=trace_id,
+            request_text=request.text,
+            response_mode="human_only",
+            guardrail_outcome="escalated",
+            guardrail_reasons=[],
+            guardrail_score=None,
+            retrieval=[],
+            latency_ms=latency_ms,
+            limitations=["awaiting_human_response", "coalesced_follow_up"],
+            hitl_ticket_id=active_ticket.id,
+        )
+        return {
+            "delivered": False,
+            "escalated": True,
+            "response_mode": "human_only",
+            "hitl_ticket_id": active_ticket.id,
+            "hitl_operator_username": (
+                active_ticket.operator_username or operator_username
+            ),
+            "trace_id": persisted_trace_id,
+            "coalesced": True,
+        }
+
+    ack_message = _effective_inbound_ack_message(
+        project_id=_resolve_inbound_project_id(request.chat_id)
+    )
+    if request.chat_id is not None:
+        await _safe_send_message(
+            chat_id=request.chat_id,
+            text=ack_message,
+            failure_summary="Inbound ack delivery failed",
+            failure_kind="inbound_ack_failed",
+        )
+    ticket = hitl_ticket_repository.create(
+        conversation_ref=request.text[:120],
+        reason="awaiting_human_response",
+        target_chat_id=request.chat_id,
+    )
+    hitl_ticket_repository.assign(
+        ticket_id=ticket.id,
+        operator_username=operator_username,
+    )
+    logger.info(
+        "calendar_availability_escalation",
+        extra={
+            "trace_id": trace_id,
+            "chat_id": request.chat_id,
+            "calendar_operator": calendar_operator,
+            "escalation_reason": metadata.get("reason"),
+            "has_existing_ticket": False,
+            "ticket_id": ticket.id,
+            "operator_username": operator_username,
+        },
+    )
+    await _notify_hitl_operator_with_question(
+        ticket_id=ticket.id,
+        question=contextual_question,
+        customer_username=request.customer_username,
+    )
+    persisted_trace_id = _persist_answer_trace(
+        trace_id=trace_id,
+        request_text=request.text,
+        response_mode="human_only",
+        guardrail_outcome="escalated",
+        guardrail_reasons=[],
+        guardrail_score=None,
+        retrieval=[],
+        latency_ms=latency_ms,
+        limitations=["awaiting_human_response", "calendar_escalation"],
+        hitl_ticket_id=ticket.id,
+    )
+    return {
+        "delivered": False,
+        "escalated": True,
+        "response_mode": "human_only",
+        "hitl_ticket_id": ticket.id,
+        "hitl_operator_username": operator_username,
+        "trace_id": persisted_trace_id,
+    }
+
+
 @app.post("/conversations/inbound")
 async def conversations_inbound(request: InboundMessageRequest) -> dict[str, object]:
     if not request.text.strip():
@@ -1550,6 +1857,20 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
 
     pipeline_result = await answer_pipeline.run(question=request.text, ctx=ctx)
     latency_ms = int((time.perf_counter() - started_at) * 1000)
+
+    if (
+        pipeline_result.handled
+        and pipeline_result.response_mode == RESPONSE_MODE_ESCALATION
+    ):
+        # Calendar owns this question but couldn't answer confidently (provider
+        # / token failure or twice-ambiguous). Escalate to a human routed to the
+        # project's calendar operator — never deliver a fabricated answer.
+        return await _escalate_calendar_availability(
+            request=request,
+            trace_id=trace_id,
+            latency_ms=latency_ms,
+            metadata=pipeline_result.metadata,
+        )
 
     if pipeline_result.handled:
         retrieval = pipeline_result.metadata.get("retrieval") or []
@@ -2985,3 +3306,376 @@ def restore_backup(backup_id: int, request: BackupRestoreRequest) -> dict[str, o
         "backup_id": result.backup_id,
         "restored_paths": result.restored_paths,
     }
+
+
+# ---------------------------------------------------------------------------
+# Epic 11 / story 11.02 — Google Calendar OAuth connect flow
+# ---------------------------------------------------------------------------
+
+_CALENDAR_OAUTH_RATE_LIMIT = 10
+_CALENDAR_OAUTH_RATE_WINDOW_SECONDS = 60.0
+# In-memory coarse throttle: {bucket_key: [monotonic timestamps]}. Bounds the
+# abuse surface of the unauthenticated callback (each hit triggers a token
+# exchange) and the internal initiate. Per-state single-use bounds replay; this
+# bounds volume.
+_calendar_oauth_hits: dict[str, list[float]] = {}
+
+
+def _calendar_oauth_rate_limited(bucket: str) -> bool:
+    now = time.monotonic()
+    window_start = now - _CALENDAR_OAUTH_RATE_WINDOW_SECONDS
+    hits = [ts for ts in _calendar_oauth_hits.get(bucket, []) if ts > window_start]
+    if len(hits) >= _CALENDAR_OAUTH_RATE_LIMIT:
+        _calendar_oauth_hits[bucket] = hits
+        return True
+    hits.append(now)
+    _calendar_oauth_hits[bucket] = hits
+    return False
+
+
+def _calendar_callback_html(*, ok: bool) -> str:
+    if ok:
+        title = "Календарь подключён"
+        body = "Доступ к календарю предоставлен. Можете вернуться в Telegram."
+    else:
+        title = "Не удалось подключить календарь"
+        body = (
+            "Ссылка устарела или произошла ошибка. "
+            "Запросите новую ссылку в Telegram и попробуйте снова."
+        )
+    return (
+        "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
+        f"<title>{title}</title></head><body><h1>{title}</h1>"
+        f"<p>{body}</p></body></html>"
+    )
+
+
+class CalendarConnectRequest(BaseModel):
+    project_id: int
+    operator: str
+
+
+@app.post("/calendar/connect/initiate")
+async def calendar_connect_initiate(
+    request: CalendarConnectRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+    http_request: Request,
+) -> dict[str, object]:
+    if calendar_oauth_client is None:
+        raise HTTPException(status_code=503, detail="calendar_oauth_not_configured")
+    client_host = http_request.client.host if http_request.client else "unknown"
+    if _calendar_oauth_rate_limited(f"initiate:{client_host}"):
+        raise HTTPException(status_code=429, detail="rate_limited")
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, request.project_id
+    )
+    if project_settings is None or not project_settings.enabled:
+        raise HTTPException(status_code=400, detail="calendar_not_enabled")
+    if project_settings.calendar_operator != request.operator:
+        raise HTTPException(status_code=400, detail="not_calendar_operator")
+    state = await asyncio.to_thread(
+        calendar_oauth_state_repository.create,
+        project_id=request.project_id,
+        operator=request.operator,
+        ttl_seconds=settings.calendar_oauth_state_ttl_seconds,
+        now=datetime.now(UTC),
+    )
+    consent_url = calendar_oauth_client.build_consent_url(state=state)
+    logger.info(
+        "calendar_oauth_initiated",
+        extra={"project_id": request.project_id, "operator": request.operator},
+    )
+    return {"consent_url": consent_url}
+
+
+@app.get("/calendar/oauth/callback", response_class=HTMLResponse)
+async def calendar_oauth_callback(
+    http_request: Request,
+    state: str | None = None,
+    code: str | None = None,
+) -> HTMLResponse:
+    if calendar_oauth_client is None or calendar_token_repository is None:
+        return HTMLResponse(_calendar_callback_html(ok=False), status_code=503)
+    client_host = http_request.client.host if http_request.client else "unknown"
+    if _calendar_oauth_rate_limited(f"callback:{client_host}"):
+        return HTMLResponse(_calendar_callback_html(ok=False), status_code=429)
+    if not state or not code:
+        return HTMLResponse(_calendar_callback_html(ok=False), status_code=400)
+    try:
+        pending = await asyncio.to_thread(
+            calendar_oauth_state_repository.consume, state, now=datetime.now(UTC)
+        )
+    except InvalidOAuthState:
+        logger.warning("calendar_oauth_callback_invalid_state")
+        return HTMLResponse(_calendar_callback_html(ok=False), status_code=400)
+    try:
+        tokens = await asyncio.to_thread(calendar_oauth_client.exchange_code, code=code)
+    except OAuthExchangeError:
+        logger.warning(
+            "calendar_oauth_callback_exchange_failed",
+            extra={"project_id": pending.project_id, "operator": pending.operator},
+        )
+        return HTMLResponse(_calendar_callback_html(ok=False), status_code=400)
+    await asyncio.to_thread(
+        calendar_token_repository.upsert,
+        pending.project_id,
+        pending.operator,
+        tokens.refresh_token,
+    )
+    logger.info(
+        "calendar_oauth_connected",
+        extra={"project_id": pending.project_id, "operator": pending.operator},
+    )
+    return HTMLResponse(_calendar_callback_html(ok=True), status_code=200)
+
+
+class CalendarDisconnectRequest(BaseModel):
+    project_id: int
+    operator: str
+    actor_role: str = "operator"
+
+
+@app.post("/calendar/disconnect")
+async def calendar_disconnect(
+    request: CalendarDisconnectRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    # Operator-only path (FR-18/FR-21): an admin attempting to disconnect/delete
+    # is rejected. Disable keeps the token; only the operator removes it.
+    authorize_calendar_disconnect(actor_role=request.actor_role)
+    if calendar_oauth_client is None or calendar_token_repository is None:
+        raise HTTPException(status_code=503, detail="calendar_oauth_not_configured")
+    try:
+        refresh_token = await asyncio.to_thread(
+            calendar_token_repository.get_refresh_token,
+            request.project_id,
+            request.operator,
+        )
+    except TokenNotFound:
+        refresh_token = None
+    if refresh_token is not None:
+        await calendar_oauth_client.revoke(refresh_token=refresh_token)
+    await asyncio.to_thread(
+        calendar_token_repository.delete, request.project_id, request.operator
+    )
+    logger.info(
+        "calendar_oauth_disconnected",
+        extra={"project_id": request.project_id, "operator": request.operator},
+    )
+    return {"disconnected": True}
+
+
+# --- Calendar enable/disable + service config (story 11.08) ----------------
+#
+# Both the project's designated calendar operator AND an admin may enable,
+# disable, and define services (FR-21). Disable keeps the stored token. The
+# operator-vs-admin / admin-cannot-disconnect rule is enforced centrally via
+# ``services.api.app.calendar.authorization``.
+
+
+class CalendarEnableRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+    project_timezone: str = "Europe/Moscow"
+    lookahead_days: int = 60
+
+
+class CalendarDisableRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+
+
+class CalendarServiceRuleRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+    rule_id: int | None = None
+    name: str | None = None
+    duration_minutes: int | None = None
+    working_hours: dict | None = None
+    service_days: list | None = None
+    date_exceptions: list | None = None
+
+
+class CalendarServiceDeleteRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+
+
+def _service_rule_to_dict(rule: ServiceRule) -> dict[str, object]:
+    return {
+        "id": rule.id,
+        "project_id": rule.project_id,
+        "name": rule.name,
+        "duration_minutes": rule.duration_minutes,
+        "working_hours": rule.working_hours,
+        "service_days": rule.service_days,
+        "date_exceptions": rule.date_exceptions,
+        "updated_at": rule.updated_at,
+    }
+
+
+@app.post("/calendar/projects/{project_id}/enable")
+async def calendar_project_enable(
+    project_id: int,
+    request: CalendarEnableRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    authorize_calendar_config(
+        actor=request.actor,
+        actor_role=request.actor_role,
+        project_settings=project_settings,
+    )
+    # An operator enabling becomes the designated calendar operator; an admin
+    # enabling preserves whatever operator (if any) is already designated.
+    if request.actor_role == "operator":
+        calendar_operator: str | None = request.actor
+    else:
+        calendar_operator = (
+            project_settings.calendar_operator if project_settings else None
+        )
+    await asyncio.to_thread(
+        calendar_settings_repository.enable,
+        project_id,
+        calendar_operator=calendar_operator,
+        project_timezone=request.project_timezone,
+        lookahead_days=request.lookahead_days,
+    )
+    logger.info(
+        "calendar_project_enabled",
+        extra={"project_id": project_id, "actor_role": request.actor_role},
+    )
+    return {"enabled": True, "calendar_operator": calendar_operator}
+
+
+@app.post("/calendar/projects/{project_id}/disable")
+async def calendar_project_disable(
+    project_id: int,
+    request: CalendarDisableRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    authorize_calendar_config(
+        actor=request.actor,
+        actor_role=request.actor_role,
+        project_settings=project_settings,
+    )
+    # NB: disable flips enabled=0 only; the stored token is intentionally kept.
+    await asyncio.to_thread(calendar_settings_repository.disable, project_id)
+    logger.info(
+        "calendar_project_disabled",
+        extra={"project_id": project_id, "actor_role": request.actor_role},
+    )
+    return {"enabled": False}
+
+
+@app.get("/calendar/projects/{project_id}/settings")
+async def calendar_project_settings_view(
+    project_id: int,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    rules = await asyncio.to_thread(
+        calendar_settings_repository.list_service_rules, project_id
+    )
+    if project_settings is None:
+        enabled = False
+        calendar_operator: str | None = None
+        project_timezone = "Europe/Moscow"
+        lookahead_days = 60
+        updated_at: str | None = None
+    else:
+        enabled = project_settings.enabled
+        calendar_operator = project_settings.calendar_operator
+        project_timezone = project_settings.project_timezone
+        lookahead_days = project_settings.lookahead_days
+        updated_at = project_settings.updated_at
+    return {
+        "project_id": project_id,
+        "enabled": enabled,
+        "calendar_operator": calendar_operator,
+        "project_timezone": project_timezone,
+        "lookahead_days": lookahead_days,
+        "updated_at": updated_at,
+        "service_rules": [_service_rule_to_dict(rule) for rule in rules],
+    }
+
+
+@app.post("/calendar/projects/{project_id}/services")
+async def calendar_project_service_upsert(
+    project_id: int,
+    request: CalendarServiceRuleRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    authorize_calendar_config(
+        actor=request.actor,
+        actor_role=request.actor_role,
+        project_settings=project_settings,
+    )
+    try:
+        validate_service_rule(
+            duration_minutes=request.duration_minutes,
+            working_hours=request.working_hours,
+            service_days=request.service_days,
+            date_exceptions=request.date_exceptions,
+        )
+    except ServiceRuleValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.reason) from exc
+    rule_id = await asyncio.to_thread(
+        _upsert_service_rule_call,
+        project_id=project_id,
+        request=request,
+    )
+    logger.info(
+        "calendar_service_rule_upserted",
+        extra={"project_id": project_id, "rule_id": rule_id},
+    )
+    return {"id": rule_id}
+
+
+def _upsert_service_rule_call(
+    *, project_id: int, request: CalendarServiceRuleRequest
+) -> int:
+    return calendar_settings_repository.upsert_service_rule(
+        project_id=project_id,
+        name=request.name,
+        duration_minutes=request.duration_minutes,
+        working_hours=request.working_hours,
+        service_days=request.service_days,
+        date_exceptions=request.date_exceptions,
+        rule_id=request.rule_id,
+    )
+
+
+@app.delete("/calendar/projects/{project_id}/services/{rule_id}")
+async def calendar_project_service_delete(
+    project_id: int,
+    rule_id: int,
+    request: CalendarServiceDeleteRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    authorize_calendar_config(
+        actor=request.actor,
+        actor_role=request.actor_role,
+        project_settings=project_settings,
+    )
+    await asyncio.to_thread(
+        calendar_settings_repository.delete_service_rule, rule_id
+    )
+    logger.info(
+        "calendar_service_rule_deleted",
+        extra={"project_id": project_id, "rule_id": rule_id},
+    )
+    return {"deleted": True}
