@@ -77,7 +77,7 @@ development_status:
 
   # --- Active feature epic ---
   epic-12: in-progress
-  12-01-project-services-schema-and-repo: backlog
+  12-01-project-services-schema-and-repo: done
   12-02-canonical-services-api: backlog
   12-03-service-slash-command: backlog
   12-04-services-nl-ops-api: backlog
