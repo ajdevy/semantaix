@@ -53,6 +53,9 @@ from services.api.app.calendar.availability_answerer import (
     CalendarAvailabilityAnswerer,
 )
 from services.api.app.calendar.calendar_client import CalendarFreeBusyClient
+from services.api.app.calendar.calendar_service_alias_hint_repository import (
+    init_calendar_service_alias_hint_schema,
+)
 from services.api.app.calendar.clarify_state_repository import (
     CalendarClarifyStateRepository,
 )
@@ -207,6 +210,10 @@ init_token_schema(settings.calendar_db_path)
 # Epic 12 (story 12.01): bootstrap the operator-scoped services NL ops session
 # table next to the existing admin_nl_op_sessions table. Both are idempotent.
 init_services_nl_ops_schema(settings.nl_ops_db_path)
+# Epic 12 (story 12.03): bootstrap the per-(project, operator) dedup table for
+# the ``/calendar_service`` migration-hint DM. Idempotent; lives in
+# semantaix_nl_ops.db alongside services_nl_op_sessions.
+init_calendar_service_alias_hint_schema(settings.nl_ops_db_path)
 
 
 def _build_calendar_token_repository(app_settings) -> CalendarTokenRepository | None:

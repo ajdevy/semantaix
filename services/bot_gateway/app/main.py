@@ -1988,6 +1988,7 @@ async def _process_telegram_update(
         send_dm=_send_dm,
         primary_operator_username=_effective_operator_username(),
         internal_token=settings.internal_service_token or "",
+        nl_ops_db_path=settings.nl_ops_db_path,
     )
     if calendar_command_result is not None:
         response = {"trace_id": trace_id}

@@ -41,6 +41,21 @@ def test_startup_bootstraps_services_nl_op_sessions_table() -> None:
     assert "services_nl_op_sessions" in tables
 
 
+def test_startup_bootstraps_calendar_service_alias_hint_sent_table() -> None:
+    """Epic 12 (story 12.03): the api startup hook creates the dedup table for
+    the `/calendar_service` migration-hint DM in the same semantaix_nl_ops.db.
+    """
+    db_path = api_main.settings.nl_ops_db_path
+    with sqlite3.connect(db_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "calendar_service_alias_hint_sent" in tables
+
+
 def test_build_token_provider_returns_none_without_oauth(monkeypatch) -> None:
     monkeypatch.setattr(api_main, "calendar_oauth_client", None)
     monkeypatch.setattr(api_main, "calendar_token_repository", None)
