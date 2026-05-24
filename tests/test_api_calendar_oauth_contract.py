@@ -110,24 +110,72 @@ def test_initiate_returns_consent_url(env):
 
 
 def test_initiate_400_when_project_disabled(env):
+    """Documented removal: under the new "connect = enable" contract, the
+    callback is the authoritative gate. /initiate must succeed on a fresh
+    project so the operator can bootstrap; gating on enabled=1 here would
+    make first-time consent impossible. See PR #76 follow-up."""
+    # No settings row at all — brand-new project.
+    assert env["settings_repo"].get(_PROJECT_ID) is None
     resp = env["client"].post(
         "/calendar/connect/initiate",
         json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
         headers=_AUTH,
     )
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "calendar_not_enabled"
+    assert resp.status_code == 200
+    assert "consent_url" in resp.json()
 
 
 def test_initiate_400_when_wrong_operator(env):
+    """Documented removal: /initiate must succeed even when a *different*
+    operator currently holds the designated-calendar-operator slot, so that
+    operator handover / re-consent flows can run. The callback updates the
+    designated operator on success."""
     _enable_project(env["settings_repo"], "@someone-else")
     resp = env["client"].post(
         "/calendar/connect/initiate",
         json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
         headers=_AUTH,
     )
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "not_calendar_operator"
+    assert resp.status_code == 200
+    assert "consent_url" in resp.json()
+
+
+def test_initiate_succeeds_on_fresh_project_with_state_and_oauth_params(env):
+    """Brand-new project (no calendar_project_settings row): /initiate
+    returns 200 with a consent URL that contains the minted state, the
+    configured client_id, and the configured redirect_uri."""
+    assert env["settings_repo"].get(_PROJECT_ID) is None
+
+    resp = env["client"].post(
+        "/calendar/connect/initiate",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    consent_url = resp.json()["consent_url"]
+
+    # The minted state, client_id, and redirect_uri all appear in the URL.
+    assert "state=" in consent_url
+    assert "client_id=cid" in consent_url
+    # redirect_uri is URL-encoded in the query string.
+    assert "redirect_uri=https%3A%2F%2Fexample.test%2Fcalendar%2Foauth%2Fcallback" in consent_url
+
+
+def test_initiate_succeeds_for_different_operator_than_designated(env):
+    """Operator handover / re-consent: a different operator than the one
+    currently designated can still initiate. The callback updates the
+    designated operator on success."""
+    _enable_project(env["settings_repo"], "@previous-operator")
+
+    resp = env["client"].post(
+        "/calendar/connect/initiate",
+        json={"project_id": _PROJECT_ID, "operator": _OPERATOR},
+        headers=_AUTH,
+    )
+    assert resp.status_code == 200
+    consent_url = resp.json()["consent_url"]
+    assert "state=" in consent_url
+    assert "client_id=cid" in consent_url
 
 
 def test_initiate_503_when_oauth_not_configured(env, monkeypatch):
