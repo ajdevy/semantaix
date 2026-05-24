@@ -1,3 +1,5 @@
+name: semantaix
+
 services:
   # Self-hosted Telegram Bot API server.
   # Lifts the `getFile` size cap from 20 MB (cloud) to 2 GB (local). When
