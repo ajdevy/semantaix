@@ -81,6 +81,6 @@ development_status:
   12-02-canonical-services-api: done
   12-03-service-slash-command: done
   12-04-services-nl-ops-api: done
-  12-05-services-nl-dialog-bot: backlog
+  12-05-services-nl-dialog-bot: done
   12-06-catalog-answerer-merge-with-dedup: backlog
   epic-12-retrospective: optional
