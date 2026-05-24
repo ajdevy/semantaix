@@ -46,6 +46,7 @@ from services.api.app.calendar.access_token_cache import AccessTokenProvider
 from services.api.app.calendar.authorization import (
     authorize_calendar_config,
     authorize_calendar_disconnect,
+    authorize_service_remove,
 )
 from services.api.app.calendar.availability_answerer import (
     RESPONSE_MODE_ESCALATION,
@@ -62,6 +63,16 @@ from services.api.app.calendar.oauth import (
 from services.api.app.calendar.oauth_state_repository import (
     CalendarOAuthStateRepository,
     InvalidOAuthState,
+)
+from services.api.app.calendar.project_service_validation import (
+    ProjectServiceValidationError,
+    validate_project_service,
+)
+from services.api.app.calendar.project_services_repository import (
+    ProjectService,
+    ProjectServiceNotFound,
+    ProjectServiceRepository,
+    acquire_service_upsert_lock,
 )
 from services.api.app.calendar.service_rule_validation import (
     ServiceRuleValidationError,
@@ -182,6 +193,14 @@ calendar_settings_repository = CalendarSettingsRepository(
     db_path=settings.calendar_db_path
 )
 calendar_oauth_state_repository = CalendarOAuthStateRepository(
+    db_path=settings.calendar_db_path
+)
+# Epic 12 (story 12.02): canonical project_services repository, shared by the
+# new /api/projects/{id}/services endpoints. The old /calendar alias endpoints
+# still route through ``calendar_settings_repository``'s deprecated wrappers
+# (which themselves delegate into the same underlying table) so Epic-11 callers
+# continue to see identical behavior + just gain a deprecation log line.
+project_services_repository = ProjectServiceRepository(
     db_path=settings.calendar_db_path
 )
 init_token_schema(settings.calendar_db_path)
@@ -3614,6 +3633,21 @@ async def calendar_project_service_upsert(
     request: CalendarServiceRuleRequest,
     _principal: Annotated[str, Depends(require_internal_token)],
 ) -> dict[str, object]:
+    # Epic 12 (story 12.02): this endpoint is 60-day-deprecated; the canonical
+    # surface lives at ``POST /api/projects/{id}/services``. The deprecation log
+    # is the ONLY behavioral change — the rest of the handler keeps the Epic-11
+    # contract (``rule_id``-keyed updates, ``{"id": ...}`` response shape) so
+    # existing callers see no breakage. The slash-command alias hint DM is owned
+    # by story 12.03; here we only emit the log.
+    logger.info(
+        "deprecation_warning_calendar_services_endpoint",
+        extra={
+            "endpoint": "POST /calendar/projects/{project_id}/services",
+            "project_id": project_id,
+            "actor_role": request.actor_role,
+            "canonical_endpoint": "POST /api/projects/{project_id}/services",
+        },
+    )
     project_settings = await asyncio.to_thread(
         calendar_settings_repository.get, project_id
     )
@@ -3664,6 +3698,20 @@ async def calendar_project_service_delete(
     request: CalendarServiceDeleteRequest,
     _principal: Annotated[str, Depends(require_internal_token)],
 ) -> dict[str, object]:
+    # Epic 12 (story 12.02): deprecated alias for
+    # ``DELETE /api/projects/{project_id}/services/{service_id}``. The Epic-11
+    # behavior (admin-allowed when designated operator) is preserved here on
+    # purpose so existing automation keeps working — the canonical endpoint is
+    # stricter (operator-only via ``authorize_service_remove``).
+    logger.info(
+        "deprecation_warning_calendar_services_endpoint",
+        extra={
+            "endpoint": "DELETE /calendar/projects/{project_id}/services/{rule_id}",
+            "project_id": project_id,
+            "actor_role": request.actor_role,
+            "canonical_endpoint": "DELETE /api/projects/{project_id}/services/{service_id}",
+        },
+    )
     project_settings = await asyncio.to_thread(
         calendar_settings_repository.get, project_id
     )
@@ -3678,5 +3726,178 @@ async def calendar_project_service_delete(
     logger.info(
         "calendar_service_rule_deleted",
         extra={"project_id": project_id, "rule_id": rule_id},
+    )
+    return {"deleted": True}
+
+
+# --- Canonical /api/projects/{id}/services surface (Epic 12, story 12.02) ---
+#
+# The single structured catalog of operator-curated services per project. Add /
+# edit is shared with admins (FR-21) via ``authorize_calendar_config``; remove
+# is operator-only (FR-18/FR-21 destructive-op rule) via the new
+# ``authorize_service_remove`` helper. Writes serialize through the per-row
+# ``acquire_service_upsert_lock`` so concurrent same-name upserts cannot race
+# (the unique-index expression catches inter-process collisions).
+
+
+class ProjectServiceUpsertRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+    name: str
+    description: str | None = None
+    price_text: str | None = None
+    tags: list | None = None
+    duration_minutes: int | None = None
+    working_hours: dict | None = None
+    service_days: list | None = None
+    date_exceptions: list | None = None
+
+
+class ProjectServiceDeleteRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+
+
+def _project_service_to_dict(service: ProjectService) -> dict[str, object]:
+    return {
+        "id": service.id,
+        "project_id": service.project_id,
+        "name": service.name,
+        "description": service.description,
+        "price_text": service.price_text,
+        "tags": service.tags,
+        "duration_minutes": service.duration_minutes,
+        "working_hours": service.working_hours,
+        "service_days": service.service_days,
+        "date_exceptions": service.date_exceptions,
+        "updated_at": service.updated_at,
+    }
+
+
+@app.get("/api/projects/{project_id}/services")
+async def api_project_services_list(
+    project_id: int,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    services = await asyncio.to_thread(
+        project_services_repository.list_for_project, project_id=project_id
+    )
+    return {
+        "project_id": project_id,
+        "services": [_project_service_to_dict(s) for s in services],
+    }
+
+
+def _upsert_project_service_call(
+    *,
+    project_id: int,
+    name: str,
+    request: ProjectServiceUpsertRequest,
+) -> ProjectService:
+    return project_services_repository.upsert(
+        project_id=project_id,
+        name=name,
+        description=request.description,
+        price_text=request.price_text,
+        tags=request.tags,
+        duration_minutes=request.duration_minutes,
+        working_hours=request.working_hours,
+        service_days=request.service_days,
+        date_exceptions=request.date_exceptions,
+    )
+
+
+@app.post("/api/projects/{project_id}/services")
+async def api_project_services_upsert(
+    project_id: int,
+    request: ProjectServiceUpsertRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    try:
+        stripped_name = validate_project_service(
+            name=request.name,
+            duration_minutes=request.duration_minutes,
+            working_hours=request.working_hours,
+            service_days=request.service_days,
+            date_exceptions=request.date_exceptions,
+        )
+    except ProjectServiceValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.reason) from exc
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    authorize_calendar_config(
+        actor=request.actor,
+        actor_role=request.actor_role,
+        project_settings=project_settings,
+    )
+    lock = await acquire_service_upsert_lock(
+        project_id=project_id, name=stripped_name
+    )
+    async with lock:
+        service = await asyncio.to_thread(
+            _upsert_project_service_call,
+            project_id=project_id,
+            name=stripped_name,
+            request=request,
+        )
+    logger.info(
+        "project_service_upserted",
+        extra={
+            "project_id": project_id,
+            "service_id": service.id,
+            "service_name": service.name,
+        },
+    )
+    return _project_service_to_dict(service)
+
+
+@app.delete("/api/projects/{project_id}/services/{service_id}")
+async def api_project_services_delete(
+    project_id: int,
+    service_id: int,
+    request: ProjectServiceDeleteRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    authorize_service_remove(actor_role=request.actor_role)
+    # Resolve the row first so we can acquire the per-name lock; this also
+    # gives us a single, uniform 404 path. Any race between this lookup and
+    # the actual delete (e.g. an alias-path delete sneaking in) is harmless —
+    # the SQL delete is a no-op and we still emit a structured success log,
+    # but we re-check with another ``get`` to keep semantics tight.
+    try:
+        existing = await asyncio.to_thread(
+            project_services_repository.get,
+            project_id=project_id,
+            service_id=service_id,
+        )
+    except ProjectServiceNotFound as exc:
+        raise HTTPException(
+            status_code=404, detail="project_service_not_found"
+        ) from exc
+    lock = await acquire_service_upsert_lock(
+        project_id=project_id, name=existing.name
+    )
+    async with lock:
+        try:
+            await asyncio.to_thread(
+                project_services_repository.delete,
+                project_id=project_id,
+                service_id=service_id,
+            )
+        except ProjectServiceNotFound as exc:
+            # Tight race: the row was removed (by the alias path, which uses a
+            # different lock) between our lookup and the delete. Map to 404
+            # rather than leaking a 500 — same body as the lookup-miss path.
+            raise HTTPException(
+                status_code=404, detail="project_service_not_found"
+            ) from exc
+    logger.info(
+        "project_service_deleted",
+        extra={
+            "project_id": project_id,
+            "service_id": service_id,
+            "service_name": existing.name,
+        },
     )
     return {"deleted": True}
