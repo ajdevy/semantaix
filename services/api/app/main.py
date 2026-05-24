@@ -3992,6 +3992,12 @@ def _nl_session_to_dict(session: ServicesNlSession) -> dict[str, object]:
     }
     if session.plaintext_confirm_token is not None:
         body["confirm_token"] = session.plaintext_confirm_token
+    if session.prior_cancelled_session_ids:
+        # First (and typically only) prior-pending session id that the
+        # single-pending invariant flipped to cancelled by this propose.
+        # The bot dispatcher (story 12.05) DMs a one-line notice before the
+        # new preview so the operator knows the older draft is gone.
+        body["prior_cancelled_session_id"] = session.prior_cancelled_session_ids[0]
     return body
 
 

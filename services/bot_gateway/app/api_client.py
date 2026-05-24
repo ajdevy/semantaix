@@ -381,6 +381,106 @@ class ApiClient:
             auth=True,
         )
 
+    async def services_nl_propose(
+        self,
+        *,
+        project_id: int,
+        originating_operator: str,
+        text: str,
+        internal_token: str,
+    ) -> dict:
+        """Propose a services NL op (story 12.05 / 12.04 endpoint).
+
+        Calls ``POST /api/projects/{project_id}/services/nl-ops`` with the
+        internal service token. Returns the api body which includes
+        ``session_id``, ``status``, ``preview``, ``op_type``, ``expires_at``,
+        and on success also ``confirm_token``; on a single-pending replacement
+        the api also echoes ``prior_cancelled_session_id``.
+        """
+        response = await self._bearer_post(
+            f"/api/projects/{project_id}/services/nl-ops",
+            internal_token=internal_token,
+            json={
+                "originating_operator": originating_operator,
+                "text": text,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def services_nl_confirm(
+        self,
+        *,
+        project_id: int,
+        session_id: int,
+        presenter_operator: str,
+        confirm_token: str,
+        actor_role: str = "operator",
+        internal_token: str,
+    ) -> dict:
+        """Confirm a pending services NL session (story 12.05).
+
+        Calls ``POST /api/projects/{project_id}/services/nl-ops/{session_id}/confirm``.
+        Raises ``ApiError`` with structured ``.detail`` set (e.g.
+        ``invalid_confirm_token``, ``not_session_owner``, ``session_expired``,
+        ``session_not_pending``, ``admin_cannot_remove_service``).
+        """
+        response = await self._bearer_post(
+            f"/api/projects/{project_id}/services/nl-ops/{session_id}/confirm",
+            internal_token=internal_token,
+            json={
+                "presenter_operator": presenter_operator,
+                "confirm_token": confirm_token,
+                "actor_role": actor_role,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def services_nl_cancel(
+        self,
+        *,
+        project_id: int,
+        session_id: int,
+        presenter_operator: str,
+        internal_token: str,
+    ) -> dict:
+        """Cancel a pending services NL session (story 12.05)."""
+        response = await self._bearer_post(
+            f"/api/projects/{project_id}/services/nl-ops/{session_id}/cancel",
+            internal_token=internal_token,
+            json={"presenter_operator": presenter_operator},
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def services_nl_latest_pending(
+        self,
+        *,
+        project_id: int,
+        operator: str,
+        internal_token: str,
+    ) -> dict | None:
+        """Latest pending services NL session for the (project, operator) pair.
+
+        Returns ``None`` on 404 (no pending). Never includes ``confirm_token``
+        — the api does not echo tokens on this endpoint; the bot dispatcher
+        caches the token returned by the prior propose call.
+        """
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.get(
+                (
+                    f"{self._base_url}/api/projects/{project_id}/services/nl-ops/"
+                    "latest-pending"
+                ),
+                params={"operator": operator},
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        if response.status_code == 404:
+            return None
+        _raise_for_status(response)
+        return response.json()
+
     async def admin_nl_ops_propose(
         self, *, admin_username: str, utterance: str
     ) -> dict:

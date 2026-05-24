@@ -422,6 +422,14 @@ class ServicesNlSession:
     soft_deleted_at: str | None
     # Plaintext token returned ONLY by `propose`; never persisted, never read.
     plaintext_confirm_token: str | None = field(default=None, compare=False)
+    # Session ids that were flipped to ``cancelled`` because this propose
+    # call replaced them under the single-pending invariant. Only populated
+    # on the dataclass returned directly by ``propose`` so the bot dispatcher
+    # can DM the operator a "previous request cancelled" notice before the
+    # new preview. Never persisted; always empty on reload via ``get``.
+    prior_cancelled_session_ids: tuple[int, ...] = field(
+        default=(), compare=False
+    )
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -645,7 +653,8 @@ class ServicesNlOpsRepository:
                 session=cancelled_session,
                 extra={"cancellation_reason": CANCEL_REASON_REPLACED},
             )
-        if plaintext_token is not None:
+        prior_ids = tuple(r.id for r in replaced_sessions)
+        if plaintext_token is not None or prior_ids:
             session = ServicesNlSession(
                 id=session.id,
                 project_id=session.project_id,
@@ -660,6 +669,7 @@ class ServicesNlOpsRepository:
                 consumed_at=session.consumed_at,
                 soft_deleted_at=session.soft_deleted_at,
                 plaintext_confirm_token=plaintext_token,
+                prior_cancelled_session_ids=prior_ids,
             )
         return session
 
