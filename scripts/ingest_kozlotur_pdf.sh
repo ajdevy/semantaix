@@ -13,7 +13,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 SRC_PDF="${1:-${HOME}/Downloads/Презентация 26.pdf}"
-API_CONTAINER="${API_CONTAINER:-semaintix-api-1}"
+API_CONTAINER="${API_CONTAINER:-semantaix-api-1}"
 CONTAINER_DIR="/app/.data/operator_uploads"
 CONTAINER_PATH="${CONTAINER_DIR}/kozlotur_brochure_26.pdf"
 NGINX_BASE="${NGINX_BASE:-http://127.0.0.1}"
