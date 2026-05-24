@@ -277,7 +277,7 @@ Acceptance criteria:
 
 ### FR-19 Calendar Availability Answering
 
-- For a calendar-enabled project, when a customer's question resolves to a configured service (**FR-22**), the system makes one live `freeBusy` call against the calendar operator's **primary** Google calendar over the look-ahead window, **intersects it with the per-service rules of FR-20**, interprets all times in the **project timezone**, and answers in Russian.
+- For a calendar-enabled project, when a customer's question resolves to a configured service (**FR-22**), the system makes one live `freeBusy` call against the calendar operator's **primary** Google calendar over the look-ahead window, **intersects it with the per-service rules of FR-20** (sourced from `project_services` rows where `duration_minutes IS NOT NULL`), interprets all times in the **project timezone**, and answers in Russian.
 - The customer states a start time; availability requires a free block **`[start, start + duration)`** that also falls within the service's working hours / service-days. The look-ahead horizon is a per-project config value (default 60 days).
 - Availability reflects only free/busy blocks; the bot never echoes event titles or other calendar content into customer-facing answers.
 - When availability cannot be computed confidently (provider error, token revoked / reconnect-needed), the request **escalates to HITL routed to the project's calendar operator** with context ("availability question; calendar error/uncertainty"). A wrong "yes, it's free" is treated as worse than an escalation.
@@ -293,7 +293,7 @@ Acceptance criteria:
 
 ### FR-20 Per-Service Scheduling Rules
 
-- Each calendar-enabled project defines its **schedulable** services with rules: service name (resolved per FR-22), duration, working-hours windows (**one or more per day**, e.g. to model a lunch break), recurring **service-days** (days of week), and **date-level exceptions/closures** (honoring RU public holidays via the existing `holidays` library).
+- Scheduling fields are the **calendar-eligible subset** of the canonical project services catalog (**FR-23**): each row in `project_services` that carries `duration_minutes IS NOT NULL` is schedulable. The schedulable fields are: service name (resolved per FR-22), duration, working-hours windows (**one or more per day**, e.g. to model a lunch break), recurring **service-days** (days of week), and **date-level exceptions/closures** (honoring RU public holidays via the existing `holidays` library).
 - Rules are runtime configuration (the `hitl_runtime_config` config-in-DB pattern), editable without code changes, scoped per project; in v1 all services map to the single project calendar operator.
 
 Acceptance criteria:
@@ -320,17 +320,114 @@ Acceptance criteria:
 
 ### FR-22 Service Resolution from Russian Text
 
-- Map a customer's free Russian text to a configured service via **lemma matching** (the existing `RussianNormalizer`), not raw string equality.
+- Map a customer's free Russian text to a configured **schedulable** service via **lemma matching** (the existing `RussianNormalizer`), not raw string equality. **"Schedulable"** here means a `project_services` row (per FR-23) with `duration_minutes IS NOT NULL` — i.e. the calendar-eligible subset only; catalog-only rows (no duration) are intentionally invisible to the calendar resolver to avoid "yes, маникюр exists" → "but I can't book it for you" answers.
+- The lemma matcher runs against the **project-scoped** `project_services` calendar-eligible subset for `ctx.project_id`; results from other projects' rows never surface.
 - **No match** (named service isn't configured) or **date/time given but no service named** → ask **one** clarifying question; if still unresolved → escalate to HITL.
-- **Ambiguous match** (multiple services match) → ask **one** disambiguating question; if still ambiguous → escalate to HITL.
+- **Ambiguous match** (multiple services match — including duplicate-lemma collisions like "стрижка мужская" / "стрижка детская") → ask **one** disambiguating question; if still ambiguous → escalate to HITL.
 - The system never guesses a service.
 
 Acceptance criteria:
 
-- A lemma match to exactly one configured service resolves to that service.
+- A lemma match to exactly one configured **schedulable** service (`duration_minutes IS NOT NULL`) resolves to that service.
+- A lemma match that hits only catalog-only rows (`duration_minutes IS NULL`) is treated as **no match** for scheduling purposes.
 - No-match / ambiguous-match / no-service-named triggers exactly **one** clarifying turn before escalation; unresolved after that clarification escalates (never silently picks a service).
 
 *Delivery:* **Epic 11.**
+
+### Feature Group: Unified Project Services Catalog (Epic 12)
+
+One canonical operator-curated `project_services` table per project drives BOTH the catalog answer ("какие услуги?") AND the calendar availability flow. Rows are catalog-only when scheduling fields are absent, calendar-only when only the calendar uses them, and dual-use in the common case where a single offering is both advertised and bookable. The catalog answer reads structured services first and **merges** with the existing LLM digest path (deduplicating services that appear in both — the structured row wins on conflict because it is more authoritative); the digest is consulted in full only when the structured table is empty for that project. Services are editable by operators (and admins on projects where they are registered operators) through two converging paths: a slash command and a Russian natural-language dialog with explicit preview/confirm. This eliminates the prior duplication where the same offering ("маникюр") had to be described once as a calendar service rule and again indirectly via an uploaded PDF.
+
+**Out of scope for Epic 12** (deferred — see decision log):
+- LLM-based extraction of services from `/kb_add`-uploaded PDFs into `project_services` rows (future epic).
+- Web admin UI for `project_services` CRUD (Epic 12 is bot-only — slash + NL).
+- Multi-operator / multi-calendar selection (Epic 11 deferral, unchanged here).
+- Booking / event creation (still the §2.2 Non-Goal).
+
+### FR-23 Canonical `project_services` table
+
+- Rename `calendar_service_rules` → `project_services` in the same SQLite DB (`.data/semantaix_calendar.db`).
+- **Migration is genuinely idempotent via existence-check guards**, not blind ALTER. Spec: (a) check `SELECT name FROM sqlite_master WHERE type='table'` — if `calendar_service_rules` exists and `project_services` does not, run `ALTER TABLE calendar_service_rules RENAME TO project_services`; if `project_services` already exists, skip the rename; (b) for each new column, query `PRAGMA table_info(project_services)` and `ADD COLUMN` only when the column is absent; (c) **fresh-deploy path**: if neither `calendar_service_rules` nor `project_services` exists, `CREATE TABLE project_services` directly with the final schema (no requirement that Epic 11's rules-table migration has run first). Migration touches **only** `calendar_service_rules` → `project_services` rename and the four new columns; the other tables in `semantaix_calendar.db` (`calendar_project_settings`, `calendar_operator_tokens`, `calendar_oauth_pending_state`) are unchanged by this migration.
+- Final columns: `id, project_id, name (REQUIRED), description, price_text (free-form, e.g. "от 2 000 ₽"), tags_json, duration_minutes, working_hours_json, service_days_json, date_exceptions_json, updated_at`.
+- **Uniqueness:** `UNIQUE(project_id, lower(name))` — one row per `(project_id, case-insensitive name)`.
+- **JSON column shapes (pinned for renderer + slash + NL extractors):**
+  - `working_hours_json`: `{"mon":[["10:00","19:00"]], "tue":[["10:00","13:00"],["14:00","18:00"]]}` — per-weekday list of `[start, end]` windows (multiple windows per day model lunch breaks per FR-20).
+  - `service_days_json`: `["mon","tue","wed","thu","fri","sat"]` — lowercase 3-letter weekday codes (matches Epic 11's existing convention).
+  - `date_exceptions_json`: `["2026-01-01","2026-05-09"]` — list of ISO date strings (closures / holiday exceptions on top of RU public holidays from the `holidays` library).
+  - Russian rendering map for these shapes lives in a new data file `data/russian_calendar_terms.json` (per the Russian-first-content-is-DATA rule — day codes → "пн"/"вт"/..., month-day formatting, exception phrasing).
+- A row is **calendar-eligible iff `duration_minutes IS NOT NULL`**. The calendar code filters on that predicate; rows without a duration are catalog-only.
+- A new `ProjectServiceRepository` (sync `sqlite3`, dispatched via `asyncio.to_thread`) is the canonical CRUD seam for both the catalog answer and the calendar resolver. **`ProjectServiceRepository.upsert` is keyed on `(project_id, lower(name))`** — duplicate-name attempts via slash or NL **update** the existing row (upsert semantics) and emit a `services_upsert_duplicate_name` structured-log event.
+- **Concurrency:** per-`(project_id, lower(name))` `asyncio.Lock` around `ProjectServiceRepository.upsert` (single-flight, mirroring Epic 11's per-operator calendar-token refresh lock). Combined with the uniqueness constraint, same-row add-vs-add races serialize and the second writer wins (last-writer-wins is acceptable for operator-curated content). Add-vs-delete races resolve to the last operation's intent. **No optimistic concurrency / `updated_at` precondition checks in v1.**
+- `CalendarSettingsRepository`'s service-rule method names remain as delegating aliases (`upsert_service_rule`, etc.) until the **Epic 13 cleanup PR (no later than 60 days after Epic 12 merge)**; deprecated paths log a `deprecation_warning_calendar_settings_service_rule` event.
+
+Acceptance criteria:
+
+- **Idempotency:** running the migration twice on the same DB is a no-op the second time (no `duplicate column name`, no `no such table`).
+- **Fresh deploy:** running the migration on a DB where neither `calendar_service_rules` nor `project_services` exists succeeds and produces `project_services` with the final schema, without requiring any Epic 11 migration to have run first.
+- After migration, `calendar_service_rules` no longer exists; `project_services` has all listed columns; the `UNIQUE(project_id, lower(name))` constraint is enforced (a duplicate insert raises `IntegrityError` if attempted directly; `upsert` converts that into an UPDATE); the `project_services_project_idx` index exists; existing calendar tests pass against the new table; secret/PII handling unchanged.
+- A row inserted with only `name` is valid and visible to the catalog answer; it is not visible to the calendar resolver until `duration_minutes` is set.
+- The other tables in `semantaix_calendar.db` (`calendar_project_settings`, `calendar_operator_tokens`, `calendar_oauth_pending_state`) are untouched by this migration (verified by snapshotting their schemas before/after).
+
+*Delivery:* **Epic 12.**
+
+### FR-24 Operator-facing service editing surface (slash + NL)
+
+- **Path A — slash command:** `/service add|edit|remove|list <name> [key=value …]`. Keys: `duration` (minutes), `days` (e.g. `mon-sat`), `hours` (e.g. `10:00-19:00`), `price` (free text), `desc` (free text), `tags` (comma list). Catalog-only entries omit scheduling keys. The existing `/calendar_service` command remains as a deprecation-logged alias until the **Epic 13 cleanup PR (no later than 60 days after Epic 12 merge)**; deprecated invocations log `deprecation_warning_calendar_service` AND the bot DMs a one-time user-facing migration hint: "Команда `/calendar_service` устарела — используйте `/service` или просто напишите 'добавь услугу …'".
+- **Path B — Russian natural-language dialog** (mirrors the existing `nl_knowledge_ops` / `admin_nl_dialog` pattern):
+  - New api module `services/api/app/services_nl_ops.py` with `ServicesNlOpsRepository` (state machine: `pending_confirmation → confirmed | cancelled | expired`; TTL 600s; `confirm_token = secrets.token_urlsafe(16)`; atomic `consume` via `hmac.compare_digest`). New table `services_nl_op_sessions` (shape mirrors `admin_nl_op_sessions`).
+  - New api endpoints (behind `internal_service_token` auth): `POST /api/projects/{project_id}/services/nl-ops`, `POST /api/projects/{project_id}/services/nl-ops/{session_id}/confirm`, `POST /api/projects/{project_id}/services/nl-ops/{session_id}/cancel`, `GET /api/projects/{project_id}/services/nl-ops/latest-pending`.
+  - New bot module `services/bot_gateway/app/services_nl_dialog.py`. Keyword triggers (**start-of-message anchored**, regex `^\s*(добавь|добавьте|новая|создай|удали|измени)\s+услугу\b`): `добавь услугу`, `добавьте услугу`, `новая услуга`, `создай услугу`, `удали услугу`, `измени услугу`. On match → propose → bot DMs a Russian preview such as "Создать услугу «маникюр» (60 мин, пн–сб 10:00–19:00, цена от 2000 ₽). Подтвердите ответом «да» или /confirm <token>. Отмена: «нет» или /cancel." On `да` / `/confirm` → confirm → apply via `ProjectServiceRepository.upsert`.
+  - Extraction is **regex-based** (no LLM). Ambiguous input fails closed: the bot replies "не понял, уточните". LLM-based extraction from free Russian text is a future epic.
+- **Preview-rendering & threat-model rules:**
+  - The Russian preview DM is rendered as **plain text** (no Telegram MarkdownV2 / HTML parse mode). Operator-supplied content (name, description, etc.) is escaped/quoted as plain text and each field is length-capped at 200 characters before rendering; longer values are truncated with a visible `…` and the preview includes the full untruncated form in a code-fenced echo so the operator can verify what is about to be applied.
+  - The confirm endpoint verifies `session.originating_operator == current_sender` before accepting `confirm_token`. Cross-operator replay (operator B presents operator A's token) returns 403 `not_session_owner`.
+  - **At most ONE pending session per `(project_id, operator)`** at any time. A second `добавь услугу …` trigger from the same operator on the same project while one is already pending **CANCELS the prior pending session** (status → `cancelled`) and starts a new one; the bot DMs the operator: "ваш предыдущий запрос отменён".
+- **Authorization & permission split (analogous to FR-18/FR-21):**
+  - Both paths gate on the project's operator registry (Epic 10 `operators` table; the sender must be a registered operator on the project). Non-registered senders are ignored silently with logged reason `unauthorized_services` — **no DM** is sent (avoids "trigger matched, silent reply" customer confusion when an operator accidentally triggers in a customer thread or when a non-operator types a trigger phrase).
+  - **`/service add` and `/service edit` are operator-AND-admin** (non-destructive; analogous to enable/disable in Epic 11). Admin must also be a registered project operator (narrower than FR-21's plain admin gate — see decision-log rationale: services are project-content, not platform-level config).
+  - **`/service remove` is operator-only** (destructive — irrecoverable loss of operator-curated price/description text; analogous to disconnect in FR-18). An admin attempting `/service remove` is rejected with 403 `admin_cannot_remove_service`.
+  - Edit / remove **target resolution**: name must resolve to exactly one row (via the FR-23 `(project_id, lower(name))` uniqueness constraint). A no-match returns "услуга «X» не найдена". An ambiguous match cannot occur because of the uniqueness constraint, but if encountered (data drift) it fails closed with "не понял, уточните".
+- **Audit:** every successful confirm logs `services_nl_op_confirmed` with the **full payload** (`trace_id, project_id, operator, op_type, name, description, price_text, tags, duration_minutes, working_hours_json, service_days_json, date_exceptions_json`). Operator-published service content is **non-secret** (it is the customer-facing price/description the bot reads back to every customer who asks), and durable values are required to answer the audit question "who set X's price to Y on date Z?". Same audit posture as today's `answer_traces`. `services_nl_op_cancelled` and `services_nl_op_expired` events carry the same full payload. **Service content is explicitly NOT subject to the FR-18 / NFR-3 secret-redaction rule** — that rule remains scoped to OAuth tokens / encryption keys.
+- **Session retention:** `services_nl_op_sessions` rows are **soft-deleted on confirm/cancel/expire** (status flipped; payload retained 30 days for audit) rather than hard-deleted. Expired sessions are reaped lazily on next `latest-pending` fetch for that `(project, operator)`.
+
+Acceptance criteria:
+
+- Slash and NL paths converge on the same `ProjectServiceRepository.upsert` (the same DB state results regardless of input path).
+- A non-registered sender's `/service` or `добавь услугу …` triggers nothing (no session row, no token, no DM); the attempt is logged as `unauthorized_services`.
+- An admin who is a registered project operator can `/service add` and `/service edit` but `/service remove` returns 403 `admin_cannot_remove_service`. A pure operator can do all three.
+- NL session: the `confirm_token` is single-use, expires after 600s, replay is rejected with 401/410; a token presented by a sender other than the session's originating operator returns 403 `not_session_owner`.
+- A second `добавь услугу …` from the same `(project, operator)` while one is pending cancels the prior session and DMs the migration message; the bot proceeds with the new preview.
+- **Russian regex "must parse" examples (all extract correctly):**
+  - `добавь услугу маникюр на 60 минут пн-сб 10-19 цена 2000 описание: классический и аппаратный` → name=`маникюр`, duration=60, days=`mon..sat`, hours=10:00–19:00, price=`2000`, desc=`классический и аппаратный`.
+  - `новая услуга стрижка детская длительность 30 мин цена 1500` → name=`стрижка детская`, duration=30, price=`1500`.
+  - Cyrillic dash variants `пн–сб` (en-dash) / `пн-сб` (hyphen) / `пн—сб` (em-dash) all normalize identically. "ё" vs "е" normalizes identically via `RussianNormalizer` (for free, since lemmas are used at name-resolution time).
+- **Russian regex "must fail closed" examples:**
+  - `добавь услугу маникюр и педикюр` (two services in one utterance) → "не понял, добавьте по одной услуге за раз".
+  - `добавь услугу маникюр на полтора часа` (non-digit duration) → "укажите длительность числом в минутах".
+- All quoted Russian strings are **illustrative**; actual copy is configured as data files (per the Russian-first-content-is-DATA rule).
+
+*Delivery:* **Epic 12.**
+
+### FR-25 Catalog answer reads structured services first (humanistic, question-tailored)
+
+- `GroundedRagAnswerer`'s catalog-query branch reads `project_services` for `ctx.project_id`. **Rendering happens at the repository boundary as natural Russian prose**, NOT as labelled `Название:` / `Цена:` blocks. Per-service format: `"Маникюр — 60 минут, пн–сб 10:00–19:00, цена от 2000 ₽. Классический и аппаратный."` (skip empty fields cleanly; no field-label tokens leak into the LLM input). Working hours, service days, and date exceptions are converted from their JSON shapes (per FR-23) via the `data/russian_calendar_terms.json` map; multi-window-per-day renders as `"пн 10:00–13:00, 14:00–19:00"`; date exceptions render as `"закрыто: 1 января, 9 мая"`. The rendered chunk is passed to the existing `answer_grounded` LLM step (no extra LLM call relative to today's digest path).
+- The `grounding_system` prompt is extended with a Russian guidance rule: "Если клиент просто спрашивает, какие есть услуги — перечисли только названия, естественно и кратко. Если клиент спрашивает про цену, детали, описание или конкретную услугу — добавь только то, что он спросил. Не дампи всё подряд." The model answers tailored to the question. (Soft nudge layered on top of the hard structural guarantee: because rendering already strips field-labels, the model cannot leak `Название:` etc. even under terse prompts.)
+- **Merge with digest, deduplicated.** When `project_services` is non-empty AND `_catalog_digest.get_digest(...)` returns content, both sources are combined into a single grounding chunk **with deduplication**: any service that appears in BOTH (matched by lemma-equality of the structured row's name against token sequences in the digest text, using `RussianNormalizer.lemmas`) is represented ONCE using the structured row's data (the structured row is authoritative). Digest content contributes only services not already represented as structured rows. When in doubt, both are kept — over-include is safer than under-include. The merged chunk's trace `source_id` is `merged:<project_id>`.
+- If `project_services` is empty for the project → fall back to the full existing `_catalog_digest.get_digest(...)` LLM path (`source_id` `catalog_digest:<project_id>`), so projects that only ever used `/kb_add` PDF uploads continue to work.
+- If only `project_services` has content and the digest is empty → render structured only (`source_id` `project_services:<project_id>`).
+- If both `project_services` and the digest are empty → existing `_skip(reason='catalog_empty')` behavior.
+- **Guardrails audit (release-readiness):** before merge, `data/russian_hedges.txt` is audited against typical price/duration phrasings (e.g. "от 2000 ₽", "от 60 минут") so the existing verifier does not false-reject legitimate catalog answers as "hedging."
+
+Acceptance criteria:
+
+- **No label leak:** the customer-visible answer for any catalog question contains none of the field-label substrings `Название:`, `Описание:`, `Цена:`, `Длительность:`, `Дни:`, `Часы:` (verified by an asserting test).
+- **General services question:** for "какие услуги?" on a 3-service project, the response includes the names of all 3 services and **NO `price_text` and NO `description` fields** unless the customer explicitly asks for them.
+- **Single-service question, bounded surface:** for "сколько стоит маникюр?", the response includes at most **one service's `price_text` and at most one service's `description`** (the resolved service); no other services' prices or descriptions appear in the answer.
+- **Trace source-id literal:** the `answer_traces.source_id` for the catalog branch carries exactly one of `project_services:<project_id>` (structured-only), `catalog_digest:<project_id>` (digest-only fallback), or `merged:<project_id>` (both sources merged) — per the four branches above.
+- **Brownfield continuity:** for a project that has only ever used `/kb_add` PDF uploads (empty `project_services`), the catalog answer continues to return the same content profile as before Epic 12 (digest-only path, `source_id` `catalog_digest:<project_id>`).
+- **Single-row insert does NOT silently shrink the catalog:** after adding one service row to a project that already has a 12-service digest, "какие услуги?" still returns up to 12 services (merged + deduplicated), not just the one structured row; the new `source_id` is `merged:<project_id>`.
+
+*Delivery:* **Epic 12.**
 
 ## 5. Non-Functional Requirements (NFR)
 
@@ -376,15 +473,16 @@ Persistence is SQLite, one DB file per concern under `.data/`. All access is via
 | `semantaix_incidents.db` | `incidents`, `incident_events` |
 | `semantaix_knowledge.db` | `knowledge_candidates`, `knowledge_moderation_candidates` |
 | `semantaix_rag.db` | `rag_chunks`, `catalog_digests` |
-| `semantaix_answer_traces.db` | `answer_traces` (append-only transparency records) |
-| `semantaix_nl_ops.db` | `nl_op_sessions`, `admin_nl_op_sessions`, `nl_audit_logs`, `knowledge_versions`, `trace_corrections` |
+| `semantaix_answer_traces.db` | `answer_traces` (append-only transparency records; `answer_traces.source_id` for the catalog branch carries one of `project_services:<project_id>` (structured-only), `catalog_digest:<project_id>` (digest-only fallback), or `merged:<project_id>` (both sources merged) per FR-25) |
+| `semantaix_nl_ops.db` | `nl_op_sessions`, `admin_nl_op_sessions`, `services_nl_op_sessions` (operator NL services dialog sessions, Epic 12; TTL 600s; status enum `pending_confirmation → confirmed | cancelled | expired`; soft-deleted rows retained 30 days for audit; `payload_json` blob holds operator-typed structured intent and is preserved through soft-delete), `nl_audit_logs`, `knowledge_versions`, `trace_corrections` |
 | `semantaix_operator_files.db` | `operator_files`, `operator_kb_session`, `operator_media_group_buffer` |
 | `semantaix_projects.db` | `projects` |
 | `semantaix_operators.db` | `operators` |
 | `semantaix_web_auth.db` | `web_auth_codes`, `web_sessions` |
 | `semantaix_admin_sessions.db` | `admin_login_codes`, `admin_sessions` |
 | `semantaix_backups.db` | `backups`, `backup_events` |
-| `semantaix_calendar.db` (Epic 11) | `calendar_project_settings` (enablement, designated calendar operator, project timezone, freeBusy look-ahead), `calendar_operator_tokens` (Fernet-encrypted refresh tokens, upsert-keyed by project+operator), `calendar_oauth_pending_state` (single-use `state` with TTL), `calendar_service_rules` (duration, working-hours windows, service-days, date exceptions) |
+| `semantaix_calendar.db` (Epic 11) | `calendar_project_settings` (enablement, designated calendar operator, project timezone, freeBusy look-ahead), `calendar_operator_tokens` (Fernet-encrypted refresh tokens, upsert-keyed by project+operator), `calendar_oauth_pending_state` (single-use `state` with TTL) |
+| `semantaix_calendar.db` (Epic 12) | `project_services` (canonical project services catalog: `id, project_id, name, description, price_text, tags_json, duration_minutes, working_hours_json, service_days_json, date_exceptions_json, updated_at` — renamed from `calendar_service_rules`; `UNIQUE(project_id, lower(name))`; calendar-eligible iff `duration_minutes IS NOT NULL`; JSON shapes pinned in FR-23) |
 
 Runtime configuration (operator routing, ack message, locale, grounding threshold,
 bot persona) lives in `hitl_runtime_config` rather than a separate `system_settings`
@@ -434,13 +532,16 @@ Post-MVP tenant capabilities (**FR-15–FR-17**) are planned in **Epic 08** and 
 
 Calendar availability & scheduling (**FR-18–FR-22**) is planned as **Epic 11** (read-only first). It builds on the answer pipeline (Epics 01/03), project & multi-operator scoping (Epics 08/10), incident integration (Epic 02), and the Telegram operator-command surface (Epic 09)—see `epics/epic-11-calendar-availability-scheduling.md` (to be created by `bmad-create-epics-and-stories`).
 
+Unified Project Services Catalog (**FR-23–FR-25**) is planned as **Epic 12** (one canonical structured services table powering both the catalog answer and the calendar). It depends on Epic 11 (table rename target + calendar reads), Epic 10 (operator registry for authorization), Epic 09 (operator command surface), and the existing `_catalog_digest` / `GroundedRagAnswerer` plumbing — see `epics/epic-12-unified-project-services-catalog.md` (to be created by `bmad-create-epics-and-stories`).
+
 ## 11. Glossary
 
 Load-bearing nouns, disambiguated for downstream UX/architecture/story work:
 
 - **Service (microservice):** one of the five FastAPI runtime services (`api`, `web_ui`, `bot_gateway`, `ingest_worker`, `scheduler`). Used in §1, NFR, architecture.
-- **Schedulable service / offering:** a bookable offering a project exposes for availability questions (e.g. "маникюр"), defined in `calendar_service_rules`. This is the sense used in **FR-19/FR-20/FR-22**. (Avoid the word "bookable" — booking/write is out of scope this phase.)
 - **Project:** a tenant-scoped configuration boundary delivered by Epics 08/10; owns its knowledge, operators, runtime config, and (optionally) calendar settings.
+- **Project service (Epic 12):** a canonical operator-curated row in `project_services` per project, carrying `name` (required) plus optional description / price / tags AND optional scheduling fields. The same row may appear in the catalog answer AND be schedulable on the calendar. **Catalog-eligible always; calendar-eligible iff `duration_minutes IS NOT NULL`.** See FR-23 / FR-20 / FR-22.
+- **Schedulable service (Epic 12):** the calendar-eligible subset of project services — rows where `duration_minutes IS NOT NULL`; consumed by `compute_availability` and the calendar `service_resolver`. This is the sense used in **FR-19/FR-20/FR-22**. (Avoid the word "bookable" — booking/write is out of scope this phase.)
 - **Operator:** a human who answers escalations and owns project assets (uploads, `/kb_add`, and now calendar connection). Identified by Telegram username.
 - **Calendar operator (Epic 11):** the single operator a calendar-enabled project designates as the source of availability (v1; multi-operator selection deferred).
 - **Tenant:** synonym for the project boundary in older PRD text (e.g. FR-15 "Tenant-Scoped"); "project" is the current term.

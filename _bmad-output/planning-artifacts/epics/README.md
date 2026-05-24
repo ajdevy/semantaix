@@ -22,6 +22,7 @@ This directory contains the BMAD feature-based sequential epic layout.
 9. `epic-09-operator-kb-growth.md`
 10. `epic-10-multi-operator-projects.md`
 11. `epic-11-calendar-availability-scheduling.md` *(planned)*
+12. `epic-12-unified-project-services-catalog.md` *(planned)*
 
 ## Recent Implementation Notes
 - **Epic 04 (HITL escalation):** runtime HITL recipient/chat routing can be updated by Telegram command `/hitl_config @username <chat_id>`.
@@ -29,6 +30,7 @@ This directory contains the BMAD feature-based sequential epic layout.
 - **Epic 09 (Operator KB growth):** the trusted HITL operator can grow the knowledge base from Telegram via slash command `/kb_add [confidential]` or Russian free-text intent (e.g. "добавь в базу", "сохрани в kb"). Supports PDF/DOCX/PPTX/TXT, image OCR (tesseract), and audio/video transcription (faster-whisper) — all local, zero external API spend. Uploads auto-publish (no second-human review); `confidential` uploads ground answers but redact `source_id` and `chunk_text` in answer-trace metadata.
 - **Access control:** only the effective operator (runtime `hitl_primary_operator_username` or env default) can trigger `/kb_add`; non-operator messages are ignored with reason `unauthorized_kb`.
 - **Epic 11 (Calendar availability & scheduling) — planned:** opt-in per project (default-off). The project's designated calendar operator connects their own Google Calendar via `/connect_calendar` (read-only OAuth); the bot answers customer availability questions by intersecting `freeBusy` with per-service rules in the project timezone. Read-only first (no booking). Uncertainty escalates to the calendar operator. See `epic-11-calendar-availability-scheduling.md` + `stories/epic-11/`.
+- **Epic 12 (Unified Project Services Catalog) — planned:** one canonical structured `project_services` table per project (renames Epic 11's `calendar_service_rules` + adds catalog columns) powers BOTH the catalog answer and the calendar; a row is catalog-eligible always and calendar-eligible iff `duration_minutes IS NOT NULL`. Two operator entry paths converge on one repo under a per-`(project_id, lower(name))` single-flight lock: `/service add|edit|remove|list` slash command and a Russian natural-language propose/confirm/cancel dialog (mirrors `admin_nl_ops`). `/service remove` is operator-only (preserves Epic 11's destructive-op rule); add/edit shared with admin only when that admin is also a registered project operator. The catalog answer merges structured rows with the existing `_catalog_digest` output via lemma-based dedup (`RussianNormalizer.lemmas`; structured wins on conflict), rendered as natural Russian prose at the repository boundary with NO field labels. Every `services_nl_op_*` event logs the full operator-typed payload (service content is non-secret published data). Migration is idempotent + has a fresh-deploy path. See `epic-12-unified-project-services-catalog.md` + `stories/epic-12/`.
 
 ## Carry-forward Constraint
 From Epic 03 onward, every epic must integrate with the incident/alerts solution from Epic 02.
