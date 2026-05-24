@@ -63,7 +63,7 @@ development_status:
   epic-10: done
   epic-10-retrospective: optional
 
-  # --- Active feature epic ---
+  # --- Shipped: Epic 11 ---
   epic-11: done
   11-01-calendar-schema-and-settings: done
   11-02-oauth-connect-api: done
@@ -74,3 +74,13 @@ development_status:
   11-07-availability-answerer-and-wiring: done
   11-08-enable-disable-and-service-config: done
   epic-11-retrospective: optional
+
+  # --- Active feature epic ---
+  epic-12: in-progress
+  12-01-project-services-schema-and-repo: backlog
+  12-02-canonical-services-api: backlog
+  12-03-service-slash-command: backlog
+  12-04-services-nl-ops-api: backlog
+  12-05-services-nl-dialog-bot: backlog
+  12-06-catalog-answerer-merge-with-dedup: backlog
+  epic-12-retrospective: optional
