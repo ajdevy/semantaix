@@ -132,6 +132,27 @@ from services.api.app.projects import (
 )
 from services.api.app.rag import RagRepository
 from services.api.app.russian_text import get_russian_normalizer
+from services.api.app.services_nl_ops import (
+    OP_SERVICE_REMOVE,
+    ServicesNlOpsRepository,
+    ServicesNlSession,
+    apply_confirmed,
+)
+from services.api.app.services_nl_ops import (
+    InvalidConfirmToken as ServicesNlInvalidConfirmToken,
+)
+from services.api.app.services_nl_ops import (
+    NlOpSessionExpired as ServicesNlSessionExpired,
+)
+from services.api.app.services_nl_ops import (
+    NlOpSessionNotFound as ServicesNlSessionNotFound,
+)
+from services.api.app.services_nl_ops import (
+    NlOpSessionNotOwner as ServicesNlSessionNotOwner,
+)
+from services.api.app.services_nl_ops import (
+    NlOpSessionNotPending as ServicesNlSessionNotPending,
+)
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
 from services.api.app.trace_corrections import (
@@ -210,6 +231,12 @@ init_token_schema(settings.calendar_db_path)
 # Epic 12 (story 12.01): bootstrap the operator-scoped services NL ops session
 # table next to the existing admin_nl_op_sessions table. Both are idempotent.
 init_services_nl_ops_schema(settings.nl_ops_db_path)
+# Epic 12 (story 12.04): operator-scoped NL ops state machine + endpoints
+# share the same DB file via the bootstrap above.
+services_nl_ops_repository = ServicesNlOpsRepository(
+    db_path=settings.nl_ops_db_path,
+    pending_ttl_seconds=settings.services_nl_op_session_ttl_seconds,
+)
 # Epic 12 (story 12.03): bootstrap the per-(project, operator) dedup table for
 # the ``/calendar_service`` migration-hint DM. Idempotent; lives in
 # semantaix_nl_ops.db alongside services_nl_op_sessions.
@@ -3908,3 +3935,192 @@ async def api_project_services_delete(
         },
     )
     return {"deleted": True}
+
+
+# --- /api/projects/{id}/services/nl-ops surface (Epic 12, story 12.04) ------
+#
+# Operator-driven natural-language proposal/confirm/cancel state machine on the
+# canonical `project_services` catalog. The bot dispatcher (story 12.05) DMs
+# previews + confirm-tokens; this api layer owns parsing, persistence, single-
+# pending invariant, ownership-checked confirmation, and full-payload audit
+# logging.
+
+
+class ServicesNlOpProposeRequest(BaseModel):
+    originating_operator: str
+    text: str
+    now: str | None = None
+
+
+class ServicesNlOpConfirmRequest(BaseModel):
+    presenter_operator: str
+    confirm_token: str
+    actor_role: str = "operator"
+    now: str | None = None
+
+
+class ServicesNlOpCancelRequest(BaseModel):
+    presenter_operator: str
+    now: str | None = None
+
+
+def _parse_optional_now(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid_now") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _nl_session_to_dict(session: ServicesNlSession) -> dict[str, object]:
+    body: dict[str, object] = {
+        "session_id": session.id,
+        "project_id": session.project_id,
+        "originating_operator": session.originating_operator,
+        "op_type": session.op_type,
+        "payload": session.payload,
+        "preview": session.preview,
+        "status": session.status,
+        "created_at": session.created_at,
+        "expires_at": session.expires_at,
+        "consumed_at": session.consumed_at,
+        "soft_deleted_at": session.soft_deleted_at,
+    }
+    if session.plaintext_confirm_token is not None:
+        body["confirm_token"] = session.plaintext_confirm_token
+    return body
+
+
+@app.post("/api/projects/{project_id}/services/nl-ops")
+async def api_services_nl_ops_propose(
+    project_id: int,
+    request: ServicesNlOpProposeRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    now = _parse_optional_now(request.now)
+    session = await asyncio.to_thread(
+        services_nl_ops_repository.propose,
+        project_id=project_id,
+        originating_operator=request.originating_operator,
+        text=request.text,
+        now=now,
+    )
+    return _nl_session_to_dict(session)
+
+
+@app.post("/api/projects/{project_id}/services/nl-ops/{session_id}/confirm")
+async def api_services_nl_ops_confirm(
+    project_id: int,
+    session_id: int,
+    request: ServicesNlOpConfirmRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    now = _parse_optional_now(request.now)
+    try:
+        existing = await asyncio.to_thread(
+            services_nl_ops_repository.get, session_id
+        )
+    except ServicesNlSessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
+    if existing.project_id != project_id:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    # Permission split per FR-18/FR-21: admin can propose `удали услугу` but
+    # the confirmation of a destructive op is operator-only.
+    if existing.op_type == OP_SERVICE_REMOVE:
+        authorize_service_remove(actor_role=request.actor_role)
+    else:
+        project_settings = await asyncio.to_thread(
+            calendar_settings_repository.get, project_id
+        )
+        authorize_calendar_config(
+            actor=request.presenter_operator,
+            actor_role=request.actor_role,
+            project_settings=project_settings,
+        )
+    try:
+        consumed = await asyncio.to_thread(
+            services_nl_ops_repository.consume,
+            session_id=session_id,
+            presenter_operator=request.presenter_operator,
+            confirm_token=request.confirm_token,
+            now=now,
+        )
+    except ServicesNlSessionNotOwner as exc:
+        raise HTTPException(status_code=403, detail="not_session_owner") from exc
+    except ServicesNlInvalidConfirmToken as exc:
+        raise HTTPException(
+            status_code=401, detail="invalid_confirm_token"
+        ) from exc
+    except ServicesNlSessionExpired as exc:
+        raise HTTPException(status_code=410, detail="session_expired") from exc
+    except ServicesNlSessionNotPending as exc:
+        raise HTTPException(
+            status_code=410, detail=f"session_not_pending:{exc}"
+        ) from exc
+    try:
+        applied_id = await apply_confirmed(
+            session=consumed,
+            repo=project_services_repository,
+            lock_factory=acquire_service_upsert_lock,
+        )
+    except ProjectServiceNotFound as exc:
+        raise HTTPException(
+            status_code=404, detail="project_service_not_found"
+        ) from exc
+    body = _nl_session_to_dict(consumed)
+    body["applied_op_type"] = consumed.op_type
+    body["applied_payload"] = consumed.payload
+    body["applied_service_id"] = applied_id
+    return body
+
+
+@app.post("/api/projects/{project_id}/services/nl-ops/{session_id}/cancel")
+async def api_services_nl_ops_cancel(
+    project_id: int,
+    session_id: int,
+    request: ServicesNlOpCancelRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    now = _parse_optional_now(request.now)
+    try:
+        existing = await asyncio.to_thread(
+            services_nl_ops_repository.get, session_id
+        )
+    except ServicesNlSessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
+    if existing.project_id != project_id:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    try:
+        cancelled = await asyncio.to_thread(
+            services_nl_ops_repository.cancel,
+            session_id=session_id,
+            presenter_operator=request.presenter_operator,
+            now=now,
+        )
+    except ServicesNlSessionNotOwner as exc:
+        raise HTTPException(status_code=403, detail="not_session_owner") from exc
+    except ServicesNlSessionNotPending as exc:
+        raise HTTPException(
+            status_code=410, detail=f"session_not_pending:{exc}"
+        ) from exc
+    return _nl_session_to_dict(cancelled)
+
+
+@app.get("/api/projects/{project_id}/services/nl-ops/latest-pending")
+async def api_services_nl_ops_latest_pending(
+    project_id: int,
+    operator: str,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    session = await asyncio.to_thread(
+        services_nl_ops_repository.latest_pending,
+        project_id=project_id,
+        operator=operator,
+    )
+    if session is None:
+        raise HTTPException(status_code=404, detail="no_pending")
+    return _nl_session_to_dict(session)
