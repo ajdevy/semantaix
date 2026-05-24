@@ -157,7 +157,11 @@ def test_operator_service_add(isolated_bot, monkeypatch):
     assert captured[0]["duration_minutes"] == 60
     assert captured[0]["service_days"] == ["mon", "tue", "wed", "thu", "fri", "sat"]
     assert captured[0]["working_hours"]["mon"] == ["10:00", "19:00"]
-    assert "#5" in isolated_bot["dms"][0][1]
+    # The `/calendar_service` alias may DM a one-time deprecation hint (12.03)
+    # before the success DM, depending on whether the hint-sent table already
+    # has an entry for this (project, operator). Assert against the LAST DM,
+    # which is always the success message.
+    assert "#5" in isolated_bot["dms"][-1][1]
 
 
 def test_operator_service_add_api_error(isolated_bot, monkeypatch):
@@ -192,7 +196,8 @@ def test_operator_service_remove(isolated_bot, monkeypatch):
     )
     assert response.json()["decision"] == "removed"
     assert captured == [{"rule_id": 5, "actor_role": "operator"}]
-    assert "#5" in isolated_bot["dms"][0][1]
+    # /calendar_service alias may DM the 12.03 deprecation hint first; success is last.
+    assert "#5" in isolated_bot["dms"][-1][1]
 
 
 def test_operator_service_remove_api_error(isolated_bot, monkeypatch):
