@@ -1,9 +1,11 @@
-"""Contract tests for the calendar enable/disable + service config endpoints
-(Epic 11, story 11.08).
+"""Contract tests for the calendar disable + service config endpoints
+(Epic 11, story 11.08; post-PR-#75 follow-up: /connect_calendar IS the enable
+action, the standalone /enable endpoint is gone).
 
 Covers the operator-vs-admin permission model (FR-18/FR-21): operator and admin
-both enable/disable + configure services; an admin attempting disconnect → 403;
-disable keeps the stored token; malformed service rules are rejected.
+both disable + configure services; an admin attempting disconnect → 403; disable
+keeps the stored token; malformed service rules are rejected. Auto-enable inside
+the OAuth callback lives in `test_api_calendar_oauth_contract.py`.
 """
 
 from __future__ import annotations
@@ -50,79 +52,36 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
     }
 
 
-# --- enable ----------------------------------------------------------------
+# --- enable surface removed ------------------------------------------------
+#
+# There is no standalone POST /calendar/projects/{id}/enable endpoint anymore.
+# Connect IS the enable action: /connect_calendar → OAuth callback atomically
+# flips enabled=1 + records the designated calendar operator alongside the
+# token upsert. See `test_api_calendar_oauth_contract.py` for the auto-enable
+# tests; the unknown-actor-role / non-designated-operator branches are still
+# exercised by `disable` (below) and the service-rule routes.
 
 
-def test_enable_requires_internal_token(env):
+# --- disable ---------------------------------------------------------------
+
+
+def test_disable_requires_internal_token(env):
     resp = env["client"].post(
-        f"/calendar/projects/{_PROJECT_ID}/enable",
+        f"/calendar/projects/{_PROJECT_ID}/disable",
         json={"actor": _OPERATOR, "actor_role": "operator"},
     )
     assert resp.status_code == 401
 
 
-def test_operator_enable_becomes_designated_operator(env):
-    resp = env["client"].post(
-        f"/calendar/projects/{_PROJECT_ID}/enable",
-        json={
-            "actor": _OPERATOR,
-            "actor_role": "operator",
-            "project_timezone": "Europe/Moscow",
-            "lookahead_days": 30,
-        },
-        headers=_AUTH,
-    )
-    assert resp.status_code == 200
-    assert resp.json() == {"enabled": True, "calendar_operator": _OPERATOR}
-    stored = env["settings_repo"].get(_PROJECT_ID)
-    assert stored.enabled is True
-    assert stored.calendar_operator == _OPERATOR
-    assert stored.lookahead_days == 30
-
-
-def test_admin_enable_preserves_existing_operator(env):
+def test_disable_unknown_actor_role_rejected(env):
     env["settings_repo"].enable(_PROJECT_ID, calendar_operator=_OPERATOR)
     resp = env["client"].post(
-        f"/calendar/projects/{_PROJECT_ID}/enable",
-        json={"actor": "@admin", "actor_role": "admin"},
-        headers=_AUTH,
-    )
-    assert resp.status_code == 200
-    assert resp.json()["calendar_operator"] == _OPERATOR
-
-
-def test_admin_enable_on_fresh_project_has_no_operator(env):
-    resp = env["client"].post(
-        f"/calendar/projects/{_PROJECT_ID}/enable",
-        json={"actor": "@admin", "actor_role": "admin"},
-        headers=_AUTH,
-    )
-    assert resp.status_code == 200
-    assert resp.json()["calendar_operator"] is None
-
-
-def test_non_designated_operator_enable_rejected(env):
-    env["settings_repo"].enable(_PROJECT_ID, calendar_operator=_OPERATOR)
-    resp = env["client"].post(
-        f"/calendar/projects/{_PROJECT_ID}/enable",
-        json={"actor": _OTHER_OPERATOR, "actor_role": "operator"},
-        headers=_AUTH,
-    )
-    assert resp.status_code == 403
-    assert resp.json()["detail"] == "not_calendar_operator"
-
-
-def test_unknown_actor_role_rejected(env):
-    resp = env["client"].post(
-        f"/calendar/projects/{_PROJECT_ID}/enable",
+        f"/calendar/projects/{_PROJECT_ID}/disable",
         json={"actor": _OPERATOR, "actor_role": "stranger"},
         headers=_AUTH,
     )
     assert resp.status_code == 403
     assert resp.json()["detail"] == "unknown_actor_role"
-
-
-# --- disable ---------------------------------------------------------------
 
 
 def test_operator_disable_keeps_token(env):

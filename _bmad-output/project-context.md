@@ -125,6 +125,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 **Edge cases / correctness:**
 - **Calendar is opt-in per project** (tri-state): (a) **not enabled for the project** → silent no-op `_skip("calendar_not_enabled")`, `handled=False`, pipeline continues — MUST NOT error, escalate, or add latency (cheap project-config check FIRST, before intent detection or any API call); (b) **enabled but operator not connected / token revoked** → helpful "not connected yet" reply and/or escalate to HITL, never a 500; (c) **connected** → compute availability and answer.
+- **Calendar connect = enable; disable is explicit.** There is no separate `/calendar_on` command or `/enable` endpoint: a successful `/connect_calendar` OAuth callback flips `enabled=1` and records the connecting operator atomically with the token upsert (existing `project_timezone` / `lookahead_days` preserved on re-connect). `/calendar_off` (operator + admin) flips `enabled=0` while keeping the stored token; re-enable = the operator re-runs `/connect_calendar`. `/disconnect_calendar` deletes the token and is **operator-only** (admin → 403). If the callback's enable write fails after the token upsert, return a 500-class error rather than a misleading success page.
 - Concurrent refresh → single-flight `asyncio.Lock`.
 - DST + cross-timezone: customer asks in one tz, operator calendar in another — resolve both via `zoneinfo`, compare in UTC.
 - A *wrong* "yes, it's free" is worse than escalation — when availability can't be computed confidently, escalate to HITL.

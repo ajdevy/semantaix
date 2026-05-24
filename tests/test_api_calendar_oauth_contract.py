@@ -184,6 +184,93 @@ def test_callback_happy_stores_encrypted_token_and_success_html(env, monkeypatch
     assert env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR) == "refresh-secret"
 
 
+# --- auto-enable on callback (no separate /enable endpoint) ----------------
+
+
+def test_callback_auto_enables_fresh_project_with_defaults(env, monkeypatch):
+    """A successful OAuth callback on a NOT-YET-ENABLED project flips it to
+    enabled and records the connecting operator as the designated calendar
+    operator, atomic with the token upsert. Defaults to project_timezone +
+    lookahead from the settings repo defaults."""
+    _stub_exchange(monkeypatch, refresh_token="refresh-secret")
+    state = _mint_state(env)
+    # No prior settings row → "fresh project".
+    assert env["settings_repo"].get(_PROJECT_ID) is None
+
+    resp = env["client"].get(
+        "/calendar/oauth/callback", params={"state": state, "code": "c"}
+    )
+    assert resp.status_code == 200
+
+    assert env["settings_repo"].is_enabled(_PROJECT_ID) is True
+    stored = env["settings_repo"].get(_PROJECT_ID)
+    assert stored.calendar_operator == _OPERATOR
+    # Repository defaults preserved on fresh insert.
+    assert stored.project_timezone == "Europe/Moscow"
+    assert stored.lookahead_days == 60
+
+
+def test_callback_preserves_existing_settings_on_already_enabled(env, monkeypatch):
+    """If the project is already enabled, the callback preserves the existing
+    project_timezone / lookahead_days and only updates the designated operator
+    (the new one is the connecting operator)."""
+    _stub_exchange(monkeypatch, refresh_token="refresh-secret")
+    env["settings_repo"].enable(
+        _PROJECT_ID,
+        calendar_operator="@old_op",
+        project_timezone="Asia/Yekaterinburg",
+        lookahead_days=14,
+    )
+    state = _mint_state(env)
+    resp = env["client"].get(
+        "/calendar/oauth/callback", params={"state": state, "code": "c"}
+    )
+    assert resp.status_code == 200
+
+    stored = env["settings_repo"].get(_PROJECT_ID)
+    assert stored.enabled is True
+    # Designated operator is the connecting one now.
+    assert stored.calendar_operator == _OPERATOR
+    # Existing tunables preserved (not overwritten with defaults).
+    assert stored.project_timezone == "Asia/Yekaterinburg"
+    assert stored.lookahead_days == 14
+
+
+def test_callback_enable_failure_returns_500_and_logs(env, monkeypatch, caplog):
+    """If `settings_repo.enable` raises after `token_repo.upsert` succeeds, the
+    callback returns a 500-class error rather than rendering a misleading
+    success page, and the failure is logged with the operator+project context.
+    The token remains stored (caller can retry by re-running /connect_calendar)."""
+    _stub_exchange(monkeypatch, refresh_token="refresh-secret")
+    state = _mint_state(env)
+
+    real_enable = env["settings_repo"].enable
+
+    def boom(project_id, **kwargs):
+        raise RuntimeError("simulated enable failure")
+
+    monkeypatch.setattr(env["settings_repo"], "enable", boom)
+
+    with caplog.at_level("ERROR", logger="services.api.app.main"):
+        resp = env["client"].get(
+            "/calendar/oauth/callback", params={"state": state, "code": "c"}
+        )
+
+    assert resp.status_code == 500
+    assert "text/html" in resp.headers["content-type"]
+    assert "ошибка" in resp.text.lower()
+    # Failure logged for the operator/project.
+    assert any(
+        "calendar_oauth_callback_enable_failed" in record.message
+        for record in caplog.records
+    )
+
+    # Token was upserted before the enable failure; restoring the real enable
+    # lets the operator retry (no manual cleanup needed).
+    assert env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR) == "refresh-secret"
+    monkeypatch.setattr(env["settings_repo"], "enable", real_enable)
+
+
 def test_callback_400_html_on_unknown_state(env):
     resp = env["client"].get(
         "/calendar/oauth/callback", params={"state": "forged", "code": "c"}

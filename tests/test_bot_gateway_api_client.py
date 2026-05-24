@@ -459,56 +459,9 @@ def _http_method_mock(monkeypatch, *, method: str, response_json: dict):
 
 
 # --- story 11.08 calendar config methods ----------------------------------
-
-
-@pytest.mark.asyncio
-async def test_calendar_enable_posts_with_optional_fields(monkeypatch):
-    http = _http_mock(monkeypatch, response_json={"enabled": True})
-    client = ApiClient(base_url="http://api:8000")
-    result = await client.calendar_enable(
-        project_id=11,
-        actor="@op",
-        actor_role="operator",
-        internal_token="svc",
-        project_timezone="Europe/Moscow",
-        lookahead_days=30,
-    )
-    assert result == {"enabled": True}
-    args = http.post.await_args
-    assert args.args[0] == "http://api:8000/calendar/projects/11/enable"
-    assert args.kwargs["json"] == {
-        "actor": "@op",
-        "actor_role": "operator",
-        "project_timezone": "Europe/Moscow",
-        "lookahead_days": 30,
-    }
-    assert args.kwargs["headers"] == {"Authorization": "Bearer svc"}
-
-
-@pytest.mark.asyncio
-async def test_calendar_enable_omits_unset_optionals(monkeypatch):
-    http = _http_mock(monkeypatch, response_json={"enabled": True})
-    client = ApiClient(base_url="http://api:8000")
-    await client.calendar_enable(
-        project_id=11, actor="@op", actor_role="admin", internal_token="svc"
-    )
-    assert http.post.await_args.kwargs["json"] == {
-        "actor": "@op",
-        "actor_role": "admin",
-    }
-
-
-@pytest.mark.asyncio
-async def test_calendar_enable_raises_api_error(monkeypatch):
-    _http_error_mock(
-        monkeypatch,
-        response=_error_response(status_code=403, body={"detail": "x"}),
-    )
-    client = ApiClient(base_url="http://api:8000")
-    with pytest.raises(ApiError):
-        await client.calendar_enable(
-            project_id=11, actor="@op", actor_role="operator", internal_token="t"
-        )
+#
+# No `calendar_enable` ApiClient method anymore — enablement is implicit in
+# the operator's /connect_calendar OAuth callback (PR #75 follow-up).
 
 
 @pytest.mark.asyncio

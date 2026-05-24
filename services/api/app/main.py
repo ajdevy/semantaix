@@ -3422,6 +3422,41 @@ async def calendar_oauth_callback(
         pending.operator,
         tokens.refresh_token,
     )
+    # /connect_calendar IS the enable action: a successful consent +
+    # token upsert atomically flips the project to enabled and records
+    # the connecting operator as the designated calendar operator. If the
+    # project is already enabled, we preserve the existing
+    # project_timezone / lookahead_days and only update the designated
+    # operator. There is no separate /calendar_on path — re-enable after
+    # /calendar_off means the operator re-runs /connect_calendar.
+    try:
+        existing = await asyncio.to_thread(
+            calendar_settings_repository.get, pending.project_id
+        )
+        enable_kwargs: dict[str, object] = {
+            "calendar_operator": pending.operator,
+        }
+        if existing is not None:
+            enable_kwargs["project_timezone"] = existing.project_timezone
+            enable_kwargs["lookahead_days"] = existing.lookahead_days
+        await asyncio.to_thread(
+            calendar_settings_repository.enable,
+            pending.project_id,
+            **enable_kwargs,
+        )
+    except Exception:
+        # Token upsert succeeded but enablement did not — surface the
+        # failure rather than silently leave a half-state. The operator
+        # can re-run /connect_calendar to retry; do not render a
+        # misleading success page.
+        logger.exception(
+            "calendar_oauth_callback_enable_failed",
+            extra={
+                "project_id": pending.project_id,
+                "operator": pending.operator,
+            },
+        )
+        return HTMLResponse(_calendar_callback_html(ok=False), status_code=500)
     logger.info(
         "calendar_oauth_connected",
         extra={"project_id": pending.project_id, "operator": pending.operator},
@@ -3465,19 +3500,15 @@ async def calendar_disconnect(
     return {"disconnected": True}
 
 
-# --- Calendar enable/disable + service config (story 11.08) ----------------
+# --- Calendar disable + service config (story 11.08) -----------------------
 #
-# Both the project's designated calendar operator AND an admin may enable,
-# disable, and define services (FR-21). Disable keeps the stored token. The
-# operator-vs-admin / admin-cannot-disconnect rule is enforced centrally via
-# ``services.api.app.calendar.authorization``.
-
-
-class CalendarEnableRequest(BaseModel):
-    actor: str
-    actor_role: str = "operator"
-    project_timezone: str = "Europe/Moscow"
-    lookahead_days: int = 60
+# Enable is implicit in /connect_calendar (the OAuth callback flips
+# ``enabled=1`` and records the connecting operator atomically with the token
+# upsert) — there is no separate enable endpoint. Disable + service-rule
+# config remain explicit and are usable by both the project's designated
+# calendar operator AND an admin (FR-21). Disable keeps the stored token; only
+# the operator may disconnect/delete (admin → 403). The operator-vs-admin
+# rule is enforced centrally via ``services.api.app.calendar.authorization``.
 
 
 class CalendarDisableRequest(BaseModel):
@@ -3512,42 +3543,6 @@ def _service_rule_to_dict(rule: ServiceRule) -> dict[str, object]:
         "date_exceptions": rule.date_exceptions,
         "updated_at": rule.updated_at,
     }
-
-
-@app.post("/calendar/projects/{project_id}/enable")
-async def calendar_project_enable(
-    project_id: int,
-    request: CalendarEnableRequest,
-    _principal: Annotated[str, Depends(require_internal_token)],
-) -> dict[str, object]:
-    project_settings = await asyncio.to_thread(
-        calendar_settings_repository.get, project_id
-    )
-    authorize_calendar_config(
-        actor=request.actor,
-        actor_role=request.actor_role,
-        project_settings=project_settings,
-    )
-    # An operator enabling becomes the designated calendar operator; an admin
-    # enabling preserves whatever operator (if any) is already designated.
-    if request.actor_role == "operator":
-        calendar_operator: str | None = request.actor
-    else:
-        calendar_operator = (
-            project_settings.calendar_operator if project_settings else None
-        )
-    await asyncio.to_thread(
-        calendar_settings_repository.enable,
-        project_id,
-        calendar_operator=calendar_operator,
-        project_timezone=request.project_timezone,
-        lookahead_days=request.lookahead_days,
-    )
-    logger.info(
-        "calendar_project_enabled",
-        extra={"project_id": project_id, "actor_role": request.actor_role},
-    )
-    return {"enabled": True, "calendar_operator": calendar_operator}
 
 
 @app.post("/calendar/projects/{project_id}/disable")

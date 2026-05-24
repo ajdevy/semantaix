@@ -156,30 +156,6 @@ class ApiClient:
         _raise_for_status(response)
         return response.json()
 
-    async def calendar_enable(
-        self,
-        *,
-        project_id: int,
-        actor: str,
-        actor_role: str,
-        internal_token: str,
-        project_timezone: str | None = None,
-        lookahead_days: int | None = None,
-    ) -> dict:
-        """Enable a project's calendar (story 11.08); operator or admin actor."""
-        body: dict[str, object] = {"actor": actor, "actor_role": actor_role}
-        if project_timezone is not None:
-            body["project_timezone"] = project_timezone
-        if lookahead_days is not None:
-            body["lookahead_days"] = lookahead_days
-        response = await self._bearer_post(
-            f"/calendar/projects/{project_id}/enable",
-            internal_token=internal_token,
-            json=body,
-        )
-        _raise_for_status(response)
-        return response.json()
-
     async def calendar_disable(
         self,
         *,

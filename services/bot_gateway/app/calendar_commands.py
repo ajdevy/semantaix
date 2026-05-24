@@ -3,9 +3,15 @@
 Give the project's designated calendar operator a Telegram entry point:
 
 - `/connect_calendar` asks the api to mint a Google consent URL and DMs it with a
-  short Russian instruction.
+  short Russian instruction. **Connect IS enable**: a successful OAuth callback
+  also flips the project to enabled and records the connecting operator as the
+  designated calendar operator atomically with the token upsert. There is no
+  separate `/calendar_on` command — re-enable after `/calendar_off` means the
+  operator re-runs `/connect_calendar`.
 - `/disconnect_calendar` asks the api to revoke + delete the stored token and DMs
   a Russian confirmation.
+- `/calendar_off` pauses the feature for the operator's project without losing
+  the stored token; `/calendar_service add|remove …` manages per-service rules.
 
 Gating mirrors the existing operator-command dispatch (`kb_intent._SLASH_RE`,
 `/hitl_config`): the sender is resolved against the Epic-10 operator registry, and
@@ -35,7 +41,6 @@ SendDmFn = Callable[[int, str], Awaitable[Any]]
 
 _CONNECT_RE = re.compile(r"^\s*/connect_calendar\b", re.IGNORECASE)
 _DISCONNECT_RE = re.compile(r"^\s*/disconnect_calendar\b", re.IGNORECASE)
-_CALENDAR_ON_RE = re.compile(r"^\s*/calendar_on\b\s*$", re.IGNORECASE)
 _CALENDAR_OFF_RE = re.compile(r"^\s*/calendar_off\b\s*$", re.IGNORECASE)
 _CALENDAR_SERVICE_RE = re.compile(r"^\s*/calendar_service\b\s*(?P<rest>.*)$", re.IGNORECASE)
 
@@ -47,7 +52,8 @@ _TIME_RE = re.compile(r"^(?P<start>\d{1,2}:\d{2})-(?P<end>\d{1,2}:\d{2})$")
 _CONNECT_INSTRUCTION = (
     "🔗 Чтобы подключить календарь, откройте ссылку и разрешите доступ "
     "(только чтение занятости):\n{consent_url}\n\n"
-    "После подтверждения вернитесь в Telegram — доступ заработает автоматически."
+    "После подтверждения вернитесь в Telegram — доступ заработает автоматически, "
+    "и календарь включится для вашего проекта."
 )
 _CONNECT_FALLBACK = (
     "Не получилось начать подключение календаря — попробуйте чуть позже."
@@ -58,12 +64,9 @@ _DISCONNECT_CONFIRMATION = (
 _DISCONNECT_FALLBACK = (
     "Не получилось отключить календарь — попробуйте чуть позже."
 )
-_CALENDAR_ON_CONFIRMATION = (
-    "✅ Календарь включён для вашего проекта. Подключите его командой /connect_calendar."
-)
 _CALENDAR_OFF_CONFIRMATION = (
-    "✅ Календарь выключен. Сохранённый токен не удалён — снова включите командой "
-    "/calendar_on."
+    "✅ Календарь выключен. Сохранённый токен не удалён — чтобы снова включить, "
+    "запустите /connect_calendar."
 )
 _CALENDAR_FALLBACK = "Не получилось изменить настройки календаря — попробуйте чуть позже."
 _SERVICE_USAGE = (
@@ -94,19 +97,16 @@ async def handle_calendar_command(
     text = normalized.text or ""
     is_connect = bool(_CONNECT_RE.match(text))
     is_disconnect = bool(_DISCONNECT_RE.match(text))
-    is_on = bool(_CALENDAR_ON_RE.match(text))
     is_off = bool(_CALENDAR_OFF_RE.match(text))
     service_match = _CALENDAR_SERVICE_RE.match(text)
     is_service = service_match is not None
-    if not (is_connect or is_disconnect or is_on or is_off or is_service):
+    if not (is_connect or is_disconnect or is_off or is_service):
         return None
 
     if is_connect:
         command = "connect"
     elif is_disconnect:
         command = "disconnect"
-    elif is_on:
-        command = "calendar_on"
     elif is_off:
         command = "calendar_off"
     else:
@@ -139,15 +139,6 @@ async def handle_calendar_command(
         )
     if is_disconnect:
         return await _do_disconnect(
-            normalized=normalized,
-            api_client=api_client,
-            send_dm=send_dm,
-            project_id=resolved.project_id,
-            operator=resolved.username,
-            internal_token=internal_token,
-        )
-    if is_on:
-        return await _do_enable(
             normalized=normalized,
             api_client=api_client,
             send_dm=send_dm,
@@ -253,37 +244,6 @@ async def _do_disconnect(
         "route": "calendar_disconnect",
         "decision": "disconnected",
     }
-
-
-async def _do_enable(
-    *,
-    normalized: NormalizedTelegramMessage,
-    api_client: ApiClient,
-    send_dm: SendDmFn,
-    project_id: int,
-    operator: str,
-    internal_token: str,
-) -> dict[str, str]:
-    try:
-        await api_client.calendar_enable(
-            project_id=project_id,
-            actor=operator,
-            actor_role="operator",
-            internal_token=internal_token,
-        )
-    except (httpx.HTTPStatusError, httpx.RequestError):
-        logger.warning(
-            "calendar_enable_failed",
-            extra={"project_id": project_id, "operator": operator},
-        )
-        await send_dm(normalized.chat_id, _CALENDAR_FALLBACK)
-        return {"status": "accepted", "route": "calendar_on", "decision": "api_error"}
-    logger.info(
-        "calendar_enabled",
-        extra={"project_id": project_id, "operator": operator},
-    )
-    await send_dm(normalized.chat_id, _CALENDAR_ON_CONFIRMATION)
-    return {"status": "accepted", "route": "calendar_on", "decision": "enabled"}
 
 
 async def _do_disable(

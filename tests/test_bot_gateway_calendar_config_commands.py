@@ -1,8 +1,10 @@
-"""Unit tests for the calendar enable/disable + service config commands
-(Epic 11, story 11.08).
+"""Unit tests for the calendar disable + service config commands
+(Epic 11, story 11.08; PR #75 follow-up — /connect_calendar IS the enable
+action, so the /calendar_on operator command and the admin /calendar_on @slug
+command are removed).
 
-Operator path: `/calendar_on`, `/calendar_off`, `/calendar_service add|remove`.
-Admin path: `/calendar_on @slug`, `/calendar_off @slug` via the admin dispatcher.
+Operator path: `/calendar_off`, `/calendar_service add|remove`.
+Admin path: `/calendar_off @slug` via the admin dispatcher.
 Drives the bot_gateway webhook end-to-end with stubbed `ApiClient` methods and a
 fake `_send_dm`, mirroring the existing calendar-command tests.
 """
@@ -86,31 +88,7 @@ def _registered_operator_record():
     }
 
 
-# --- operator /calendar_on / off -------------------------------------------
-
-
-def test_operator_calendar_on_enables(isolated_bot, monkeypatch):
-    _stub_operator_lookup(monkeypatch, record=_registered_operator_record())
-    captured: list[dict] = []
-
-    async def fake_enable(*, project_id, actor, actor_role, internal_token):
-        captured.append(
-            {"project_id": project_id, "actor": actor, "actor_role": actor_role}
-        )
-        return {"enabled": True, "calendar_operator": actor}
-
-    monkeypatch.setattr(bot_main.api_client, "calendar_enable", fake_enable)
-
-    client = TestClient(bot_app)
-    response = client.post("/telegram/webhook", json=_message(text="/calendar_on"))
-    body = response.json()
-    assert body["route"] == "calendar_on"
-    assert body["decision"] == "enabled"
-    assert captured == [
-        {"project_id": _PROJECT_ID, "actor": _OPERATOR, "actor_role": "operator"}
-    ]
-    assert len(isolated_bot["dms"]) == 1
-    assert "включён" in isolated_bot["dms"][0][1]
+# --- operator /calendar_off -------------------------------------------------
 
 
 def test_operator_calendar_off_disables(isolated_bot, monkeypatch):
@@ -128,20 +106,6 @@ def test_operator_calendar_off_disables(isolated_bot, monkeypatch):
     assert "выключен" in isolated_bot["dms"][0][1]
 
 
-def test_operator_calendar_on_api_error_dms_fallback(isolated_bot, monkeypatch):
-    _stub_operator_lookup(monkeypatch, record=_registered_operator_record())
-
-    async def fake_enable(*, project_id, actor, actor_role, internal_token):
-        raise httpx.RequestError("boom")
-
-    monkeypatch.setattr(bot_main.api_client, "calendar_enable", fake_enable)
-
-    client = TestClient(bot_app)
-    response = client.post("/telegram/webhook", json=_message(text="/calendar_on"))
-    assert response.json()["decision"] == "api_error"
-    assert "Не получилось" in isolated_bot["dms"][0][1]
-
-
 def test_operator_calendar_off_api_error_dms_fallback(isolated_bot, monkeypatch):
     _stub_operator_lookup(monkeypatch, record=_registered_operator_record())
 
@@ -155,12 +119,12 @@ def test_operator_calendar_off_api_error_dms_fallback(isolated_bot, monkeypatch)
     assert response.json()["decision"] == "api_error"
 
 
-def test_calendar_on_non_operator_ignored(isolated_bot, monkeypatch):
+def test_calendar_off_non_operator_ignored(isolated_bot, monkeypatch):
     _stub_operator_lookup(monkeypatch, record=None)
     client = TestClient(bot_app)
     response = client.post(
         "/telegram/webhook",
-        json=_message(text="/calendar_on", username="random_user"),
+        json=_message(text="/calendar_off", username="random_user"),
     )
     body = response.json()
     assert body["status"] == "ignored"
@@ -292,7 +256,11 @@ def test_parse_service_add_single_day():
     assert parsed["service_days"] == ["wed"]
 
 
-# --- admin /calendar_on @slug / off @slug ----------------------------------
+# --- admin /calendar_off @slug ---------------------------------------------
+#
+# There is no admin /calendar_on @slug command anymore — enablement happens
+# in the operator's /connect_calendar OAuth callback. Disable + service config
+# remain as admin paths.
 
 
 def _stub_list_projects(monkeypatch, *, items):
@@ -300,37 +268,6 @@ def _stub_list_projects(monkeypatch, *, items):
         return {"items": items}
 
     monkeypatch.setattr(bot_main.api_client, "list_projects", fake_list)
-
-
-def test_admin_calendar_on_slug_enables(isolated_bot, monkeypatch):
-    # Admin is not a registered operator → operator handler ignores; admin
-    # dispatcher then handles it.
-    _stub_operator_lookup(monkeypatch, record=None)
-    _stub_list_projects(
-        monkeypatch, items=[{"id": _PROJECT_ID, "slug": "salon"}]
-    )
-    captured: list[dict] = []
-
-    async def fake_enable(*, project_id, actor, actor_role, internal_token):
-        captured.append(
-            {"project_id": project_id, "actor": actor, "actor_role": actor_role}
-        )
-        return {"enabled": True}
-
-    monkeypatch.setattr(bot_main.api_client, "calendar_enable", fake_enable)
-
-    client = TestClient(bot_app)
-    response = client.post(
-        "/telegram/webhook",
-        json=_message(text="/calendar_on @salon", username="admin"),
-    )
-    body = response.json()
-    assert body["route"] == "calendar_toggle"
-    assert body["decision"] == "enabled"
-    assert captured == [
-        {"project_id": _PROJECT_ID, "actor": _ADMIN, "actor_role": "admin"}
-    ]
-    assert "включён" in isolated_bot["dms"][0][1]
 
 
 def test_admin_calendar_off_slug_disables(isolated_bot, monkeypatch):
@@ -352,42 +289,43 @@ def test_admin_calendar_off_slug_disables(isolated_bot, monkeypatch):
         json=_message(text="/calendar_off salon", username="admin"),
     )
     body = response.json()
+    assert body["route"] == "calendar_off"
     assert body["decision"] == "disabled"
     assert captured == [{"actor_role": "admin"}]
     assert "сохранён" in isolated_bot["dms"][0][1]
 
 
-def test_admin_calendar_on_unknown_project(isolated_bot, monkeypatch):
+def test_admin_calendar_off_unknown_project(isolated_bot, monkeypatch):
     _stub_operator_lookup(monkeypatch, record=None)
     _stub_list_projects(monkeypatch, items=[])
 
     client = TestClient(bot_app)
     response = client.post(
         "/telegram/webhook",
-        json=_message(text="/calendar_on @ghost", username="admin"),
+        json=_message(text="/calendar_off @ghost", username="admin"),
     )
     body = response.json()
     assert body["decision"] == "project_missing"
     assert "не найден" in isolated_bot["dms"][0][1]
 
 
-def test_admin_calendar_on_api_error(isolated_bot, monkeypatch):
+def test_admin_calendar_off_api_error(isolated_bot, monkeypatch):
     _stub_operator_lookup(monkeypatch, record=None)
     _stub_list_projects(
         monkeypatch, items=[{"id": _PROJECT_ID, "slug": "salon"}]
     )
 
-    async def fake_enable(*, project_id, actor, actor_role, internal_token):
+    async def fake_disable(*, project_id, actor, actor_role, internal_token):
         request = httpx.Request("POST", "http://api/x")
         response = httpx.Response(403, request=request)
         raise httpx.HTTPStatusError("forbidden", request=request, response=response)
 
-    monkeypatch.setattr(bot_main.api_client, "calendar_enable", fake_enable)
+    monkeypatch.setattr(bot_main.api_client, "calendar_disable", fake_disable)
 
     client = TestClient(bot_app)
     response = client.post(
         "/telegram/webhook",
-        json=_message(text="/calendar_on @salon", username="admin"),
+        json=_message(text="/calendar_off @salon", username="admin"),
     )
     body = response.json()
     assert body["status"] == "error"
