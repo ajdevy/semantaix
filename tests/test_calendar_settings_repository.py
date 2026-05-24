@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from services.api.app.calendar.settings_repository import (
     CalendarProjectSettings,
     CalendarSettingsRepository,
@@ -21,8 +23,10 @@ def test_init_schema_creates_tables(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
+    # Epic 12 renamed calendar_service_rules → project_services.
     assert "calendar_project_settings" in names
-    assert "calendar_service_rules" in names
+    assert "project_services" in names
+    assert "calendar_service_rules" not in names
 
 
 def test_is_enabled_false_when_no_row(tmp_path):
@@ -82,17 +86,20 @@ def test_set_calendar_operator_inserts_then_updates(tmp_path):
 
 def test_service_rule_upsert_list_delete(tmp_path):
     repo = _repo(tmp_path)
-    assert repo.list_service_rules(5) == []
+    with pytest.warns(DeprecationWarning):
+        assert repo.list_service_rules(5) == []
 
-    rule_id = repo.upsert_service_rule(
-        project_id=5,
-        name="haircut",
-        duration_minutes=45,
-        working_hours={"mon": ["09:00", "18:00"]},
-        service_days=["mon", "tue"],
-        date_exceptions=["2026-01-01"],
-    )
-    rules = repo.list_service_rules(5)
+    with pytest.warns(DeprecationWarning):
+        rule_id = repo.upsert_service_rule(
+            project_id=5,
+            name="haircut",
+            duration_minutes=45,
+            working_hours={"mon": ["09:00", "18:00"]},
+            service_days=["mon", "tue"],
+            date_exceptions=["2026-01-01"],
+        )
+    with pytest.warns(DeprecationWarning):
+        rules = repo.list_service_rules(5)
     assert len(rules) == 1
     rule = rules[0]
     assert isinstance(rule, ServiceRule)
@@ -104,33 +111,46 @@ def test_service_rule_upsert_list_delete(tmp_path):
     assert rule.date_exceptions == ["2026-01-01"]
     assert rule.updated_at is not None
 
-    updated_id = repo.upsert_service_rule(
-        project_id=5,
-        name="haircut-deluxe",
-        duration_minutes=60,
-        rule_id=rule_id,
-    )
+    with pytest.warns(DeprecationWarning):
+        updated_id = repo.upsert_service_rule(
+            project_id=5,
+            name="haircut-deluxe",
+            duration_minutes=60,
+            rule_id=rule_id,
+        )
     assert updated_id == rule_id
-    updated = repo.list_service_rules(5)[0]
+    with pytest.warns(DeprecationWarning):
+        updated = repo.list_service_rules(5)[0]
     assert updated.name == "haircut-deluxe"
     assert updated.duration_minutes == 60
     assert updated.working_hours is None
     assert updated.service_days is None
     assert updated.date_exceptions is None
 
-    repo.delete_service_rule(rule_id)
-    assert repo.list_service_rules(5) == []
+    with pytest.warns(DeprecationWarning):
+        repo.delete_service_rule(rule_id)
+    with pytest.warns(DeprecationWarning):
+        assert repo.list_service_rules(5) == []
 
 
 def test_init_schema_idempotent_preserves_rows(tmp_path):
     path = str(tmp_path / "calendar.sqlite3")
     repo = CalendarSettingsRepository(db_path=path)
     repo.enable(11, calendar_operator="@keep")
-    rule_id = repo.upsert_service_rule(project_id=11, name="r")
+    with pytest.warns(DeprecationWarning):
+        rule_id = repo.upsert_service_rule(project_id=11, name="r")
     repo.init_schema()
     repo.init_schema()
     assert repo.is_enabled(11) is True
     assert repo.get(11).calendar_operator == "@keep"
-    rules = repo.list_service_rules(11)
+    with pytest.warns(DeprecationWarning):
+        rules = repo.list_service_rules(11)
     assert len(rules) == 1
     assert rules[0].id == rule_id
+
+
+def test_delete_service_rule_idempotent_when_missing(tmp_path):
+    """Legacy alias is idempotent — no error when the row is absent."""
+    repo = _repo(tmp_path)
+    with pytest.warns(DeprecationWarning):
+        repo.delete_service_rule(9999)  # never inserted; must not raise

@@ -67,6 +67,9 @@ from services.api.app.calendar.service_rule_validation import (
     ServiceRuleValidationError,
     validate_service_rule,
 )
+from services.api.app.calendar.services_nl_op_session_repository import (
+    init_services_nl_ops_schema,
+)
 from services.api.app.calendar.settings_repository import (
     CalendarSettingsRepository,
     ServiceRule,
@@ -182,6 +185,9 @@ calendar_oauth_state_repository = CalendarOAuthStateRepository(
     db_path=settings.calendar_db_path
 )
 init_token_schema(settings.calendar_db_path)
+# Epic 12 (story 12.01): bootstrap the operator-scoped services NL ops session
+# table next to the existing admin_nl_op_sessions table. Both are idempotent.
+init_services_nl_ops_schema(settings.nl_ops_db_path)
 
 
 def _build_calendar_token_repository(app_settings) -> CalendarTokenRepository | None:
