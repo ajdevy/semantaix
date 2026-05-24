@@ -3366,13 +3366,12 @@ async def calendar_connect_initiate(
     client_host = http_request.client.host if http_request.client else "unknown"
     if _calendar_oauth_rate_limited(f"initiate:{client_host}"):
         raise HTTPException(status_code=429, detail="rate_limited")
-    project_settings = await asyncio.to_thread(
-        calendar_settings_repository.get, request.project_id
-    )
-    if project_settings is None or not project_settings.enabled:
-        raise HTTPException(status_code=400, detail="calendar_not_enabled")
-    if project_settings.calendar_operator != request.operator:
-        raise HTTPException(status_code=400, detail="not_calendar_operator")
+    # Note: no project-enabled / designated-operator precondition here. The
+    # OAuth callback is the authoritative gate: on success it auto-enables the
+    # project and records the requesting operator as the designated calendar
+    # operator (PR #76). Requiring enabled=1 here would make bootstrap
+    # impossible, and requiring an existing designated operator would block
+    # operator handover / re-consent flows.
     state = await asyncio.to_thread(
         calendar_oauth_state_repository.create,
         project_id=request.project_id,
