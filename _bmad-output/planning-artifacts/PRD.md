@@ -259,13 +259,15 @@ Read-only availability first: the bot answers customer questions like "is servic
 
 - The project's designated **calendar operator** connects their own Google Calendar from Telegram via a slash command (e.g. `/connect_calendar`), gated to authorized operators.
 - The bot DMs a Google OAuth consent URL scoped **read-only** (`calendar.readonly` / free-busy). Google redirects to a callback endpoint that validates a **single-use, server-stored `state` token** (TTL mirrors the existing login-code: ~5 min, consumed on first use). Because the browser hitting the callback is **not** Telegram-authenticated, `state` is the sole binding between the browser callback and the initiating operator. The callback exchanges the auth code, stores an encrypted refresh token (**upsert on `(project, operator)`** — re-consent overwrites), and is **rate-limited** (unauthenticated endpoint that triggers token exchange); it renders a simple success/failure page to the operator's browser.
+- **Connect IS enable.** A successful callback also flips the project to `enabled=1` and records the connecting operator as the designated calendar operator — atomically with the token upsert. There is no separate enable command or endpoint; an operator implicitly enables their project by connecting. If the enable write fails after the token upsert, the callback surfaces a 500-class error rather than rendering a misleading success page (the operator can retry by re-running `/connect_calendar`).
 - Access tokens are minted on demand and cached until near-expiry.
 - **Revocation & long-term expiry handling:** a refresh that fails — operator revoked access on Google, or the refresh token expired (Google's 7-day "Testing"-status, 6-month-unused, or per-client token-cap rules) — is detected on next use. The operator transitions to a **"reconnect needed"** state, is proactively notified via Telegram to re-run `/connect_calendar`, an **incident is emitted** (Epic-02 integration), and the dead token row is **cleared** (never left as a poison row). No customer-visible error.
-- Disconnect (**operator-only**): best-effort call to Google's token-revocation endpoint, then delete the local token regardless (if revoke fails, still delete locally and log). Connecting and disconnecting are auditable operator actions; an admin cannot disconnect (admins may only enable/disable per FR-21).
+- Disconnect (**operator-only**): best-effort call to Google's token-revocation endpoint, then delete the local token regardless (if revoke fails, still delete locally and log). Connecting and disconnecting are auditable operator actions; an admin cannot disconnect (admins may only disable per FR-21).
 
 Acceptance criteria:
 
-- Successful consent → stored encrypted refresh token + Telegram confirmation. A forged, expired, replayed, or unmatched `state` is rejected and nothing is stored.
+- Successful consent → stored encrypted refresh token + project enabled with the connecting operator recorded as the designated calendar operator (atomic with token storage) + Telegram confirmation. A forged, expired, replayed, or unmatched `state` is rejected and nothing is stored or enabled.
+- For an already-enabled project, a re-connect preserves the existing `project_timezone` / `lookahead_days` and only updates the designated operator.
 - `state` is single-use (consumed on first callback) and expires after its TTL.
 - A revoked/expired refresh token is detected on next use → reconnect state + operator notification + incident emitted + token cleared, with no customer-visible error.
 - Re-connecting the same operator overwrites the prior token (one row per `(project, operator)`).
@@ -305,14 +307,14 @@ Acceptance criteria:
 
 - The calendar capability is **default-off**; a project must explicitly enable it **and** designate a calendar operator.
 - The answer pipeline treats calendar as a tri-state: **(a) not enabled** → silent no-op (the calendar logic declines, the pipeline proceeds normally, no error); **(b) enabled but the calendar operator is not connected / in reconnect state** → a "calendar isn't connected yet" reply and/or HITL escalation, never a 500; **(c) connected** → compute and answer per FR-19.
-- **Enable/disable vs disconnect (permission model):** "**Disable**" turns the feature off for a project but **keeps** the stored token; "**disconnect/delete**" removes the integration and deletes the stored token (FR-18). Both the **calendar operator** and an **admin** may enable/disable a project's calendar. **Only the operator may disconnect/delete** the integration — an admin can turn it off but cannot delete the operator's connected calendar.
+- **Enable / disable / disconnect (permission model):** there is no separate enable command or endpoint — **`/connect_calendar` IS the enable action.** A successful OAuth callback flips the project to enabled and records the connecting operator as the designated calendar operator (FR-18). This means an operator implicitly enables their project by connecting, and an admin cannot enable a project without an operator's consent — by design. **"Disable" turns the feature off but keeps the stored token; both the operator and an admin may disable** (`/calendar_off`). **Re-enable after disable = the operator re-runs `/connect_calendar`** (which re-runs Google consent, refreshes the token, and re-flips `enabled=1`). **"Disconnect/delete" removes the integration and deletes the stored token (FR-18) — operator-only.** An admin can pause the integration but cannot enable it and cannot delete the operator's connected calendar.
 - The enablement check is a **single cached project-settings read performed before intent detection or any API call**; its overhead is negligible. (The exact pipeline placement — a standalone answerer vs a `scheduling_context` signal — is decided in the architecture step, but the "config check precedes intent/API work" ordering is the binding requirement.)
 
 Acceptance criteria:
 
 - On a project with calendar disabled, calendar logic adds no customer-visible behavior, and the project-settings check precedes intent detection and any API call.
-- Enabling a project and connecting its calendar operator makes availability answers live; disabling reverts to the no-op state without deleting the stored token.
-- The operator and an admin can both enable/disable; an admin attempting to disconnect/delete the integration is rejected (operator-only).
+- An operator running `/connect_calendar` and completing Google consent makes the project enabled and availability answers live (atomic with token storage); disabling reverts to the no-op state without deleting the stored token; re-running `/connect_calendar` re-enables.
+- Both the operator and an admin can disable; an admin attempting to disconnect/delete the integration is rejected (operator-only); there is no admin enable path.
 
 *Delivery:* **Epic 11.**
 

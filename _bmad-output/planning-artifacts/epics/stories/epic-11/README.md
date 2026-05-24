@@ -20,7 +20,7 @@ Implementation order follows the dependency graph (11.01 is the foundation and b
   │     └── 11.04 token lifecycle + resilience (single-flight refresh, expiry/revocation→reconnect+notify+incident, freeBusy httpx client w/ timeout + 429)
   ├── 11.05 availability engine (pure compute_availability + service-rules model)   (parallel after 11.01)
   ├── 11.06 service resolution FR-22 (RussianNormalizer lemma match → clarify-once → escalate)   (parallel after 11.01)
-  └── 11.08 enable/disable + service-config surface (operator + admin commands/api)   (after 11.01; admin gating after Epic 10)
+  └── 11.08 disable + service-config surface (operator + admin commands/api)   (after 11.01; admin gating after Epic 10) — enable is implicit in 11.02 (`/connect_calendar` callback auto-enables; no separate `/calendar_on`)
         11.07 CalendarAvailabilityAnswerer + pipeline wiring + E2E   (depends on 11.04, 11.05, 11.06, 11.08)
 ```
 

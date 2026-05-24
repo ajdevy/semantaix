@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Epic 11 signoff: calendar availability connect -> configure -> availability
-# round-trip. Enables the default project's calendar, defines a service, and
-# verifies the opt-in gate end-to-end through the live API:
+# round-trip. Drives /connect_calendar (which IS the enable action — there is
+# no separate /calendar_on command or /enable endpoint), defines a service,
+# and verifies the opt-in gate end-to-end through the live API:
 #   * disabled project -> availability question flows to HITL (no calendar work)
 #   * enabled-but-not-connected -> calendar OWNS the question and escalates
 #     (routed to the calendar operator), never a fabricated answer or a 500
 #   * settings reflect enablement + the configured service
-# A full Google freeBusy round-trip needs live OAuth, so the offline signoff
-# proves the gate + escalation legs (the connected leg is covered by
-# tests/e2e/test_e2e_epic11_availability.py with Google mocked).
+# Enablement here is mocked at the repo level: a full Google OAuth callback
+# round-trip needs live Google consent, so the signoff uses a tiny Python
+# helper to call `CalendarSettingsRepository.enable(...)` directly, mirroring
+# what the OAuth callback does on success.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -85,11 +87,19 @@ if not body.get("escalated") or body.get("response_mode") != "human_only":
 print({"disabled_escalated": True})
 PY
 
-echo "== enable calendar for project ${PROJECT_ID} (operator) =="
-ENABLE=$(curl -s -X POST "http://127.0.0.1:8011/calendar/projects/${PROJECT_ID}/enable" \
-  -H "${AUTH_HEADER}" -H 'content-type: application/json' \
-  -d "{\"actor\":\"${OPERATOR}\",\"actor_role\":\"operator\"}")
-echo "${ENABLE}"
+echo "== enable calendar for project ${PROJECT_ID} (mocked /connect_calendar callback) =="
+# /connect_calendar IS the enable action: the OAuth callback flips enabled=1
+# and records the connecting operator. A full Google round-trip needs live
+# consent, so the signoff invokes the same `CalendarSettingsRepository.enable`
+# the callback performs on success — proving the disabled-vs-enabled gate.
+PROJECT_ID="${PROJECT_ID}" OPERATOR="${OPERATOR}" CALENDAR_DB_PATH="${CALENDAR_DB}" python3.11 - <<'PY'
+import os
+from services.api.app.calendar.settings_repository import CalendarSettingsRepository
+
+repo = CalendarSettingsRepository(db_path=os.environ["CALENDAR_DB_PATH"])
+repo.enable(int(os.environ["PROJECT_ID"]), calendar_operator=os.environ["OPERATOR"])
+print({"enabled": True, "calendar_operator": os.environ["OPERATOR"]})
+PY
 
 echo "== define a service (маникюр, Saturdays) =="
 curl -s -X POST "http://127.0.0.1:8011/calendar/projects/${PROJECT_ID}/services" \

@@ -37,9 +37,6 @@ _FILE_ASSIGN_RE = re.compile(
     r"^\s*/file_assign\s+#(?P<short_id>\S+)\s+(?P<project_slug>\S+)\s*$",
     re.IGNORECASE,
 )
-_CALENDAR_ON_RE = re.compile(
-    r"^\s*/calendar_on\s+(?P<project_slug>\S+)\s*$", re.IGNORECASE
-)
 _CALENDAR_OFF_RE = re.compile(
     r"^\s*/calendar_off\s+(?P<project_slug>\S+)\s*$", re.IGNORECASE
 )
@@ -261,20 +258,20 @@ async def handle_file_assign(
     return {"status": "ok", "route": "file_assign"}
 
 
-async def handle_calendar_toggle(
+async def handle_calendar_off(
     *,
     chat_id: int,
     project_slug: str,
-    enable: bool,
     admin_username: str,
     api_client: ApiClient,
     send_dm: SendDmFn,
     internal_token: str,
 ) -> dict[str, str]:
-    """Admin `/calendar_on|off @slug` — enable/disable a project's calendar.
+    """Admin `/calendar_off @slug` — disable a project's calendar (token retained).
 
-    Admin actor_role; the api keeps the designated operator (and the token on
-    disable). Admins may not disconnect — there is no admin disconnect command.
+    Admin actor_role; the api keeps the stored token on disable. There is no
+    admin enable command — enabling is implicit in the operator's
+    `/connect_calendar` OAuth callback. Admins may not disconnect either.
     """
     slug = project_slug.lstrip("@")
     project_id = await _resolve_project_id(api_client, slug)
@@ -282,38 +279,31 @@ async def handle_calendar_toggle(
         await send_dm(chat_id, f"Проект {project_slug} не найден.")
         return {
             "status": "ok",
-            "route": "calendar_toggle",
+            "route": "calendar_off",
             "decision": "project_missing",
         }
     try:
-        if enable:
-            await api_client.calendar_enable(
-                project_id=project_id,
-                actor=admin_username,
-                actor_role="admin",
-                internal_token=internal_token,
-            )
-        else:
-            await api_client.calendar_disable(
-                project_id=project_id,
-                actor=admin_username,
-                actor_role="admin",
-                internal_token=internal_token,
-            )
+        await api_client.calendar_disable(
+            project_id=project_id,
+            actor=admin_username,
+            actor_role="admin",
+            internal_token=internal_token,
+        )
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code if exc.response is not None else 0
         await send_dm(chat_id, f"Не удалось изменить календарь ({status}).")
         return {
             "status": "error",
-            "route": "calendar_toggle",
+            "route": "calendar_off",
             "http_status": str(status),
         }
-    state = "включён" if enable else "выключен (токен сохранён)"
-    await send_dm(chat_id, f"Календарь проекта {slug} {state}.")
+    await send_dm(
+        chat_id, f"Календарь проекта {slug} выключен (токен сохранён)."
+    )
     return {
         "status": "ok",
-        "route": "calendar_toggle",
-        "decision": "enabled" if enable else "disabled",
+        "route": "calendar_off",
+        "decision": "disabled",
     }
 
 
@@ -397,24 +387,11 @@ async def handle_admin_project_command(
             send_dm=send_dm,
         )
 
-    m = _CALENDAR_ON_RE.match(text)
-    if m:
-        return await handle_calendar_toggle(
-            chat_id=normalized.chat_id,
-            project_slug=m.group("project_slug"),
-            enable=True,
-            admin_username=admin_username,
-            api_client=api_client,
-            send_dm=send_dm,
-            internal_token=internal_token,
-        )
-
     m = _CALENDAR_OFF_RE.match(text)
     if m:
-        return await handle_calendar_toggle(
+        return await handle_calendar_off(
             chat_id=normalized.chat_id,
             project_slug=m.group("project_slug"),
-            enable=False,
             admin_username=admin_username,
             api_client=api_client,
             send_dm=send_dm,
