@@ -76,11 +76,11 @@ development_status:
   epic-11-retrospective: optional
 
   # --- Active feature epic ---
-  epic-12: in-progress
+  epic-12: done
   12-01-project-services-schema-and-repo: done
   12-02-canonical-services-api: done
   12-03-service-slash-command: done
   12-04-services-nl-ops-api: done
   12-05-services-nl-dialog-bot: done
-  12-06-catalog-answerer-merge-with-dedup: backlog
+  12-06-catalog-answerer-merge-with-dedup: done
   epic-12-retrospective: optional
