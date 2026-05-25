@@ -156,6 +156,33 @@ def test_admin_upsert_allowed(env):
     assert resp.json()["name"] == "x"
 
 
+def test_upsert_name_only_succeeds(env):
+    """R1: name-only upsert creates a catalog-only entry (no scheduling)."""
+    resp = env["client"].post(
+        f"/api/projects/{_PROJECT_ID}/services",
+        headers=_AUTH,
+        json={"actor": _OPERATOR, "actor_role": "operator", "name": "маникюр"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "маникюр"
+    assert body["duration_minutes"] is None
+    assert body["working_hours"] is None
+    assert body["service_days"] is None
+    assert body["date_exceptions"] is None
+    # GET returns the same shape.
+    listing = env["client"].get(
+        f"/api/projects/{_PROJECT_ID}/services", headers=_AUTH
+    ).json()
+    assert len(listing["services"]) == 1
+    row = listing["services"][0]
+    assert row["name"] == "маникюр"
+    assert row["duration_minutes"] is None
+    assert row["working_hours"] is None
+    assert row["service_days"] is None
+    assert row["date_exceptions"] is None
+
+
 def test_upsert_case_insensitive_collapses_to_one_row(env):
     first = env["client"].post(
         f"/api/projects/{_PROJECT_ID}/services",

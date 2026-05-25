@@ -104,6 +104,10 @@ _SERVICE_NEW_USAGE = (
     "/service list"
 )
 _SERVICE_NEW_ADDED = "Услуга «{name}» сохранена."
+_SERVICE_NEW_SCHEDULING_HINT = (
+    " Чтобы сделать её бронируемой, добавьте расписание: "
+    "`/service edit <название> duration=60 days=mon-sat hours=10:00-19:00`."
+)
 _SERVICE_NEW_REMOVED = "Услуга «{name}» удалена."
 _SERVICE_NEW_NOT_FOUND = "услуга «{name}» не найдена."
 _SERVICE_NEW_ADMIN_CANNOT_REMOVE = (
@@ -590,28 +594,37 @@ def _parse_day_range(token: str) -> list[str] | None:
 
 
 def parse_service_add(rest: str) -> dict[str, object] | None:
-    """Parse ``add <name> <minutes> <days> <hours>`` into repository kwargs.
+    """Parse ``add <name> [<minutes> [<days> [<hours>]]]`` into repository kwargs.
 
+    Name is the only required positional after ``add``; missing trailing fields
+    default to ``None`` so the service is created as a catalog-only entry.
     Returns None on any malformed input so the caller can show usage help.
     """
     parts = rest.split()
-    if len(parts) != 5 or parts[0].lower() != "add":
+    if len(parts) < 2 or parts[0].lower() != "add":
         return None
     name = parts[1]
-    if not parts[2].isdigit():
-        return None
-    duration = int(parts[2])
-    if duration <= 0:
-        return None
-    days = _parse_day_range(parts[3])
-    if days is None:
-        return None
-    time_match = _TIME_RE.match(parts[4])
-    if time_match is None:
-        return None
-    start = time_match.group("start")
-    end = time_match.group("end")
-    working_hours = {day: [start, end] for day in days}
+    duration: int | None = None
+    days: list[str] | None = None
+    working_hours: dict[str, list[str]] | None = None
+    if len(parts) >= 3:
+        if not parts[2].isdigit():
+            return None
+        duration = int(parts[2])
+        if duration <= 0:
+            return None
+    if len(parts) >= 4:
+        days = _parse_day_range(parts[3])
+        if days is None:
+            return None
+    if len(parts) >= 5:
+        time_match = _TIME_RE.match(parts[4])
+        if time_match is None:
+            return None
+        start = time_match.group("start")
+        end = time_match.group("end")
+        assert days is not None  # narrowed by len(parts) >= 4 above
+        working_hours = {day: [start, end] for day in days}
     return {
         "name": name,
         "duration_minutes": duration,
@@ -858,9 +871,13 @@ async def _do_new_service_upsert(
         return {"status": "accepted", "route": "service", "decision": "api_error"}
     saved_name = result.get("name") if isinstance(result, dict) else None
     display_name = str(saved_name) if saved_name else name
-    await send_dm(
-        normalized.chat_id, _SERVICE_NEW_ADDED.format(name=display_name)
+    saved_duration = (
+        result.get("duration_minutes") if isinstance(result, dict) else None
     )
+    success_text = _SERVICE_NEW_ADDED.format(name=display_name)
+    if saved_duration is None:
+        success_text += _SERVICE_NEW_SCHEDULING_HINT
+    await send_dm(normalized.chat_id, success_text)
     decision = "edited" if edit_mode else "added"
     return {"status": "accepted", "route": "service", "decision": decision}
 

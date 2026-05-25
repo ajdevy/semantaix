@@ -3374,6 +3374,17 @@ def restore_backup(backup_id: int, request: BackupRestoreRequest) -> dict[str, o
 
 _CALENDAR_OAUTH_RATE_LIMIT = 10
 _CALENDAR_OAUTH_RATE_WINDOW_SECONDS = 60.0
+
+# FR-18: on successful OAuth consent the api DMs the operator a Russian
+# confirmation (in addition to the HTML success page in the browser). The
+# copy nudges the operator toward catalog-only entries via /service add.
+_CALENDAR_CONNECTED_DM = (
+    "✅ Календарь подключён. "
+    "Услуги, у которых указано расписание, "
+    "теперь будут проверяться по вашему календарю. "
+    "Чтобы добавить услугу: `/service add <название>` "
+    "или просто напишите «добавь услугу …»."
+)
 # In-memory coarse throttle: {bucket_key: [monotonic timestamps]}. Bounds the
 # abuse surface of the unauthenticated callback (each hit triggers a token
 # exchange) and the internal initiate. Per-state single-use bounds replay; this
@@ -3521,6 +3532,61 @@ async def calendar_oauth_callback(
         "calendar_oauth_connected",
         extra={"project_id": pending.project_id, "operator": pending.operator},
     )
+    # FR-18: Russian Telegram DM to the operator confirming the connection
+    # (in addition to the HTML success page). DM failures MUST NOT corrupt
+    # the OAuth success signal to Google or to the browser — log + swallow.
+    # Re-connects (operator re-runs /connect_calendar) also DM: every
+    # successful consent gets a confirmation; no first-time dedup.
+    operator_chat_id: int | None = None
+    try:
+        record = await asyncio.to_thread(
+            operator_repository.find_by_username, pending.operator
+        )
+    except Exception:
+        record = None
+    if record is not None and record.chat_id is not None:
+        operator_chat_id = record.chat_id
+    else:
+        fallback = settings.hitl_primary_operator_chat_id
+        if fallback:
+            try:
+                operator_chat_id = int(fallback)
+            except (TypeError, ValueError):
+                operator_chat_id = None
+    if operator_chat_id is None:
+        logger.info(
+            "calendar_connect_dm_no_chat_id",
+            extra={
+                "trace_id": None,
+                "project_id": pending.project_id,
+                "operator": pending.operator,
+            },
+        )
+    else:
+        try:
+            await telegram_bot_sender.send_message(
+                chat_id=operator_chat_id, text=_CALENDAR_CONNECTED_DM
+            )
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            logger.warning(
+                "calendar_connect_dm_failed",
+                extra={
+                    "trace_id": None,
+                    "project_id": pending.project_id,
+                    "operator": pending.operator,
+                    "error_repr": repr(exc),
+                },
+            )
+        except Exception as exc:  # defensive: never break the OAuth callback
+            logger.warning(
+                "calendar_connect_dm_failed",
+                extra={
+                    "trace_id": None,
+                    "project_id": pending.project_id,
+                    "operator": pending.operator,
+                    "error_repr": repr(exc),
+                },
+            )
     return HTMLResponse(_calendar_callback_html(ok=True), status_code=200)
 
 

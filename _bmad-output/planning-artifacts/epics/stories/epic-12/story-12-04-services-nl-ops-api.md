@@ -38,6 +38,7 @@ Ship the api half of FR-24 Path B (Russian natural-language operator dialog): a 
   - `POST /api/projects/{project_id}/services/nl-ops/{session_id}/cancel` — body: `{presenter_operator}`. Calls `repo.cancel(...)` (same ownership check, no token required because cancel is a no-op on state, not a state mutation that needs replay protection beyond ownership).
   - `GET /api/projects/{project_id}/services/nl-ops/latest-pending?originating_operator=...` — returns the current pending session for that pair, or `null`. Reaps expired-but-not-yet-flipped rows lazily.
 - **Permission split for `op_type=remove`** — at confirm-time, the api re-applies `authorize_service_remove(actor_role, is_registered_project_operator)` from 12.02; admin → 403 `admin_cannot_remove_service` even if the propose succeeded (admin could submit a `удали услугу` proposal but cannot confirm a remove — this models "the admin's confirmation alone cannot delete a row"). Add/edit confirms apply `authorize_calendar_config` (same gate as 12.02's `POST`).
+- **R1 refinement (post-12.04):** `добавь услугу <name>` (no other fields) is valid and creates a catalog-only entry; the preview is `Создать услугу «<name>».`
 
 ### Out of Scope
 - The bot dispatcher (`services/bot_gateway/app/services_nl_dialog.py`) — story 12.05.

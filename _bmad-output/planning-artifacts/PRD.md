@@ -267,6 +267,7 @@ Read-only availability first: the bot answers customer questions like "is servic
 Acceptance criteria:
 
 - Successful consent → stored encrypted refresh token + project enabled with the connecting operator recorded as the designated calendar operator (atomic with token storage) + Telegram confirmation. A forged, expired, replayed, or unmatched `state` is rejected and nothing is stored or enabled.
+  - On successful callback the api sends a Russian Telegram DM to the operator confirming the connection (in addition to the HTML success page); DM failures are logged and do not surface as connect failures.
 - For an already-enabled project, a re-connect preserves the existing `project_timezone` / `lookahead_days` and only updates the designated operator.
 - `state` is single-use (consumed on first callback) and expires after its TTL.
 - A revoked/expired refresh token is detected on next use → reconnect state + operator notification + incident emitted + token cleared, with no customer-visible error.
@@ -405,6 +406,7 @@ Acceptance criteria:
   - `добавь услугу маникюр и педикюр` (two services in one utterance) → "не понял, добавьте по одной услуге за раз".
   - `добавь услугу маникюр на полтора часа` (non-digit duration) → "укажите длительность числом в минутах".
 - All quoted Russian strings are **illustrative**; actual copy is configured as data files (per the Russian-first-content-is-DATA rule).
+- **R1 refinement (post-12.04):** `name` is the only required field. A service may be created with just a name — it becomes a catalog-only entry (visible in "какие услуги?" answers but not calendar-eligible). To make it bookable, add `duration_minutes` (and optionally working hours / service days) later via `/service edit` or the canonical REST upsert.
 
 *Delivery:* **Epic 12.**
 

@@ -89,6 +89,22 @@ def test_remove_returns_service_remove_op():
     assert result.payload == {"name": "маникюр"}
 
 
+def test_nl_parser_accepts_add_name_only():
+    """R1 refinement: a bare `добавь услугу <name>` is a catalog-only add."""
+    result = parse_service_intent("добавь услугу маникюр")
+    assert result.op_type == OP_SERVICE_ADD
+    assert result.payload == {"name": "маникюр"}
+    assert result.preview == "Создать услугу «маникюр»."
+
+
+def test_nl_parser_accepts_hyphenated_name():
+    """R1 refinement: hyphenated names must not be confused with the multi-
+    service `<name> и <name>` pattern (which requires whitespace around 'и')."""
+    result = parse_service_intent("добавь услугу маникюр-классика")
+    assert result.op_type == OP_SERVICE_ADD
+    assert result.payload["name"] == "маникюр-классика"
+
+
 # --- MUST FAIL CLOSED -------------------------------------------------------
 
 

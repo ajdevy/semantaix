@@ -339,7 +339,9 @@ def test_service_add_happy_path(isolated_bot, monkeypatch):
 
     async def fake_upsert(**kwargs):
         captured.append(kwargs)
-        return {"id": 7, "name": "маникюр"}
+        # R1: include duration_minutes so this happy-path is "fully scheduled"
+        # and the new catalog-only scheduling hint does NOT fire here.
+        return {"id": 7, "name": "маникюр", "duration_minutes": 60}
 
     monkeypatch.setattr(bot_main.api_client, "upsert_project_service", fake_upsert)
 
@@ -367,6 +369,59 @@ def test_service_add_happy_path(isolated_bot, monkeypatch):
     assert "маникюр" in isolated_bot["dms"][0][1]
     assert "*" not in isolated_bot["dms"][0][1]
     assert "_" not in isolated_bot["dms"][0][1]
+
+
+def test_service_slash_add_name_only(isolated_bot, monkeypatch):
+    """R1: `/service add маникюр` (no other tokens) creates a catalog-only entry
+    and the success DM appends the scheduling hint."""
+    _stub_operator_lookup(monkeypatch, record=_registered_operator_record())
+    captured: list[dict] = []
+
+    async def fake_upsert(**kwargs):
+        captured.append(kwargs)
+        return {"id": 7, "name": "маникюр", "duration_minutes": None}
+
+    monkeypatch.setattr(bot_main.api_client, "upsert_project_service", fake_upsert)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_message(text="/service add маникюр"),
+    )
+    body = response.json()
+    assert body["route"] == "service"
+    assert body["decision"] == "added"
+    # Upsert payload contains ONLY name — no other keys.
+    payload = captured[0]["payload"]
+    assert payload == {"name": "маникюр"}
+    dm = isolated_bot["dms"][-1][1]
+    assert "сохранена" in dm
+    assert "Чтобы сделать её бронируемой" in dm
+
+
+def test_service_slash_add_full_omits_hint(isolated_bot, monkeypatch):
+    """R1: When scheduling fields are present, the hint must be absent."""
+    _stub_operator_lookup(monkeypatch, record=_registered_operator_record())
+
+    async def fake_upsert(**kwargs):
+        return {"id": 8, "name": "маникюр", "duration_minutes": 60}
+
+    monkeypatch.setattr(bot_main.api_client, "upsert_project_service", fake_upsert)
+
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_message(
+            text=(
+                "/service add маникюр duration=60 days=mon-sat "
+                "hours=10:00-19:00"
+            )
+        ),
+    )
+    assert response.json()["decision"] == "added"
+    dm = isolated_bot["dms"][-1][1]
+    assert "сохранена" in dm
+    assert "Чтобы сделать её бронируемой" not in dm
 
 
 def test_service_add_validation_400_dms_reason(isolated_bot, monkeypatch):

@@ -23,6 +23,7 @@ Ship the operator-facing slash command surface from FR-24 Path A: `/service add|
   - Emit `deprecation_warning_calendar_service_command` log with `{operator, project_id}`.
   - **First invocation per operator** (persisted via a tiny `calendar_service_alias_hint_sent` table in `semantaix_nl_ops.db`, keyed `(project_id, operator)` — created lazily on first hit): DM the migration hint `"Команда /calendar_service устарела — используйте /service или просто напишите «добавь услугу …»."` Subsequent calls only log; no further DM. The persisted dedup means the hint survives bot restarts.
   - Delegate to `handle_service_command` after the hint logic so the user's intended action still completes.
+- **R1 refinement (post-12.04):** `/service add <name>` (name-only) is valid and creates a catalog-only entry; the success DM includes a tip for adding scheduling later.
 
 ### Out of Scope
 - The `/service` regex parser's ambiguity-fail-closed cases for NL dialog (12.04 / 12.05 own NL).

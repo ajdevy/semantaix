@@ -218,8 +218,10 @@ def test_operator_service_remove_api_error(isolated_bot, monkeypatch):
 def test_operator_service_usage_on_bad_input(isolated_bot, monkeypatch):
     _stub_operator_lookup(monkeypatch, record=_registered_operator_record())
     client = TestClient(bot_app)
+    # R1: name-only `/calendar_service add x` is now valid, so use an input
+    # that still fails the relaxed parser — non-numeric duration token.
     response = client.post(
-        "/telegram/webhook", json=_message(text="/calendar_service add bad")
+        "/telegram/webhook", json=_message(text="/calendar_service add x sixty")
     )
     body = response.json()
     assert body["status"] == "ignored"
@@ -242,7 +244,6 @@ def test_operator_service_unknown_action_usage(isolated_bot, monkeypatch):
 @pytest.mark.parametrize(
     "rest",
     [
-        "add x 60 mon-sat",  # wrong arg count
         "remove x 60 mon 10:00-19:00",  # not 'add'
         "add x sixty mon 10:00-19:00",  # non-numeric duration
         "add x 0 mon 10:00-19:00",  # non-positive duration
@@ -259,6 +260,28 @@ def test_parse_service_add_rejects(rest):
 def test_parse_service_add_single_day():
     parsed = parse_service_add("add x 60 wed 10:00-19:00")
     assert parsed["service_days"] == ["wed"]
+
+
+def test_parse_service_add_accepts_name_only():
+    """R1 refinement: name-only is a catalog-only entry; trailing fields None."""
+    parsed = parse_service_add("add маникюр")
+    assert parsed == {
+        "name": "маникюр",
+        "duration_minutes": None,
+        "service_days": None,
+        "working_hours": None,
+    }
+
+
+def test_parse_service_add_accepts_name_and_duration():
+    """R1 refinement: partial args (name + duration only) is valid."""
+    parsed = parse_service_add("add маникюр 60")
+    assert parsed == {
+        "name": "маникюр",
+        "duration_minutes": 60,
+        "service_days": None,
+        "working_hours": None,
+    }
 
 
 # --- admin /calendar_off @slug ---------------------------------------------
