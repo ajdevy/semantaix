@@ -19,7 +19,7 @@ profiles:
           token_env: GITHUB_TOKEN
 agent:
   backend: claude
-  model: claude-sonnet-4-6
+  model: opus
   concurrency: 3
   runner_timeout: 20m
   watchdog_timeout: 10m
