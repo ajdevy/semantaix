@@ -57,5 +57,7 @@ node_modules/
 # Keep BMAD project artifacts tracked by default
 # (_bmad and _bmad-output are intentionally NOT ignored)
 
-# Claude harness local config
-.claude/
+# Claude harness local config (but allow skills to be tracked)
+.claude/*
+!.claude/skills/
+!.claude/skills/**
