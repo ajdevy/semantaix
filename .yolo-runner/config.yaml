@@ -1,0 +1,27 @@
+default_profile: linear
+profiles:
+  linear:
+    tracker:
+      type: linear
+      linear:
+        scope:
+          workspace: flexsentlabs
+        auth:
+          token_env: LINEAR_API_KEY
+  github:
+    tracker:
+      type: github
+      github:
+        scope:
+          owner: flexsent-labs
+          repo: semantaix
+        auth:
+          token_env: GITHUB_TOKEN
+agent:
+  backend: claude
+  model: claude-sonnet-4-6
+  concurrency: 3
+  runner_timeout: 20m
+  watchdog_timeout: 10m
+  watchdog_interval: 5s
+  retry_budget: 5
