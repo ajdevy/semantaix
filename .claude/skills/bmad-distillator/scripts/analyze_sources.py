@@ -222,10 +222,14 @@ def analyze(inputs: list[str], output_path: str | None = None) -> None:
         )
     else:
         routing = "fan-out"
+        threshold_msg = (
+            f">{SINGLE_COMPRESSOR_MAX_TOKENS} tokens"
+            if total_tokens > SINGLE_COMPRESSOR_MAX_TOKENS
+            else "> 3 files"
+        )
         routing_reason = (
             f"{len(files)} file(s), ~{total_tokens:,} estimated tokens — "
-            f"exceeds single compressor threshold "
-            f"({'>' + str(SINGLE_COMPRESSOR_MAX_TOKENS) + ' tokens' if total_tokens > SINGLE_COMPRESSOR_MAX_TOKENS else '> 3 files'})"
+            f"exceeds single compressor threshold ({threshold_msg})"
         )
 
     # Split prediction
