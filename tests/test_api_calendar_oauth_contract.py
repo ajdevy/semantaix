@@ -384,6 +384,49 @@ def test_callback_success_dms_operator(env, monkeypatch):
     assert "Календарь подключён" in kwargs["text"]
 
 
+def test_callback_success_skips_dm_when_already_connected(env, monkeypatch, caplog):
+    """Regression: a successful re-consent callback for an operator who was
+    ALREADY connected to this project does NOT DM. Prevents spam when the
+    operator (or their browser) replays the OAuth flow across api restarts.
+    The token row IS still updated with the new refresh_token, and a
+    `calendar_connect_dm_skipped_already_connected` log line is emitted."""
+    # Pre-populate the token so the (project, operator) is already connected
+    # BEFORE this callback runs.
+    env["token_repo"].upsert(_PROJECT_ID, _OPERATOR, "old-refresh-secret")
+
+    _stub_exchange(monkeypatch, refresh_token="new-refresh-secret")
+    state = _mint_state(env)
+
+    record = SimpleNamespace(chat_id=12345)
+    monkeypatch.setattr(
+        api_main.operator_repository,
+        "find_by_username",
+        Mock(return_value=record),
+    )
+
+    send_message = AsyncMock()
+    monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
+
+    with caplog.at_level(logging.INFO, logger="services.api.app.main"):
+        resp = env["client"].get(
+            "/calendar/oauth/callback", params={"state": state, "code": "c"}
+        )
+
+    assert resp.status_code == 200
+    # The DM must NOT fire on re-consent.
+    send_message.assert_not_awaited()
+    # The new refresh_token IS persisted (upsert always runs).
+    assert (
+        env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR)
+        == "new-refresh-secret"
+    )
+    # The skip is observable via the structured log.
+    assert any(
+        "calendar_connect_dm_skipped_already_connected" in record.message
+        for record in caplog.records
+    )
+
+
 def test_callback_success_skips_dm_when_no_chat_id(env, monkeypatch, caplog):
     """Operator NOT in registry AND no hitl_primary_operator_chat_id fallback
     → send_message is NOT called; calendar_connect_dm_no_chat_id is logged;

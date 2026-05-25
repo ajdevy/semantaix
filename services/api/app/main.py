@@ -3487,6 +3487,24 @@ async def calendar_oauth_callback(
             extra={"project_id": pending.project_id, "operator": pending.operator},
         )
         return HTMLResponse(_calendar_callback_html(ok=False), status_code=400)
+    # FR-18 DM guard (post-R2 bugfix): the "✅ Календарь подключён" DM should
+    # only fire on a *fresh* connect, not on every successful callback.
+    # Re-clicking the consent URL during dev, or any other repeat consent for
+    # an already-connected (project, operator), used to spam the operator
+    # with the connection-confirmation message. Capture token presence BEFORE
+    # the upsert; we only DM when there was no prior token (first-time connect
+    # or post-disconnect reconnect, both of which are legitimately "just got
+    # connected" moments from the operator's point of view).
+    token_existed_before_upsert = False
+    try:
+        await asyncio.to_thread(
+            calendar_token_repository.get_refresh_token,
+            pending.project_id,
+            pending.operator,
+        )
+        token_existed_before_upsert = True
+    except TokenNotFound:
+        token_existed_before_upsert = False
     await asyncio.to_thread(
         calendar_token_repository.upsert,
         pending.project_id,
@@ -3535,8 +3553,21 @@ async def calendar_oauth_callback(
     # FR-18: Russian Telegram DM to the operator confirming the connection
     # (in addition to the HTML success page). DM failures MUST NOT corrupt
     # the OAuth success signal to Google or to the browser — log + swallow.
-    # Re-connects (operator re-runs /connect_calendar) also DM: every
-    # successful consent gets a confirmation; no first-time dedup.
+    # Fresh-connect-only guard: skip the DM when the operator was already
+    # connected to this project (re-consent / token refresh on the same
+    # registration). Without this guard, every successful callback for an
+    # already-connected operator spams the "Календарь подключён" message —
+    # which the operator complained about during dev (the consent URL gets
+    # re-clicked across api restarts and each click DMs again).
+    if token_existed_before_upsert:
+        logger.info(
+            "calendar_connect_dm_skipped_already_connected",
+            extra={
+                "project_id": pending.project_id,
+                "operator": pending.operator,
+            },
+        )
+        return HTMLResponse(_calendar_callback_html(ok=True), status_code=200)
     operator_chat_id: int | None = None
     try:
         record = await asyncio.to_thread(
