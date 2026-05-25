@@ -31,8 +31,8 @@
 #   implementation story doc into story_location; then `ready-for-dev` → `in-progress` → `review` → `done`.
 # - One PR per story; 100% coverage gate on platform_common/ + services/.
 # - Dependency order (epics/stories/epic-12/README.md): 12-01 blocks all; 12-02 ∥ 12-03 ∥ 12-05 after 12-01;
-#   12-05b after 12-05; 12-04 after 12-02 + 12-03; 12-06 after 12-02; 12-07 ∥ 12-08 after 12-03;
-#   12-09 last (depends on all).
+#   12-02b after 12-02; 12-05b ∥ 12-05c after 12-05; 12-04 after 12-02 + 12-03; 12-06 after 12-02;
+#   12-07 ∥ 12-08 after 12-03; 12-09 last (depends on all).
 
 generated: 2026-05-23
 last_updated: 2026-05-24
@@ -80,10 +80,12 @@ development_status:
   epic-12: in-progress
   12-01-sales-db-schema-and-repositories: backlog
   12-02-service-commands-and-sales-state: backlog
+  12-02b-natural-language-service-management: backlog
   12-03-sales-persona-answerer-greeting-and-intent: backlog
   12-04-pricing-turn-kb-first-escalate-if-unknown: backlog
   12-05-autonomous-client-materials-dispatch: backlog
   12-05b-kb-upload-automatic-client-materials-analysis: backlog
+  12-05c-kb-upload-automatic-services-extraction: backlog
   12-06-service-list-and-concept-explainer: backlog
   12-07-date-proposal-turn: backlog
   12-08-proactive-followup: backlog

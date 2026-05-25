@@ -9,10 +9,10 @@ Stand up the `SalesPersonaAnswerer` skeleton with the greeting + intent-scoping 
 - `services/api/app/sales/sales_persona_answerer.py` `SalesPersonaAnswerer` (constructor-injected deps: `state_repo: StateRepository`, `services_repo: ServicesRepository`, `openrouter: OpenRouterClient`, `normalizer: RussianNormalizer`, `clock` returning aware `datetime`, `bot_persona_getter` callable returning the configured persona name):
   - Implements the `Answerer` Protocol: `async def try_answer(self, *, question: str, ctx: AnswerContext) -> AnswerResult`.
   - `name = "sales_persona"` (class attr).
-  - **Activation gate (cheap, first):**
+  - **Activation gate (always-on, cheap, first):**
     1. `state = state_repo.get(ctx.chat_id)` — if exists and `current_stage != 'dormant'` → continue with that state.
-    2. Else: `services_repo.count_active(ctx.project_id)` — if `0` → `self._skip(reason="no_services")` (dormant project).
-    3. Else: run the sales-intent regex on `normalizer.lemmas(question)`; non-match → `self._skip(reason="not_sales_intent")`.
+    2. Else: run the sales-intent regex on `normalizer.lemmas(question)`; non-match → `self._skip(reason="not_sales_intent")`.
+    3. Match → enter the greeting stage. **No services-count check.** Sales is enabled for every project; an empty `services` catalog is a valid state — the bot can still scope, ask for media (none → no-op), look up prices via RAG, and propose calendar dates.
   - **Stage routing:** dispatch on `state.current_stage` (`new`, `scoping`); other stages (`pitching`, `pricing`, `proposing`, `closing`) are reserved for later stories and `_skip(reason="stage_not_implemented_yet")` for v1 of this story — only greeting + scoping ship here.
   - **Greeting stage** (`new` → `scoping`): on first sales-intent message, generate a greeting under the "Николай" persona using `system_prompts/nikolay_greeting.txt`. Handles referral phrases ("контакт передали из Хиллс") — the prompt includes a referral-detection instruction. Asks the first scoping question (date). Transitions to `scoping` and persists.
   - **Scoping stage** (loops in `scoping` until all 5 fields collected → transitions to `pitching`): merges newly-extracted fields into `collected_intent` JSON, asks the next missing field as a Russian one-liner. Order: `dates → headcount → vehicle_count → difficulty → drivers`.
@@ -43,7 +43,7 @@ Stand up the `SalesPersonaAnswerer` skeleton with the greeting + intent-scoping 
 ### Unit
 - `tests/test_sales_intent_loader.py` — `data/russian_sales_intent.txt` loads and trims; an inbound message matching at least one lemma → `True`; non-match → `False`.
 - `tests/test_sales_intent_merge.py` — `intent_merge` overwrites empty fields, preserves populated fields when the new turn doesn't mention them, replaces a populated field only when the new turn explicitly carries a new value, never propagates `None` over a populated field.
-- `tests/test_sales_persona_answerer_gate.py` — activation gate: existing state + non-dormant → enters; no state + zero services → `_skip(reason="no_services")`; no state + services present + non-sales text → `_skip(reason="not_sales_intent")`; no state + services + sales text → enters greeting.
+- `tests/test_sales_persona_answerer_gate.py` — activation gate (always-on): existing state + non-dormant → enters regardless of services count; no state + non-sales text → `_skip(reason="not_sales_intent")`; no state + sales text → enters greeting even on a project with **zero** `services` rows (asserted explicitly — sales is never gated by catalog size).
 - `tests/test_sales_persona_answerer_greeting.py` — greeting turn with a fake LLM returning a fixed JSON: produces the expected Russian greeting, transitions `new → scoping`, persists state with the merged intent; referral phrase ("контакт передали из Хиллс") causes the prompt to include the referral source — verified by inspecting the captured prompt args on the mocked client.
 - `tests/test_sales_persona_answerer_scoping.py` — five-turn scoping run with a scripted LLM, asserts the expected question order and that `collected_intent` ends fully populated and the stage transitions to `pitching` (which immediately `_skip(reason="stage_not_implemented_yet")` for this story).
 - `tests/test_sales_persona_answerer_llm_schema_violation.py` — LLM returns invalid JSON → answerer logs + skips, does not raise into the pipeline.
@@ -65,3 +65,4 @@ Stand up the `SalesPersonaAnswerer` skeleton with the greeting + intent-scoping 
 - No `datetime.now()` inside the answerer; `clock` injected at construction.
 - LLM output schema is enforced; schema-violation logged and skipped without raising.
 - Module is constructed in `main.py` startup but **not yet inserted** into `AnswerPipeline` (regression-tested in 12.09's wiring story).
+- Activation is **always-on** — no `services` count check, no `/sales_on` command. The only sources of dormancy are an explicit `current_stage='dormant'` on a state row OR a non-sales-intent inbound (which falls through cleanly to the next answerer).

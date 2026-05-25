@@ -1,16 +1,17 @@
-# Story 12.09 — Pipeline wiring, data-driven activation, and e2e signoff
+# Story 12.09 — Pipeline wiring, always-on activation, and e2e signoff
 
 ## Objective
-Tie the epic together: insert `SalesPersonaAnswerer` into `AnswerPipeline` (before `CalendarAvailabilityAnswerer`), enforce the data-driven activation gate (empty `services` table = silent no-op), ship `scripts/epic12_signoff.sh`, add Epic-12 rows to `e2e-coverage.md`, and run the full Данил dialog replay as the acceptance signal. After this story, Epic 12 is operationally complete.
+Tie the epic together: insert `SalesPersonaAnswerer` into `AnswerPipeline` (before `CalendarAvailabilityAnswerer`), confirm the always-on activation model (the answerer's only gates are an existing conversation-state row OR a sales-intent regex match — no project-level enable, no services-count check), ship `scripts/epic12_signoff.sh`, add Epic-12 rows to `e2e-coverage.md`, and run the full Данил dialog replay as the acceptance signal. After this story, Epic 12 is operationally complete.
 
 ## Scope
 
 ### In Scope
 - **Pipeline insertion** in `services/api/app/main.py`: place `SalesPersonaAnswerer` **before** `CalendarAvailabilityAnswerer` in the `AnswerPipeline([...])` list assembled around L202. Order is the routing logic: `DateTimeAnswerer (legacy seam) → HolidayAnswerer → WeatherAnswerer → SalesPersonaAnswerer → CalendarAvailabilityAnswerer → GroundedRagAnswerer → HITL`.
-- **Activation gate** (already implemented in `SalesPersonaAnswerer.try_answer` per story 12.03; this story is the regression test that it stays gated):
-  - A `sales_conversation_state` row exists for the chat → enters.
-  - Or: inbound text matches sales intent AND `services_repo.count_active(project_id) > 0` → enters.
-  - Otherwise → `_skip(reason="no_services" | "not_sales_intent")` (silent fall-through to RAG/HITL).
+- **Activation gate** (already implemented in `SalesPersonaAnswerer.try_answer` per story 12.03; this story is the regression test that it stays gated correctly):
+  - A `sales_conversation_state` row exists for the chat → enters (regardless of services count).
+  - Or: inbound text matches the sales-intent regex → enters (regardless of services count).
+  - Otherwise → `_skip(reason="not_sales_intent")` (silent fall-through to RAG/HITL).
+  - **No `services_repo.count_active` gate.** Sales is always-on — a project with zero services can still scope, look up prices via RAG, and propose calendar dates.
 - `scripts/epic12_signoff.sh` — orchestrates the live signoff:
   1. `docker compose up -d`.
   2. Seed `/service_add Медовеевка Лайт | Лайт уровень, с видами` and `/service_add каньонинг | Каньонинг — это…` via the bot_gateway.
@@ -22,9 +23,10 @@ Tie the epic together: insert `SalesPersonaAnswerer` into `AnswerPipeline` (befo
   8. Fast-forward the clock 25h with no customer reply → scheduler tick → assert one Telegram nudge fires in daytime hours.
   9. Reset; seed `intent.dates` to a past date → tick → assert `status='skipped_stale'`, no message sent.
 - **`e2e-coverage.md` rows.** One row per story (12.01 through 12.09 + 12.05b) mapping `pytest::nodeid` to the story id.
-- **Validation tests** that exist purely to defend the dormancy + ordering invariants:
+- **Validation tests** that exist purely to defend the ordering + intent-gate invariants:
   - `tests/test_pipeline_order_includes_sales_before_calendar.py` — the live `AnswerPipeline` instance has `SalesPersonaAnswerer` immediately before `CalendarAvailabilityAnswerer`.
-  - `tests/test_pipeline_sales_silent_when_dormant.py` — with zero `services` rows for a project, an inbound message matching any sales-shaped lemma still falls through to RAG/HITL with no `sales_persona` trace metadata (regression guard).
+  - `tests/test_pipeline_sales_active_on_empty_services.py` — with **zero** `services` rows for a project, an inbound message matching a sales-intent lemma still enters the sales answerer (regression guard for the always-on invariant). The bot proceeds through greeting/scoping even with an empty catalog.
+  - `tests/test_pipeline_sales_silent_on_non_intent.py` — without an existing conversation state and without a sales-intent match, the sales answerer skips silently (no LLM call, no DB write).
 - **Log-capture security test** `tests/test_sales_no_secrets_in_logs.py` — runs a full inbound + dispatch + HITL escalation pass and asserts that the captured `caplog.text` contains zero occurrences of: any `Settings.internal_service_token`, any `telegram_file_id` from the seeded materials, any `Settings.openrouter_api_key`, and zero raw price-payload `original_question` echoes (a stricter check than the existing log-capture tests).
 - **Sprint-status update.** `_bmad-output/implementation-artifacts/sprint-status.yaml` flips `epic-12` to `done` only after this story's PR merges; before then this story flips it to `in-progress`.
 
@@ -55,12 +57,12 @@ Tie the epic together: insert `SalesPersonaAnswerer` into `AnswerPipeline` (befo
 
 ## Automated E2E verification
 - `tests/e2e/test_e2e_epic12_full_danil_dialog.py` (`@pytest.mark.e2e`, `@pytest.mark.epic("12")`, `@pytest.mark.story("12-09")`) — the full Данил replay, the acceptance signal for the epic.
-- `tests/e2e/test_e2e_epic12_regression_dormant.py` — a project with zero services receives a sales-shaped message → identical-to-today RAG/HITL behavior (no `sales_persona` trace metadata anywhere).
+- `tests/e2e/test_e2e_epic12_active_on_empty_catalog.py` — a project with zero services receives a sales-intent message → the bot greets + scopes (NOT silent); answer trace shows `sales_persona` handled the turn. The catalog turn ("Что у вас есть?") in this state replies "Услуг пока нет. Уточню у коллег и сразу сообщу." and escalates.
 
 ## Manual Verification
 1. `bash scripts/epic12_signoff.sh` — green run; the script prints a one-line PASS per assertion.
-2. As a customer on a freshly-bootstrapped project (no `/service_add` yet): send "интересует тур на квадроциклах 1 мая" → expect the bot's normal RAG/HITL behavior, no sales turn (dormancy verified).
-3. Add a service via `/service_add` → repeat the same customer message → expect the greeting + scoping turn.
+2. As a customer on a freshly-bootstrapped project (no `services` rows, no KB files yet): send "интересует тур на квадроциклах 1 мая" → expect the **greeting + scoping turn** (always-on activation verified — sales runs even before any service is configured).
+3. Send a non-sales message ("какая погода в Сочи?") → expect the existing RAG/weather behavior; the sales answerer skipped silently.
 4. Walk through the full Данил script manually; confirm each behavior in the exit criteria.
 
 ## Done Criteria
@@ -69,6 +71,6 @@ Tie the epic together: insert `SalesPersonaAnswerer` into `AnswerPipeline` (befo
 - `scripts/epic12_signoff.sh` exits 0; `bash scripts/run_all_epic_feature_signoffs.sh` exits 0.
 - `_bmad-output/implementation-artifacts/e2e-coverage.md` updated with one row per Epic-12 story.
 - `_bmad-output/implementation-artifacts/sprint-status.yaml` reflects `epic-12: done`.
-- The dormancy regression test proves zero behavior change for projects without `services` rows.
+- The always-on regression test proves the sales answerer engages on sales-intent messages even when the project has zero `services` rows. The non-intent regression test proves it remains silent on non-sales messages (no LLM cost, no DB write).
 - No API key, service token, `telegram_file_id`, or raw price-payload `original_question` appears in logs or `answer_traces` metadata (log-capture assertion).
 - Pipeline order: `SalesPersonaAnswerer` is the answerer immediately before `CalendarAvailabilityAnswerer`; regression-tested.
