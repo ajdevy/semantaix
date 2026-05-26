@@ -84,3 +84,83 @@ def test_webhook_routes_admin_nl_dialog(wired_bot, monkeypatch):
     body = response.json()
     assert body["route"] == "admin_nl_propose"
     assert body["session_id"] == "7"
+
+
+def _operator_message(text: str, username: str = "op") -> dict:
+    return {
+        "update_id": 2,
+        "message": {
+            "message_id": 2,
+            "chat": {"id": 42},
+            "from": {"id": 42, "username": username},
+            "text": text,
+        },
+    }
+
+
+def test_webhook_routes_services_nl_dialog_propose(wired_bot, monkeypatch):
+    """Services NL dispatcher is wired BEFORE customer fall-through."""
+    from services.bot_gateway.app import services_nl_dialog
+
+    services_nl_dialog._reset_token_cache_for_tests()
+
+    find_op = AsyncMock(
+        return_value={
+            "username": "@op",
+            "chat_id": 42,
+            "project_id": 1,
+            "is_active": True,
+        }
+    )
+    monkeypatch.setattr(
+        bot_main.api_client, "find_operator_by_username", find_op
+    )
+    propose = AsyncMock(
+        return_value={
+            "session_id": 11,
+            "status": "pending_confirmation",
+            "preview": "Создать услугу «маникюр».",
+            "confirm_token": "tok-xyz",
+            "op_type": "service_add",
+        }
+    )
+    monkeypatch.setattr(
+        bot_main.api_client, "services_nl_propose", propose
+    )
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_message("добавь услугу маникюр на 60 минут"),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["route"] == "services_nl_propose"
+    assert body["session_id"] == "11"
+    propose.assert_awaited_once()
+
+
+def test_webhook_services_nl_unauthorized_is_routed(wired_bot, monkeypatch):
+    """Services NL trigger from a non-registered sender returns the
+    unauthorized_services reason — main.py treats it as handled so the
+    customer-message fall-through never sees the trigger phrase."""
+    from services.bot_gateway.app import services_nl_dialog
+
+    services_nl_dialog._reset_token_cache_for_tests()
+
+    find_op = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        bot_main.api_client, "find_operator_by_username", find_op
+    )
+    propose = AsyncMock()
+    monkeypatch.setattr(
+        bot_main.api_client, "services_nl_propose", propose
+    )
+    client = TestClient(bot_app)
+    response = client.post(
+        "/telegram/webhook",
+        json=_operator_message("добавь услугу маникюр", username="stranger"),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reason"] == "unauthorized_services"
+    propose.assert_not_awaited()

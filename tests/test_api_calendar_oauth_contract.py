@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
@@ -394,6 +396,274 @@ def test_callback_rate_limited(env, monkeypatch):
         "/calendar/oauth/callback", params={"state": "x", "code": "c"}
     )
     assert limited.status_code == 429
+
+
+# --- FR-18 R2: Telegram confirmation DM on successful connect ------------
+
+
+def test_callback_success_dms_operator(env, monkeypatch):
+    """Happy path: a successful OAuth callback DMs the operator a Russian
+    confirmation via telegram_bot_sender. The DM is sent to the chat_id
+    resolved from the operator registry (NOT the fallback)."""
+    _stub_exchange(monkeypatch, refresh_token="refresh-secret")
+    state = _mint_state(env)
+
+    # Operator registry resolves the chat_id for our connecting operator.
+    record = SimpleNamespace(chat_id=12345)
+    monkeypatch.setattr(
+        api_main.operator_repository,
+        "find_by_username",
+        Mock(return_value=record),
+    )
+
+    send_message = AsyncMock()
+    monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
+
+    resp = env["client"].get(
+        "/calendar/oauth/callback", params={"state": state, "code": "c"}
+    )
+    assert resp.status_code == 200
+    # Token row IS saved (DM is best-effort, OAuth handshake succeeded).
+    assert env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR) == "refresh-secret"
+
+    send_message.assert_awaited_once()
+    kwargs = send_message.await_args.kwargs
+    assert kwargs["chat_id"] == 12345
+    assert "Календарь подключён" in kwargs["text"]
+
+
+def test_callback_success_skips_dm_when_already_connected(env, monkeypatch, caplog):
+    """Regression: a successful re-consent callback for an operator who was
+    ALREADY connected to this project does NOT DM. Prevents spam when the
+    operator (or their browser) replays the OAuth flow across api restarts.
+    The token row IS still updated with the new refresh_token, and a
+    `calendar_connect_dm_skipped_already_connected` log line is emitted."""
+    # Pre-populate the token so the (project, operator) is already connected
+    # BEFORE this callback runs.
+    env["token_repo"].upsert(_PROJECT_ID, _OPERATOR, "old-refresh-secret")
+
+    _stub_exchange(monkeypatch, refresh_token="new-refresh-secret")
+    state = _mint_state(env)
+
+    record = SimpleNamespace(chat_id=12345)
+    monkeypatch.setattr(
+        api_main.operator_repository,
+        "find_by_username",
+        Mock(return_value=record),
+    )
+
+    send_message = AsyncMock()
+    monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
+
+    with caplog.at_level(logging.INFO, logger="services.api.app.main"):
+        resp = env["client"].get(
+            "/calendar/oauth/callback", params={"state": state, "code": "c"}
+        )
+
+    assert resp.status_code == 200
+    # The DM must NOT fire on re-consent.
+    send_message.assert_not_awaited()
+    # The new refresh_token IS persisted (upsert always runs).
+    assert (
+        env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR)
+        == "new-refresh-secret"
+    )
+    # The skip is observable via the structured log.
+    assert any(
+        "calendar_connect_dm_skipped_already_connected" in record.message
+        for record in caplog.records
+    )
+
+
+def test_callback_success_skips_dm_when_no_chat_id(env, monkeypatch, caplog):
+    """Operator NOT in registry AND no hitl_primary_operator_chat_id fallback
+    → send_message is NOT called; calendar_connect_dm_no_chat_id is logged;
+    HTML success is still 200; token row IS saved."""
+    _stub_exchange(monkeypatch, refresh_token="refresh-secret")
+    state = _mint_state(env)
+
+    monkeypatch.setattr(
+        api_main.operator_repository,
+        "find_by_username",
+        Mock(return_value=None),
+    )
+    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_chat_id", None)
+
+    send_message = AsyncMock()
+    monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
+
+    with caplog.at_level(logging.INFO, logger="services.api.app.main"):
+        resp = env["client"].get(
+            "/calendar/oauth/callback", params={"state": state, "code": "c"}
+        )
+
+    assert resp.status_code == 200
+    send_message.assert_not_awaited()
+    assert any(
+        "calendar_connect_dm_no_chat_id" in record.message for record in caplog.records
+    )
+    assert env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR) == "refresh-secret"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.RequestError("boom"),
+        httpx.HTTPStatusError(
+            "bad",
+            request=httpx.Request("POST", "https://api.telegram.org"),
+            response=httpx.Response(500),
+        ),
+    ],
+)
+def test_callback_success_swallows_dm_send_failure(env, monkeypatch, caplog, exc):
+    """If telegram_bot_sender.send_message raises a transport / HTTP error,
+    the callback still returns 200 + HTML success; the failure is logged via
+    calendar_connect_dm_failed; the token row IS saved."""
+    _stub_exchange(monkeypatch, refresh_token="refresh-secret")
+    state = _mint_state(env)
+
+    record = SimpleNamespace(chat_id=77)
+    monkeypatch.setattr(
+        api_main.operator_repository,
+        "find_by_username",
+        Mock(return_value=record),
+    )
+
+    send_message = AsyncMock(side_effect=exc)
+    monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
+
+    with caplog.at_level(logging.WARNING, logger="services.api.app.main"):
+        resp = env["client"].get(
+            "/calendar/oauth/callback", params={"state": state, "code": "c"}
+        )
+
+    assert resp.status_code == 200
+    send_message.assert_awaited_once()
+    assert any(
+        "calendar_connect_dm_failed" in r.message for r in caplog.records
+    )
+    assert env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR) == "refresh-secret"
+
+
+def test_callback_success_uses_fallback_chat_id_when_operator_not_in_registry(
+    env, monkeypatch
+):
+    """find_by_username returns None → fall back to
+    settings.hitl_primary_operator_chat_id (string env value parsed as int)."""
+    _stub_exchange(monkeypatch, refresh_token="refresh-secret")
+    state = _mint_state(env)
+
+    monkeypatch.setattr(
+        api_main.operator_repository,
+        "find_by_username",
+        Mock(return_value=None),
+    )
+    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_chat_id", "4242")
+
+    send_message = AsyncMock()
+    monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
+
+    resp = env["client"].get(
+        "/calendar/oauth/callback", params={"state": state, "code": "c"}
+    )
+    assert resp.status_code == 200
+    send_message.assert_awaited_once()
+    assert send_message.await_args.kwargs["chat_id"] == 4242
+
+
+def test_callback_success_swallows_operator_lookup_failure(env, monkeypatch, caplog):
+    """If operator_repository.find_by_username raises, we treat it as
+    "no record" and fall through to the fallback (or skip DM) — never
+    propagate. With no fallback set, the no_chat_id log fires; HTML success
+    still 200; token saved."""
+    _stub_exchange(monkeypatch, refresh_token="refresh-secret")
+    state = _mint_state(env)
+
+    monkeypatch.setattr(
+        api_main.operator_repository,
+        "find_by_username",
+        Mock(side_effect=RuntimeError("registry down")),
+    )
+    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_chat_id", None)
+
+    send_message = AsyncMock()
+    monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
+
+    with caplog.at_level(logging.INFO, logger="services.api.app.main"):
+        resp = env["client"].get(
+            "/calendar/oauth/callback", params={"state": state, "code": "c"}
+        )
+
+    assert resp.status_code == 200
+    send_message.assert_not_awaited()
+    assert any(
+        "calendar_connect_dm_no_chat_id" in r.message for r in caplog.records
+    )
+    assert env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR) == "refresh-secret"
+
+
+def test_callback_success_skips_dm_when_fallback_chat_id_is_unparseable(
+    env, monkeypatch, caplog
+):
+    """Misconfigured non-numeric fallback chat_id is treated as missing — no
+    DM, log line fires, HTML success still 200, token saved."""
+    _stub_exchange(monkeypatch, refresh_token="refresh-secret")
+    state = _mint_state(env)
+
+    monkeypatch.setattr(
+        api_main.operator_repository,
+        "find_by_username",
+        Mock(return_value=None),
+    )
+    monkeypatch.setattr(
+        api_main.settings, "hitl_primary_operator_chat_id", "not-an-int"
+    )
+
+    send_message = AsyncMock()
+    monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
+
+    with caplog.at_level(logging.INFO, logger="services.api.app.main"):
+        resp = env["client"].get(
+            "/calendar/oauth/callback", params={"state": state, "code": "c"}
+        )
+
+    assert resp.status_code == 200
+    send_message.assert_not_awaited()
+    assert any(
+        "calendar_connect_dm_no_chat_id" in r.message for r in caplog.records
+    )
+    assert env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR) == "refresh-secret"
+
+
+def test_callback_success_swallows_unexpected_dm_exception(env, monkeypatch, caplog):
+    """Defensive: an unexpected (non-httpx) exception from send_message is
+    also swallowed → HTML success 200, calendar_connect_dm_failed logged,
+    token saved. Guarantees the OAuth handshake is never broken by a bot
+    transport hiccup."""
+    _stub_exchange(monkeypatch, refresh_token="refresh-secret")
+    state = _mint_state(env)
+
+    record = SimpleNamespace(chat_id=99)
+    monkeypatch.setattr(
+        api_main.operator_repository,
+        "find_by_username",
+        Mock(return_value=record),
+    )
+    send_message = AsyncMock(side_effect=RuntimeError("bot crashed"))
+    monkeypatch.setattr(api_main.telegram_bot_sender, "send_message", send_message)
+
+    with caplog.at_level(logging.WARNING, logger="services.api.app.main"):
+        resp = env["client"].get(
+            "/calendar/oauth/callback", params={"state": state, "code": "c"}
+        )
+
+    assert resp.status_code == 200
+    send_message.assert_awaited_once()
+    assert any(
+        "calendar_connect_dm_failed" in r.message for r in caplog.records
+    )
+    assert env["token_repo"].get_refresh_token(_PROJECT_ID, _OPERATOR) == "refresh-secret"
 
 
 # --- disconnect -----------------------------------------------------------

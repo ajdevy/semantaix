@@ -714,3 +714,121 @@ async def test_delete_all_operator_files_raises_api_error(monkeypatch):
             requester_username="@alice", internal_token="t"
         )
     assert info.value.detail == "confirm_required"
+
+
+# --- Story 13.03 canonical /api/projects/{id}/services methods ------------
+
+
+@pytest.mark.asyncio
+async def test_upsert_project_service_posts_with_actor_and_payload(monkeypatch):
+    http = _http_mock(monkeypatch, response_json={"id": 7, "name": "маникюр"})
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.upsert_project_service(
+        project_id=11,
+        payload={
+            "name": "маникюр",
+            "duration_minutes": 60,
+            "service_days": ["mon"],
+        },
+        actor="@op",
+        actor_role="operator",
+        internal_token="svc",
+    )
+    assert result == {"id": 7, "name": "маникюр"}
+    args = http.post.await_args
+    assert args.args[0] == "http://api:8000/api/projects/11/services"
+    body = args.kwargs["json"]
+    assert body["actor"] == "@op"
+    assert body["actor_role"] == "operator"
+    assert body["name"] == "маникюр"
+    assert body["duration_minutes"] == 60
+    assert body["service_days"] == ["mon"]
+    assert args.kwargs["headers"] == {"Authorization": "Bearer svc"}
+
+
+@pytest.mark.asyncio
+async def test_upsert_project_service_raises_api_error(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        response=_error_response(status_code=400, body={"detail": "invalid_duration"}),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.upsert_project_service(
+            project_id=11,
+            payload={"name": "x", "duration_minutes": -1},
+            actor="@op",
+            actor_role="operator",
+            internal_token="t",
+        )
+    assert info.value.detail == "invalid_duration"
+
+
+@pytest.mark.asyncio
+async def test_list_project_services_uses_get(monkeypatch):
+    http = _http_get_mock(
+        monkeypatch,
+        status_code=200,
+        response_json={"project_id": 11, "services": []},
+    )
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.list_project_services(project_id=11, internal_token="svc")
+    assert result == {"project_id": 11, "services": []}
+    args = http.get.await_args
+    assert args.args[0] == "http://api:8000/api/projects/11/services"
+    assert args.kwargs["headers"] == {"Authorization": "Bearer svc"}
+
+
+@pytest.mark.asyncio
+async def test_list_project_services_raises_api_error(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        method="get",
+        response=_error_response(status_code=401, body={"detail": "missing"}),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.list_project_services(project_id=11, internal_token="t")
+    assert info.value.detail == "missing"
+
+
+@pytest.mark.asyncio
+async def test_delete_project_service_uses_request_delete(monkeypatch):
+    request = _http_method_mock(
+        monkeypatch, method="request", response_json={"deleted": True}
+    )
+    client = ApiClient(base_url="http://api:8000")
+    result = await client.delete_project_service(
+        project_id=11,
+        service_id=42,
+        actor="@op",
+        actor_role="operator",
+        internal_token="svc",
+    )
+    assert result == {"deleted": True}
+    args = request.await_args
+    assert args.args[0] == "DELETE"
+    assert args.args[1] == "http://api:8000/api/projects/11/services/42"
+    assert args.kwargs["json"] == {"actor": "@op", "actor_role": "operator"}
+    assert args.kwargs["headers"] == {"Authorization": "Bearer svc"}
+
+
+@pytest.mark.asyncio
+async def test_delete_project_service_raises_api_error(monkeypatch):
+    _http_error_mock(
+        monkeypatch,
+        method="request",
+        response=_error_response(
+            status_code=403, body={"detail": "admin_cannot_remove_service"}
+        ),
+    )
+    client = ApiClient(base_url="http://api:8000")
+    with pytest.raises(ApiError) as info:
+        await client.delete_project_service(
+            project_id=11,
+            service_id=42,
+            actor="@op",
+            actor_role="admin",
+            internal_token="t",
+        )
+    assert info.value.detail == "admin_cannot_remove_service"

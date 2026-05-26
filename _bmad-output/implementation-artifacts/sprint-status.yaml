@@ -27,12 +27,17 @@
 # ===============
 # - Feature-sequential: only ONE feature epic in implementation at a time (epics/README.md hard rule).
 # - Epics 01-11 already shipped (as-built); tracked at epic level as `done`.
-# - Epic 12 is the active feature. Stories are `backlog` until `bmad-create-story` emits an
-#   implementation story doc into story_location; then `ready-for-dev` → `in-progress` → `review` → `done`.
+# - Epic 13 (Unified Project Services Catalog) shipped via PR #80 (originally planned as Epic 12;
+#   renumbered to Epic 13 on merge because main had a parallel Epic 12, Sales Conversation Persona).
+# - Epic 12 (Sales Conversation Persona) is the active feature. Stories are `backlog` until
+#   `bmad-create-story` emits an implementation story doc into story_location; then `ready-for-dev`
+#   → `in-progress` → `review` → `done`.
 # - One PR per story; 100% coverage gate on platform_common/ + services/.
 # - Dependency order (epics/stories/epic-12/README.md): 12-01 blocks all; 12-02 ∥ 12-03 ∥ 12-05 after 12-01;
 #   12-02b after 12-02; 12-05b ∥ 12-05c after 12-05; 12-04 after 12-02 + 12-03; 12-06 after 12-02;
 #   12-07 ∥ 12-08 after 12-03; 12-09 last (depends on all).
+# - Epic 13 dependency order (epics/stories/epic-13/README.md): 13-01 blocks all; 13-02 ∥ 13-06 after 13-01;
+#   13-03 ∥ 13-04 after 13-02; 13-05 after 13-04.
 
 generated: 2026-05-23
 last_updated: 2026-05-24
@@ -75,6 +80,16 @@ development_status:
   11-07-availability-answerer-and-wiring: done
   11-08-enable-disable-and-service-config: done
   epic-11-retrospective: optional
+
+  # --- Shipped: Epic 13 (Unified Project Services Catalog, originally planned as Epic 12; PR #80) ---
+  epic-13: done
+  13-01-project-services-schema-and-repo: done
+  13-02-canonical-services-api: done
+  13-03-service-slash-command: done
+  13-04-services-nl-ops-api: done
+  13-05-services-nl-dialog-bot: done
+  13-06-catalog-answerer-merge-with-dedup: done
+  epic-13-retrospective: optional
 
   # --- Active feature epic ---
   epic-12: in-progress

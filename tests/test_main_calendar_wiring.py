@@ -6,6 +6,7 @@ the coalesce-onto-active-ticket branch).
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -23,6 +24,36 @@ from services.api.app.main import InboundMessageRequest
 def test_system_clock_now_is_tz_aware() -> None:
     now = api_main._SystemClock().now()
     assert now.tzinfo is not None
+
+
+def test_startup_bootstraps_services_nl_op_sessions_table() -> None:
+    """Epic 13 (story 13.01): the api startup hook creates
+    services_nl_op_sessions in semantaix_nl_ops.db alongside admin_nl_op_sessions.
+    """
+    db_path = api_main.settings.nl_ops_db_path
+    with sqlite3.connect(db_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "services_nl_op_sessions" in tables
+
+
+def test_startup_bootstraps_calendar_service_alias_hint_sent_table() -> None:
+    """Epic 13 (story 13.03): the api startup hook creates the dedup table for
+    the `/calendar_service` migration-hint DM in the same semantaix_nl_ops.db.
+    """
+    db_path = api_main.settings.nl_ops_db_path
+    with sqlite3.connect(db_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "calendar_service_alias_hint_sent" in tables
 
 
 def test_build_token_provider_returns_none_without_oauth(monkeypatch) -> None:

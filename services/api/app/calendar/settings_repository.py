@@ -1,22 +1,45 @@
-"""Per-project calendar settings + service rules (Epic 11, story 11.01).
+"""Per-project calendar settings (Epic 11, story 11.01).
 
-Owns ``calendar_project_settings`` and ``calendar_service_rules``. Calendar is
-**opt-in per project**: a project with no settings row reads as disabled, and
-``is_enabled`` is the cheap gate the answerer hits FIRST before any intent
-detection or API call. Sync ``sqlite3`` per project-context; callers dispatch
-via ``asyncio.to_thread``. No raw SQL lives outside this class.
+Owns ``calendar_project_settings``. Calendar is **opt-in per project**: a
+project with no settings row reads as disabled, and ``is_enabled`` is the
+cheap gate the answerer hits FIRST before any intent detection or API call.
+Sync ``sqlite3`` per project-context; callers dispatch via
+``asyncio.to_thread``. No raw SQL lives outside this class.
+
+Epic 13 (story 13.01) — the former ``calendar_service_rules`` table is now
+``project_services`` (in the same DB), owned by
+:class:`ProjectServiceRepository`. The legacy service-rule methods on this
+class (``list_service_rules`` / ``upsert_service_rule`` /
+``delete_service_rule``) are 60-day-deprecated delegating aliases that emit
+:class:`DeprecationWarning`; they exist only so Epic-11 callers keep working
+until the Epic-13 cleanup PR.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .project_services_repository import (
+    ProjectService,
+    ProjectServiceRepository,
+    _unicode_lower,
+    run_project_services_migration,
+)
+
 _DEFAULT_TIMEZONE = "Europe/Moscow"
 _DEFAULT_LOOKAHEAD_DAYS = 60
+
+_DEPRECATION_MESSAGE = (
+    "CalendarSettingsRepository service-rule methods are deprecated; "
+    "use ProjectServiceRepository directly (Epic 13, story 13.01)."
+)
+_DEPRECATION_EVENT = "deprecation_warning_calendar_settings_service_rule"
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -24,6 +47,9 @@ def _connect(db_path: str) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
+    # Match project_services_repository's Unicode-aware ``lower`` UDF so
+    # writes/reads on the same row stay consistent across both repos.
+    connection.create_function("lower", 1, _unicode_lower, deterministic=True)
     return connection
 
 
@@ -43,6 +69,13 @@ class CalendarProjectSettings:
 
 @dataclass(frozen=True)
 class ServiceRule:
+    """Legacy 8-field projection of :class:`ProjectService`.
+
+    Preserved for Epic-11 callers that still import ``ServiceRule`` directly.
+    Epic-13 callers should use :class:`ProjectService`. Removed in the Epic-13
+    cleanup PR.
+    """
+
     id: int
     project_id: int
     name: str | None
@@ -53,16 +86,39 @@ class ServiceRule:
     updated_at: str | None
 
 
-def _loads(value: str | None):
-    if value is None:
-        return None
-    return json.loads(value)
+def _project_service_to_rule(service: ProjectService) -> ServiceRule:
+    return ServiceRule(
+        id=service.id,
+        project_id=service.project_id,
+        name=service.name,
+        duration_minutes=service.duration_minutes,
+        working_hours=service.working_hours,
+        service_days=service.service_days,
+        date_exceptions=service.date_exceptions,
+        updated_at=service.updated_at,
+    )
+
+
+_logger = logging.getLogger(__name__)
+
+
+def _warn_deprecated(*, project_id: int | None = None) -> None:
+    warnings.warn(
+        _DEPRECATION_MESSAGE,
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    extra: dict = {"event": _DEPRECATION_EVENT}
+    if project_id is not None:
+        extra["project_id"] = project_id
+    _logger.info(_DEPRECATION_EVENT, extra=extra)
 
 
 class CalendarSettingsRepository:
     def __init__(self, *, db_path: str) -> None:
         self.db_path = db_path
         self.init_schema()
+        self._services = ProjectServiceRepository(db_path=db_path)
 
     def init_schema(self) -> None:
         with _connect(self.db_path) as connection:
@@ -78,20 +134,10 @@ class CalendarSettingsRepository:
                 )
                 """
             )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS calendar_service_rules (
-                    id INTEGER PRIMARY KEY,
-                    project_id INTEGER,
-                    name TEXT,
-                    duration_minutes INTEGER,
-                    working_hours_json TEXT,
-                    service_days_json TEXT,
-                    date_exceptions_json TEXT,
-                    updated_at TEXT
-                )
-                """
-            )
+        # Epic 13: the project_services table replaces calendar_service_rules.
+        # The migration is idempotent, so re-running on every constructor call
+        # mirrors the existing init_schema() habit.
+        run_project_services_migration(self.db_path)
 
     def _row_to_settings(self, row: sqlite3.Row) -> CalendarProjectSettings:
         return CalendarProjectSettings(
@@ -185,32 +231,15 @@ class CalendarSettingsRepository:
                 (project_id, calendar_operator, now),
             )
 
-    def _row_to_rule(self, row: sqlite3.Row) -> ServiceRule:
-        return ServiceRule(
-            id=int(row["id"]),
-            project_id=int(row["project_id"]),
-            name=row["name"],
-            duration_minutes=row["duration_minutes"],
-            working_hours=_loads(row["working_hours_json"]),
-            service_days=_loads(row["service_days_json"]),
-            date_exceptions=_loads(row["date_exceptions_json"]),
-            updated_at=row["updated_at"],
-        )
+    # --- Epic-13 deprecated aliases ----------------------------------------
+    # These keep their Epic-11 signatures so the existing callers (api
+    # endpoint, e2e tests, availability_answerer fakes) compile unchanged.
+    # Removed in the Epic-13 cleanup PR.
 
     def list_service_rules(self, project_id: int) -> list[ServiceRule]:
-        with _connect(self.db_path) as connection:
-            rows = connection.execute(
-                """
-                SELECT id, project_id, name, duration_minutes,
-                       working_hours_json, service_days_json,
-                       date_exceptions_json, updated_at
-                FROM calendar_service_rules
-                WHERE project_id = ?
-                ORDER BY id
-                """,
-                (project_id,),
-            ).fetchall()
-        return [self._row_to_rule(row) for row in rows]
+        _warn_deprecated(project_id=project_id)
+        rows = self._services.list_for_project(project_id=project_id)
+        return [_project_service_to_rule(row) for row in rows]
 
     def upsert_service_rule(
         self,
@@ -223,56 +252,73 @@ class CalendarSettingsRepository:
         date_exceptions: list | None = None,
         rule_id: int | None = None,
     ) -> int:
+        _warn_deprecated(project_id=project_id)
+        # Epic 11 allowed name=None and updated by explicit rule_id. Epic 13's
+        # canonical upsert is keyed on ``(project_id, lower(name))``; the
+        # legacy by-id UPDATE path is bridged with a direct SQL update so the
+        # caller-provided rule_id stays stable (existing tests assert this).
         now = _now()
-        working_hours_json = None if working_hours is None else json.dumps(working_hours)
-        service_days_json = None if service_days is None else json.dumps(service_days)
-        date_exceptions_json = (
-            None if date_exceptions is None else json.dumps(date_exceptions)
+        working_hours_json = (
+            None if working_hours is None else json.dumps(working_hours, ensure_ascii=False)
         )
-        with _connect(self.db_path) as connection:
-            if rule_id is None:
-                cursor = connection.execute(
+        service_days_json = (
+            None if service_days is None else json.dumps(service_days, ensure_ascii=False)
+        )
+        date_exceptions_json = (
+            None if date_exceptions is None else json.dumps(date_exceptions, ensure_ascii=False)
+        )
+        if rule_id is not None:
+            with _connect(self.db_path) as connection:
+                connection.execute(
                     """
-                    INSERT INTO calendar_service_rules
-                        (project_id, name, duration_minutes, working_hours_json,
-                         service_days_json, date_exceptions_json, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    UPDATE project_services
+                    SET project_id = ?, name = ?, duration_minutes = ?,
+                        working_hours_json = ?, service_days_json = ?,
+                        date_exceptions_json = ?, updated_at = ?
+                    WHERE id = ?
                     """,
                     (
                         project_id,
-                        name,
+                        "" if name is None else name,
                         duration_minutes,
                         working_hours_json,
                         service_days_json,
                         date_exceptions_json,
                         now,
+                        rule_id,
                     ),
                 )
-                return int(cursor.lastrowid)
-            connection.execute(
+            return rule_id
+        # Fresh insert path — the legacy contract allowed ``name=None``, but
+        # the new schema declares ``name`` NOT NULL. Persist an empty string
+        # when callers omitted it (Epic-11 tests do this for "rule shell"
+        # creation); the deprecated alias path will be retired in Epic 13.
+        with _connect(self.db_path) as connection:
+            cursor = connection.execute(
                 """
-                UPDATE calendar_service_rules
-                SET project_id = ?, name = ?, duration_minutes = ?,
-                    working_hours_json = ?, service_days_json = ?,
-                    date_exceptions_json = ?, updated_at = ?
-                WHERE id = ?
+                INSERT INTO project_services
+                    (project_id, name, duration_minutes, working_hours_json,
+                     service_days_json, date_exceptions_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
-                    name,
+                    "" if name is None else name,
                     duration_minutes,
                     working_hours_json,
                     service_days_json,
                     date_exceptions_json,
                     now,
-                    rule_id,
                 ),
             )
-            return rule_id
+            return int(cursor.lastrowid)
 
     def delete_service_rule(self, rule_id: int) -> None:
+        _warn_deprecated()
+        # Epic 11 deleted by rule_id only; the legacy contract was idempotent
+        # (no error on missing row), so we mirror that.
         with _connect(self.db_path) as connection:
             connection.execute(
-                "DELETE FROM calendar_service_rules WHERE id = ?",
+                "DELETE FROM project_services WHERE id = ?",
                 (rule_id,),
             )

@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from services.api.app.calendar.authorization import (
     authorize_calendar_config,
     authorize_calendar_disconnect,
+    authorize_service_remove,
 )
 from services.api.app.calendar.settings_repository import CalendarProjectSettings
 
@@ -81,4 +82,27 @@ def test_disconnect_unknown_role_rejected():
     with pytest.raises(HTTPException) as exc:
         authorize_calendar_disconnect(actor_role="ghost")
     assert exc.value.status_code == 403
+    assert exc.value.detail == "unknown_actor_role"
+
+
+# --- authorize_service_remove (Epic 13 story 13.02) ------------------------
+
+
+def test_service_remove_allowed_for_operator():
+    # Operator may delete a catalog row — mirrors authorize_calendar_disconnect's
+    # operator-only path for destructive ops (FR-18/FR-21).
+    authorize_service_remove(actor_role="operator")
+
+
+def test_service_remove_rejected_for_admin():
+    with pytest.raises(HTTPException) as exc:
+        authorize_service_remove(actor_role="admin")
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "admin_cannot_remove_service"
+
+
+def test_service_remove_unknown_role_rejected_400():
+    with pytest.raises(HTTPException) as exc:
+        authorize_service_remove(actor_role="ghost")
+    assert exc.value.status_code == 400
     assert exc.value.detail == "unknown_actor_role"

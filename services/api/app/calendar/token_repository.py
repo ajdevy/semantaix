@@ -98,6 +98,27 @@ class CalendarTokenRepository:
             raise TokenNotFound("token_not_found")
         return self._fernet.decrypt(row["refresh_token_encrypted"]).decode("utf-8")
 
+    def get_status(self, project_id: int, operator: str) -> str | None:
+        """Return the row's ``status`` or ``None`` if no row exists.
+
+        Used for persistent dedup of the reconnect DM and to let the access
+        token cache short-circuit refresh attempts on a token already known
+        to be dead — without re-calling Google and without re-DMing the
+        operator on every subsequent inbound message.
+        """
+        with _connect(self.db_path) as connection:
+            row = connection.execute(
+                """
+                SELECT status
+                FROM calendar_operator_tokens
+                WHERE project_id = ? AND operator = ?
+                """,
+                (project_id, operator),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["status"])
+
     def set_status(self, project_id: int, operator: str, status: str) -> None:
         now = _now()
         with _connect(self.db_path) as connection:

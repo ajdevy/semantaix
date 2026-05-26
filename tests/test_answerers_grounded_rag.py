@@ -542,6 +542,213 @@ async def test_catalog_query_still_gated_by_verifier(caplog, prompts):
     )
 
 
+# --- Story 13.06: catalog merge-with-dedup branch ----------------------------
+
+
+class _FakeProjectServicesReader:
+    def __init__(self, rows: list) -> None:
+        self._rows = rows
+        self.calls: list[int] = []
+
+    def list_for_project(self, *, project_id: int):
+        self.calls.append(project_id)
+        return list(self._rows)
+
+
+def _svc(
+    *,
+    id: int,
+    name: str,
+    description: str | None = None,
+    price_text: str | None = None,
+    duration_minutes: int | None = None,
+):
+    from services.api.app.calendar.project_services_repository import ProjectService
+
+    return ProjectService(
+        id=id,
+        project_id=1,
+        name=name,
+        description=description,
+        price_text=price_text,
+        tags=None,
+        duration_minutes=duration_minutes,
+        working_hours=None,
+        service_days=None,
+        date_exceptions=None,
+        updated_at=None,
+    )
+
+
+def _ctx_with_project(project_id: int = 1) -> AnswerContext:
+    return AnswerContext(
+        chat_id=1,
+        customer_username="@c",
+        trace_id="t-1",
+        now=datetime(2026, 5, 11, 10, 0, tzinfo=UTC),
+        grounding_threshold=0.6,
+        project_id=project_id,
+    )
+
+
+_FORBIDDEN_LABELS = (
+    "Название:",
+    "Описание:",
+    "Цена:",
+    "Длительность:",
+    "Дни:",
+    "Часы:",
+)
+
+
+@pytest.mark.asyncio
+async def test_catalog_query_merges_structured_and_digest(prompts):
+    rag = _FakeRag([])
+    llm = _fake_llm(answer="У нас есть маникюр, педикюр, стрижка и трансфер.")
+    reader = _FakeProjectServicesReader(
+        [
+            _svc(id=1, name="Маникюр", price_text="от 2000 ₽"),
+            _svc(id=2, name="Педикюр"),
+        ]
+    )
+    catalog = _FakeCatalogDigest(
+        digest="- Маникюра у нас два вида\n- Стрижка\n- Трансфер"
+    )
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+        catalog_digest_service=catalog,
+        project_services_reader=reader,
+    )
+    result = await answerer.try_answer(
+        question=_CATALOG_QUERY, ctx=_ctx_with_project(1)
+    )
+    assert result.handled is True
+    assert reader.calls == [1]
+    snippets = llm.answer_grounded.await_args.kwargs["snippets"]
+    assert len(snippets) == 1
+    assert snippets[0].source_id == "merged:1"
+    # Structured prose precedes the deduped digest.
+    chunk_text = snippets[0].chunk_text
+    assert "Маникюр" in chunk_text
+    assert "Педикюр" in chunk_text
+    assert "Стрижка" in chunk_text
+    assert "Трансфер" in chunk_text
+    # Lemma-matched digest line removed.
+    assert "два вида" not in chunk_text
+    for label in _FORBIDDEN_LABELS:
+        assert label not in chunk_text
+        assert label not in result.text
+
+
+@pytest.mark.asyncio
+async def test_catalog_query_structured_only_no_digest(prompts):
+    rag = _FakeRag([])
+    llm = _fake_llm(answer="Маникюр и педикюр.")
+    reader = _FakeProjectServicesReader(
+        [
+            _svc(id=1, name="Маникюр"),
+            _svc(id=2, name="Педикюр"),
+        ]
+    )
+    catalog = _FakeCatalogDigest(digest="")
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+        catalog_digest_service=catalog,
+        project_services_reader=reader,
+    )
+    result = await answerer.try_answer(
+        question=_CATALOG_QUERY, ctx=_ctx_with_project(1)
+    )
+    assert result.handled is True
+    snippets = llm.answer_grounded.await_args.kwargs["snippets"]
+    assert snippets[0].source_id == "project_services:1"
+    assert "Маникюр" in snippets[0].chunk_text
+    assert "Педикюр" in snippets[0].chunk_text
+
+
+@pytest.mark.asyncio
+async def test_catalog_query_digest_only_when_structured_empty(prompts):
+    rag = _FakeRag([])
+    llm = _fake_llm(answer="У нас есть багги-туры и трансфер.")
+    reader = _FakeProjectServicesReader([])
+    catalog = _FakeCatalogDigest(digest="- Багги-туры\n- Трансфер")
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+        catalog_digest_service=catalog,
+        project_services_reader=reader,
+    )
+    result = await answerer.try_answer(
+        question=_CATALOG_QUERY, ctx=_ctx_with_project(1)
+    )
+    assert result.handled is True
+    snippets = llm.answer_grounded.await_args.kwargs["snippets"]
+    assert snippets[0].source_id == "catalog_digest:1"
+    assert "Багги-туры" in snippets[0].chunk_text
+
+
+@pytest.mark.asyncio
+async def test_catalog_query_empty_structured_and_empty_digest_skips(caplog, prompts):
+    rag = _FakeRag([])
+    llm = _fake_llm()
+    reader = _FakeProjectServicesReader([])
+    catalog = _FakeCatalogDigest(digest="")
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+        catalog_digest_service=catalog,
+        project_services_reader=reader,
+    )
+    with caplog.at_level(
+        logging.INFO, logger="services.api.app.answerers.grounded_rag"
+    ):
+        result = await answerer.try_answer(
+            question=_CATALOG_QUERY, ctx=_ctx_with_project(1)
+        )
+    assert result.handled is False
+    llm.answer_grounded.assert_not_awaited()
+    _assert_skip_log(
+        caplog,
+        reason="catalog_empty",
+        question=_CATALOG_QUERY,
+        retrieved_count=0,
+        top_score=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_catalog_query_without_project_id_skips_structured_read(prompts):
+    """No project_id → structured reader is skipped; digest path still works."""
+    rag = _FakeRag([])
+    llm = _fake_llm(answer="У нас есть только трансфер.")
+    reader = _FakeProjectServicesReader([_svc(id=1, name="Маникюр")])
+    catalog = _FakeCatalogDigest(digest="- Трансфер")
+    answerer = GroundedRagAnswerer(
+        rag_repository=rag,
+        openrouter_client=llm,
+        persona_reader=lambda: ("Анна", "Иванова"),
+        project_prompt_repository=prompts,
+        catalog_digest_service=catalog,
+        project_services_reader=reader,
+    )
+    result = await answerer.try_answer(question=_CATALOG_QUERY, ctx=_ctx())
+    assert result.handled is True
+    # ctx.project_id is None, so the reader must NOT be called.
+    assert reader.calls == []
+    snippets = llm.answer_grounded.await_args.kwargs["snippets"]
+    assert snippets[0].source_id == "catalog_digest:None"
+
+
 @pytest.mark.asyncio
 async def test_non_catalog_query_keeps_threshold_gate(caplog, prompts):
     rag = _FakeRag(_chunks(score=0.2))

@@ -59,6 +59,9 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
     )
 
     monkeypatch.setattr(api_main.settings, "internal_service_token", _INTERNAL_TOKEN)
+    # FR-18 R2: fallback chat_id so the connect-confirmation DM is delivered
+    # even though this e2e doesn't seed an operator_repository row.
+    monkeypatch.setattr(api_main.settings, "hitl_primary_operator_chat_id", "999")
     monkeypatch.setattr(api_main, "calendar_settings_repository", settings_repo)
     monkeypatch.setattr(api_main, "calendar_oauth_state_repository", state_repo)
     monkeypatch.setattr(api_main, "calendar_token_repository", token_repo)
@@ -89,8 +92,25 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
     monkeypatch.setattr(oauth_client, "revoke", revoke)
 
     settings_repo.enable(_PROJECT_ID, calendar_operator=_OPERATOR)
+
+    # FR-18 R2: record the connect-confirmation DM so the happy path can
+    # assert it was sent (in addition to the HTML success page).
+    sent_dms: list[tuple[int, str]] = []
+
+    async def record_send_message(*, chat_id: int, text: str) -> None:
+        sent_dms.append((chat_id, text))
+
+    monkeypatch.setattr(
+        api_main.telegram_bot_sender, "send_message", record_send_message
+    )
+
     client = TestClient(api_app)
-    yield {"client": client, "token_repo": token_repo, "revoke": revoke}
+    yield {
+        "client": client,
+        "token_repo": token_repo,
+        "revoke": revoke,
+        "sent_dms": sent_dms,
+    }
     api_main._calendar_oauth_hits.clear()
 
 
@@ -119,6 +139,12 @@ def test_epic11_oauth_connect_full_flow(env, caplog):
 
         # 3) token stored (encrypted) and decryptable via the repo.
         assert token_repo.get_refresh_token(_PROJECT_ID, _OPERATOR) == _REFRESH_TOKEN
+
+        # FR-18 R2: in addition to the HTML success page, the api DMs the
+        # operator a Russian connect-confirmation message.
+        assert any(
+            "Календарь подключён" in text for _chat_id, text in env["sent_dms"]
+        )
 
         # 4) disconnect → revoke + delete.
         disconnect = client.post(

@@ -105,6 +105,7 @@ class AppSettings(BaseSettings):
     google_oauth_redirect_uri: str | None = None
     calendar_oauth_state_ttl_seconds: int = 300
     calendar_http_timeout_seconds: float = 10.0
+    services_nl_op_session_ttl_seconds: int = 600
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

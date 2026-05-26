@@ -58,3 +58,18 @@ def authorize_calendar_disconnect(*, actor_role: str) -> None:
     _require_known_role(actor_role)
     if actor_role == ROLE_ADMIN:
         raise HTTPException(status_code=403, detail="admin_cannot_disconnect")
+
+
+def authorize_service_remove(*, actor_role: str) -> None:
+    """Authorize a destructive service-row removal (Epic 13, story 13.02).
+
+    Mirrors :func:`authorize_calendar_disconnect`: operators may delete catalog
+    rows, an admin (even one who is also a registered project operator) is
+    rejected with 403 ``admin_cannot_remove_service`` per FR-18/FR-21's
+    destructive-op rule. Unknown roles → 400 ``unknown_actor_role``.
+    """
+    if actor_role == ROLE_OPERATOR:
+        return
+    if actor_role == ROLE_ADMIN:
+        raise HTTPException(status_code=403, detail="admin_cannot_remove_service")
+    raise HTTPException(status_code=400, detail="unknown_actor_role")

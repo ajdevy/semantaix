@@ -46,12 +46,16 @@ from services.api.app.calendar.access_token_cache import AccessTokenProvider
 from services.api.app.calendar.authorization import (
     authorize_calendar_config,
     authorize_calendar_disconnect,
+    authorize_service_remove,
 )
 from services.api.app.calendar.availability_answerer import (
     RESPONSE_MODE_ESCALATION,
     CalendarAvailabilityAnswerer,
 )
 from services.api.app.calendar.calendar_client import CalendarFreeBusyClient
+from services.api.app.calendar.calendar_service_alias_hint_repository import (
+    init_calendar_service_alias_hint_schema,
+)
 from services.api.app.calendar.clarify_state_repository import (
     CalendarClarifyStateRepository,
 )
@@ -63,9 +67,22 @@ from services.api.app.calendar.oauth_state_repository import (
     CalendarOAuthStateRepository,
     InvalidOAuthState,
 )
+from services.api.app.calendar.project_service_validation import (
+    ProjectServiceValidationError,
+    validate_project_service,
+)
+from services.api.app.calendar.project_services_repository import (
+    ProjectService,
+    ProjectServiceNotFound,
+    ProjectServiceRepository,
+    acquire_service_upsert_lock,
+)
 from services.api.app.calendar.service_rule_validation import (
     ServiceRuleValidationError,
     validate_service_rule,
+)
+from services.api.app.calendar.services_nl_op_session_repository import (
+    init_services_nl_ops_schema,
 )
 from services.api.app.calendar.settings_repository import (
     CalendarSettingsRepository,
@@ -115,6 +132,27 @@ from services.api.app.projects import (
 )
 from services.api.app.rag import RagRepository
 from services.api.app.russian_text import get_russian_normalizer
+from services.api.app.services_nl_ops import (
+    OP_SERVICE_REMOVE,
+    ServicesNlOpsRepository,
+    ServicesNlSession,
+    apply_confirmed,
+)
+from services.api.app.services_nl_ops import (
+    InvalidConfirmToken as ServicesNlInvalidConfirmToken,
+)
+from services.api.app.services_nl_ops import (
+    NlOpSessionExpired as ServicesNlSessionExpired,
+)
+from services.api.app.services_nl_ops import (
+    NlOpSessionNotFound as ServicesNlSessionNotFound,
+)
+from services.api.app.services_nl_ops import (
+    NlOpSessionNotOwner as ServicesNlSessionNotOwner,
+)
+from services.api.app.services_nl_ops import (
+    NlOpSessionNotPending as ServicesNlSessionNotPending,
+)
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
 from services.api.app.trace_corrections import (
@@ -181,7 +219,28 @@ calendar_settings_repository = CalendarSettingsRepository(
 calendar_oauth_state_repository = CalendarOAuthStateRepository(
     db_path=settings.calendar_db_path
 )
+# Epic 13 (story 13.02): canonical project_services repository, shared by the
+# new /api/projects/{id}/services endpoints. The old /calendar alias endpoints
+# still route through ``calendar_settings_repository``'s deprecated wrappers
+# (which themselves delegate into the same underlying table) so Epic-11 callers
+# continue to see identical behavior + just gain a deprecation log line.
+project_services_repository = ProjectServiceRepository(
+    db_path=settings.calendar_db_path
+)
 init_token_schema(settings.calendar_db_path)
+# Epic 13 (story 13.01): bootstrap the operator-scoped services NL ops session
+# table next to the existing admin_nl_op_sessions table. Both are idempotent.
+init_services_nl_ops_schema(settings.nl_ops_db_path)
+# Epic 13 (story 13.04): operator-scoped NL ops state machine + endpoints
+# share the same DB file via the bootstrap above.
+services_nl_ops_repository = ServicesNlOpsRepository(
+    db_path=settings.nl_ops_db_path,
+    pending_ttl_seconds=settings.services_nl_op_session_ttl_seconds,
+)
+# Epic 13 (story 13.03): bootstrap the per-(project, operator) dedup table for
+# the ``/calendar_service`` migration-hint DM. Idempotent; lives in
+# semantaix_nl_ops.db alongside services_nl_op_sessions.
+init_calendar_service_alias_hint_schema(settings.nl_ops_db_path)
 
 
 def _build_calendar_token_repository(app_settings) -> CalendarTokenRepository | None:
@@ -356,6 +415,7 @@ answer_pipeline = AnswerPipeline(
             project_prompt_repository=project_prompt_repository,
             catalog_digest_service=catalog_digest_service,
             weather_client=weather_client,
+            project_services_reader=project_services_repository,
         ),
     ]
 )
@@ -3314,6 +3374,17 @@ def restore_backup(backup_id: int, request: BackupRestoreRequest) -> dict[str, o
 
 _CALENDAR_OAUTH_RATE_LIMIT = 10
 _CALENDAR_OAUTH_RATE_WINDOW_SECONDS = 60.0
+
+# FR-18: on successful OAuth consent the api DMs the operator a Russian
+# confirmation (in addition to the HTML success page in the browser). The
+# copy nudges the operator toward catalog-only entries via /service add.
+_CALENDAR_CONNECTED_DM = (
+    "✅ Календарь подключён. "
+    "Услуги, у которых указано расписание, "
+    "теперь будут проверяться по вашему календарю. "
+    "Чтобы добавить услугу: `/service add <название>` "
+    "или просто напишите «добавь услугу …»."
+)
 # In-memory coarse throttle: {bucket_key: [monotonic timestamps]}. Bounds the
 # abuse surface of the unauthenticated callback (each hit triggers a token
 # exchange) and the internal initiate. Per-state single-use bounds replay; this
@@ -3415,6 +3486,24 @@ async def calendar_oauth_callback(
             extra={"project_id": pending.project_id, "operator": pending.operator},
         )
         return HTMLResponse(_calendar_callback_html(ok=False), status_code=400)
+    # FR-18 DM guard (post-R2 bugfix): the "✅ Календарь подключён" DM should
+    # only fire on a *fresh* connect, not on every successful callback.
+    # Re-clicking the consent URL during dev, or any other repeat consent for
+    # an already-connected (project, operator), used to spam the operator
+    # with the connection-confirmation message. Capture token presence BEFORE
+    # the upsert; we only DM when there was no prior token (first-time connect
+    # or post-disconnect reconnect, both of which are legitimately "just got
+    # connected" moments from the operator's point of view).
+    token_existed_before_upsert = False
+    try:
+        await asyncio.to_thread(
+            calendar_token_repository.get_refresh_token,
+            pending.project_id,
+            pending.operator,
+        )
+        token_existed_before_upsert = True
+    except TokenNotFound:
+        token_existed_before_upsert = False
     await asyncio.to_thread(
         calendar_token_repository.upsert,
         pending.project_id,
@@ -3460,6 +3549,74 @@ async def calendar_oauth_callback(
         "calendar_oauth_connected",
         extra={"project_id": pending.project_id, "operator": pending.operator},
     )
+    # FR-18: Russian Telegram DM to the operator confirming the connection
+    # (in addition to the HTML success page). DM failures MUST NOT corrupt
+    # the OAuth success signal to Google or to the browser — log + swallow.
+    # Fresh-connect-only guard: skip the DM when the operator was already
+    # connected to this project (re-consent / token refresh on the same
+    # registration). Without this guard, every successful callback for an
+    # already-connected operator spams the "Календарь подключён" message —
+    # which the operator complained about during dev (the consent URL gets
+    # re-clicked across api restarts and each click DMs again).
+    if token_existed_before_upsert:
+        logger.info(
+            "calendar_connect_dm_skipped_already_connected",
+            extra={
+                "project_id": pending.project_id,
+                "operator": pending.operator,
+            },
+        )
+        return HTMLResponse(_calendar_callback_html(ok=True), status_code=200)
+    operator_chat_id: int | None = None
+    try:
+        record = await asyncio.to_thread(
+            operator_repository.find_by_username, pending.operator
+        )
+    except Exception:
+        record = None
+    if record is not None and record.chat_id is not None:
+        operator_chat_id = record.chat_id
+    else:
+        fallback = settings.hitl_primary_operator_chat_id
+        if fallback:
+            try:
+                operator_chat_id = int(fallback)
+            except (TypeError, ValueError):
+                operator_chat_id = None
+    if operator_chat_id is None:
+        logger.info(
+            "calendar_connect_dm_no_chat_id",
+            extra={
+                "trace_id": None,
+                "project_id": pending.project_id,
+                "operator": pending.operator,
+            },
+        )
+    else:
+        try:
+            await telegram_bot_sender.send_message(
+                chat_id=operator_chat_id, text=_CALENDAR_CONNECTED_DM
+            )
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            logger.warning(
+                "calendar_connect_dm_failed",
+                extra={
+                    "trace_id": None,
+                    "project_id": pending.project_id,
+                    "operator": pending.operator,
+                    "error_repr": repr(exc),
+                },
+            )
+        except Exception as exc:  # defensive: never break the OAuth callback
+            logger.warning(
+                "calendar_connect_dm_failed",
+                extra={
+                    "trace_id": None,
+                    "project_id": pending.project_id,
+                    "operator": pending.operator,
+                    "error_repr": repr(exc),
+                },
+            )
     return HTMLResponse(_calendar_callback_html(ok=True), status_code=200)
 
 
@@ -3607,6 +3764,21 @@ async def calendar_project_service_upsert(
     request: CalendarServiceRuleRequest,
     _principal: Annotated[str, Depends(require_internal_token)],
 ) -> dict[str, object]:
+    # Epic 13 (story 13.02): this endpoint is 60-day-deprecated; the canonical
+    # surface lives at ``POST /api/projects/{id}/services``. The deprecation log
+    # is the ONLY behavioral change — the rest of the handler keeps the Epic-11
+    # contract (``rule_id``-keyed updates, ``{"id": ...}`` response shape) so
+    # existing callers see no breakage. The slash-command alias hint DM is owned
+    # by story 13.03; here we only emit the log.
+    logger.info(
+        "deprecation_warning_calendar_services_endpoint",
+        extra={
+            "endpoint": "POST /calendar/projects/{project_id}/services",
+            "project_id": project_id,
+            "actor_role": request.actor_role,
+            "canonical_endpoint": "POST /api/projects/{project_id}/services",
+        },
+    )
     project_settings = await asyncio.to_thread(
         calendar_settings_repository.get, project_id
     )
@@ -3657,6 +3829,20 @@ async def calendar_project_service_delete(
     request: CalendarServiceDeleteRequest,
     _principal: Annotated[str, Depends(require_internal_token)],
 ) -> dict[str, object]:
+    # Epic 13 (story 13.02): deprecated alias for
+    # ``DELETE /api/projects/{project_id}/services/{service_id}``. The Epic-11
+    # behavior (admin-allowed when designated operator) is preserved here on
+    # purpose so existing automation keeps working — the canonical endpoint is
+    # stricter (operator-only via ``authorize_service_remove``).
+    logger.info(
+        "deprecation_warning_calendar_services_endpoint",
+        extra={
+            "endpoint": "DELETE /calendar/projects/{project_id}/services/{rule_id}",
+            "project_id": project_id,
+            "actor_role": request.actor_role,
+            "canonical_endpoint": "DELETE /api/projects/{project_id}/services/{service_id}",
+        },
+    )
     project_settings = await asyncio.to_thread(
         calendar_settings_repository.get, project_id
     )
@@ -3673,3 +3859,371 @@ async def calendar_project_service_delete(
         extra={"project_id": project_id, "rule_id": rule_id},
     )
     return {"deleted": True}
+
+
+# --- Canonical /api/projects/{id}/services surface (Epic 13, story 13.02) ---
+#
+# The single structured catalog of operator-curated services per project. Add /
+# edit is shared with admins (FR-21) via ``authorize_calendar_config``; remove
+# is operator-only (FR-18/FR-21 destructive-op rule) via the new
+# ``authorize_service_remove`` helper. Writes serialize through the per-row
+# ``acquire_service_upsert_lock`` so concurrent same-name upserts cannot race
+# (the unique-index expression catches inter-process collisions).
+
+
+class ProjectServiceUpsertRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+    name: str
+    description: str | None = None
+    price_text: str | None = None
+    tags: list | None = None
+    duration_minutes: int | None = None
+    working_hours: dict | None = None
+    service_days: list | None = None
+    date_exceptions: list | None = None
+
+
+class ProjectServiceDeleteRequest(BaseModel):
+    actor: str
+    actor_role: str = "operator"
+
+
+def _project_service_to_dict(service: ProjectService) -> dict[str, object]:
+    return {
+        "id": service.id,
+        "project_id": service.project_id,
+        "name": service.name,
+        "description": service.description,
+        "price_text": service.price_text,
+        "tags": service.tags,
+        "duration_minutes": service.duration_minutes,
+        "working_hours": service.working_hours,
+        "service_days": service.service_days,
+        "date_exceptions": service.date_exceptions,
+        "updated_at": service.updated_at,
+    }
+
+
+@app.get("/api/projects/{project_id}/services")
+async def api_project_services_list(
+    project_id: int,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    services = await asyncio.to_thread(
+        project_services_repository.list_for_project, project_id=project_id
+    )
+    return {
+        "project_id": project_id,
+        "services": [_project_service_to_dict(s) for s in services],
+    }
+
+
+def _upsert_project_service_call(
+    *,
+    project_id: int,
+    name: str,
+    request: ProjectServiceUpsertRequest,
+) -> ProjectService:
+    return project_services_repository.upsert(
+        project_id=project_id,
+        name=name,
+        description=request.description,
+        price_text=request.price_text,
+        tags=request.tags,
+        duration_minutes=request.duration_minutes,
+        working_hours=request.working_hours,
+        service_days=request.service_days,
+        date_exceptions=request.date_exceptions,
+    )
+
+
+@app.post("/api/projects/{project_id}/services")
+async def api_project_services_upsert(
+    project_id: int,
+    request: ProjectServiceUpsertRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    try:
+        stripped_name = validate_project_service(
+            name=request.name,
+            duration_minutes=request.duration_minutes,
+            working_hours=request.working_hours,
+            service_days=request.service_days,
+            date_exceptions=request.date_exceptions,
+        )
+    except ProjectServiceValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.reason) from exc
+    project_settings = await asyncio.to_thread(
+        calendar_settings_repository.get, project_id
+    )
+    authorize_calendar_config(
+        actor=request.actor,
+        actor_role=request.actor_role,
+        project_settings=project_settings,
+    )
+    lock = await acquire_service_upsert_lock(
+        project_id=project_id, name=stripped_name
+    )
+    async with lock:
+        service = await asyncio.to_thread(
+            _upsert_project_service_call,
+            project_id=project_id,
+            name=stripped_name,
+            request=request,
+        )
+    logger.info(
+        "project_service_upserted",
+        extra={
+            "project_id": project_id,
+            "service_id": service.id,
+            "service_name": service.name,
+        },
+    )
+    return _project_service_to_dict(service)
+
+
+@app.delete("/api/projects/{project_id}/services/{service_id}")
+async def api_project_services_delete(
+    project_id: int,
+    service_id: int,
+    request: ProjectServiceDeleteRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    authorize_service_remove(actor_role=request.actor_role)
+    # Resolve the row first so we can acquire the per-name lock; this also
+    # gives us a single, uniform 404 path. Any race between this lookup and
+    # the actual delete (e.g. an alias-path delete sneaking in) is harmless —
+    # the SQL delete is a no-op and we still emit a structured success log,
+    # but we re-check with another ``get`` to keep semantics tight.
+    try:
+        existing = await asyncio.to_thread(
+            project_services_repository.get,
+            project_id=project_id,
+            service_id=service_id,
+        )
+    except ProjectServiceNotFound as exc:
+        raise HTTPException(
+            status_code=404, detail="project_service_not_found"
+        ) from exc
+    lock = await acquire_service_upsert_lock(
+        project_id=project_id, name=existing.name
+    )
+    async with lock:
+        try:
+            await asyncio.to_thread(
+                project_services_repository.delete,
+                project_id=project_id,
+                service_id=service_id,
+            )
+        except ProjectServiceNotFound as exc:
+            # Tight race: the row was removed (by the alias path, which uses a
+            # different lock) between our lookup and the delete. Map to 404
+            # rather than leaking a 500 — same body as the lookup-miss path.
+            raise HTTPException(
+                status_code=404, detail="project_service_not_found"
+            ) from exc
+    logger.info(
+        "project_service_deleted",
+        extra={
+            "project_id": project_id,
+            "service_id": service_id,
+            "service_name": existing.name,
+        },
+    )
+    return {"deleted": True}
+
+
+# --- /api/projects/{id}/services/nl-ops surface (Epic 13, story 13.04) ------
+#
+# Operator-driven natural-language proposal/confirm/cancel state machine on the
+# canonical `project_services` catalog. The bot dispatcher (story 13.05) DMs
+# previews + confirm-tokens; this api layer owns parsing, persistence, single-
+# pending invariant, ownership-checked confirmation, and full-payload audit
+# logging.
+
+
+class ServicesNlOpProposeRequest(BaseModel):
+    originating_operator: str
+    text: str
+    now: str | None = None
+
+
+class ServicesNlOpConfirmRequest(BaseModel):
+    presenter_operator: str
+    confirm_token: str
+    actor_role: str = "operator"
+    now: str | None = None
+
+
+class ServicesNlOpCancelRequest(BaseModel):
+    presenter_operator: str
+    now: str | None = None
+
+
+def _parse_optional_now(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid_now") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _nl_session_to_dict(session: ServicesNlSession) -> dict[str, object]:
+    body: dict[str, object] = {
+        "session_id": session.id,
+        "project_id": session.project_id,
+        "originating_operator": session.originating_operator,
+        "op_type": session.op_type,
+        "payload": session.payload,
+        "preview": session.preview,
+        "status": session.status,
+        "created_at": session.created_at,
+        "expires_at": session.expires_at,
+        "consumed_at": session.consumed_at,
+        "soft_deleted_at": session.soft_deleted_at,
+    }
+    if session.plaintext_confirm_token is not None:
+        body["confirm_token"] = session.plaintext_confirm_token
+    if session.prior_cancelled_session_ids:
+        # First (and typically only) prior-pending session id that the
+        # single-pending invariant flipped to cancelled by this propose.
+        # The bot dispatcher (story 13.05) DMs a one-line notice before the
+        # new preview so the operator knows the older draft is gone.
+        body["prior_cancelled_session_id"] = session.prior_cancelled_session_ids[0]
+    return body
+
+
+@app.post("/api/projects/{project_id}/services/nl-ops")
+async def api_services_nl_ops_propose(
+    project_id: int,
+    request: ServicesNlOpProposeRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    now = _parse_optional_now(request.now)
+    session = await asyncio.to_thread(
+        services_nl_ops_repository.propose,
+        project_id=project_id,
+        originating_operator=request.originating_operator,
+        text=request.text,
+        now=now,
+    )
+    return _nl_session_to_dict(session)
+
+
+@app.post("/api/projects/{project_id}/services/nl-ops/{session_id}/confirm")
+async def api_services_nl_ops_confirm(
+    project_id: int,
+    session_id: int,
+    request: ServicesNlOpConfirmRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    now = _parse_optional_now(request.now)
+    try:
+        existing = await asyncio.to_thread(
+            services_nl_ops_repository.get, session_id
+        )
+    except ServicesNlSessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
+    if existing.project_id != project_id:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    # Permission split per FR-18/FR-21: admin can propose `удали услугу` but
+    # the confirmation of a destructive op is operator-only.
+    if existing.op_type == OP_SERVICE_REMOVE:
+        authorize_service_remove(actor_role=request.actor_role)
+    else:
+        project_settings = await asyncio.to_thread(
+            calendar_settings_repository.get, project_id
+        )
+        authorize_calendar_config(
+            actor=request.presenter_operator,
+            actor_role=request.actor_role,
+            project_settings=project_settings,
+        )
+    try:
+        consumed = await asyncio.to_thread(
+            services_nl_ops_repository.consume,
+            session_id=session_id,
+            presenter_operator=request.presenter_operator,
+            confirm_token=request.confirm_token,
+            now=now,
+        )
+    except ServicesNlSessionNotOwner as exc:
+        raise HTTPException(status_code=403, detail="not_session_owner") from exc
+    except ServicesNlInvalidConfirmToken as exc:
+        raise HTTPException(
+            status_code=401, detail="invalid_confirm_token"
+        ) from exc
+    except ServicesNlSessionExpired as exc:
+        raise HTTPException(status_code=410, detail="session_expired") from exc
+    except ServicesNlSessionNotPending as exc:
+        raise HTTPException(
+            status_code=410, detail=f"session_not_pending:{exc}"
+        ) from exc
+    try:
+        applied_id = await apply_confirmed(
+            session=consumed,
+            repo=project_services_repository,
+            lock_factory=acquire_service_upsert_lock,
+        )
+    except ProjectServiceNotFound as exc:
+        raise HTTPException(
+            status_code=404, detail="project_service_not_found"
+        ) from exc
+    body = _nl_session_to_dict(consumed)
+    body["applied_op_type"] = consumed.op_type
+    body["applied_payload"] = consumed.payload
+    body["applied_service_id"] = applied_id
+    return body
+
+
+@app.post("/api/projects/{project_id}/services/nl-ops/{session_id}/cancel")
+async def api_services_nl_ops_cancel(
+    project_id: int,
+    session_id: int,
+    request: ServicesNlOpCancelRequest,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    now = _parse_optional_now(request.now)
+    try:
+        existing = await asyncio.to_thread(
+            services_nl_ops_repository.get, session_id
+        )
+    except ServicesNlSessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="session_not_found") from exc
+    if existing.project_id != project_id:
+        raise HTTPException(status_code=404, detail="session_not_found")
+    try:
+        cancelled = await asyncio.to_thread(
+            services_nl_ops_repository.cancel,
+            session_id=session_id,
+            presenter_operator=request.presenter_operator,
+            now=now,
+        )
+    except ServicesNlSessionNotOwner as exc:
+        raise HTTPException(status_code=403, detail="not_session_owner") from exc
+    except ServicesNlSessionNotPending as exc:
+        raise HTTPException(
+            status_code=410, detail=f"session_not_pending:{exc}"
+        ) from exc
+    return _nl_session_to_dict(cancelled)
+
+
+@app.get("/api/projects/{project_id}/services/nl-ops/latest-pending")
+async def api_services_nl_ops_latest_pending(
+    project_id: int,
+    operator: str,
+    _principal: Annotated[str, Depends(require_internal_token)],
+) -> dict[str, object]:
+    session = await asyncio.to_thread(
+        services_nl_ops_repository.latest_pending,
+        project_id=project_id,
+        operator=operator,
+    )
+    if session is None:
+        raise HTTPException(status_code=404, detail="no_pending")
+    return _nl_session_to_dict(session)
