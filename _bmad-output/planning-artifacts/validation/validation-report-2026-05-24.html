@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Validation Report — Semantaix PRD (Epic 12)</title>
+<title>Validation Report — Semantaix PRD (Epic 13)</title>
 <style>
   :root{--bg:#0f1115;--card:#171a21;--ink:#e6e8ec;--muted:#9aa3b2;--line:#262b35;
     --crit:#ff5c5c;--high:#ff9f43;--med:#ffd24a;--low:#7bd88f;--good:#4aa8ff;}
@@ -51,12 +51,12 @@
 <body>
 <div class="wrap">
   <h1>Validation Report — Semantaix PRD</h1>
-  <div class="sub">Epic 12: Unified Project Services Catalog (FR-23–FR-25) · PRD: <code>_bmad-output/planning-artifacts/PRD.md</code> · Run 2026-05-24</div>
+  <div class="sub">Epic 13: Unified Project Services Catalog (FR-23–FR-25) · PRD: <code>_bmad-output/planning-artifacts/PRD.md</code> · Run 2026-05-24</div>
   <span class="grade grade-fair">GRADE: FAIR</span>
   <span class="resolved">22/22 RESOLVED</span>
 
   <div class="synth">
-    <p><b>PRD body and Epic 11 calendar group remain decision-ready; Epic 12 surface arrived strong on thesis but thin on done-ness, and is now resolved in full.</b> One canonical <code>project_services</code> table powering both the catalog answer and the calendar, with two converging operator entry paths (slash + NL) — the strategic shape is clean. Where it ran thin: service identity (uniqueness/upsert), NL session lifecycle, migration idempotency, audit-discipline boundaries, and three near-conflicts with Epic 11 the kickoff log walked past.</p>
+    <p><b>PRD body and Epic 11 calendar group remain decision-ready; Epic 13 surface arrived strong on thesis but thin on done-ness, and is now resolved in full.</b> One canonical <code>project_services</code> table powering both the catalog answer and the calendar, with two converging operator entry paths (slash + NL) — the strategic shape is clean. Where it ran thin: service identity (uniqueness/upsert), NL session lifecycle, migration idempotency, audit-discipline boundaries, and three near-conflicts with Epic 11 the kickoff log walked past.</p>
     <p>The validation pass produced 22 findings — <b>4 critical, 6 high, 7 medium, 5 low</b> — across the rubric and adversarial reviewers, and <b>all 22 are resolved</b> in this pass via direct edits to FR-22 / FR-23 / FR-24 / FR-25, §6 / §10 / §11, plus a validation-resolution sub-section in <code>.decision-log.md</code>.</p>
     <p>Highlights: per-<code>(project_id, lower(name))</code> uniqueness + locking (C2/H3); FR-25 now <b>merges structured + digest with dedup</b> rather than the original binary cliff (C3); NL preview hardened against MarkdownV2 injection and cross-operator replay (C4); <code>/service remove</code> is operator-only, mirroring FR-18's destructive=operator-only rule (C1); audit now logs the <b>full</b> payload (H5); migration is genuinely idempotent via existence-check guards (H1). <b>Verdict after resolution: READY for architecture.</b></p>
   </div>
@@ -109,16 +109,16 @@
 
   <details>
     <summary>Low (5) — RESOLVED</summary>
-    <div class="f"><div><span class="sev low">low</span><span class="ttl">L1 — §10 Delivery Mapping omits Epic 12</span> <span class="loc">§10</span></div><div class="fix"><b>Resolution:</b> Epic 12 paragraph added — references Epic 11/10/09 dependencies and the epic file to be created by <code>bmad-create-epics-and-stories</code>.</div></div>
+    <div class="f"><div><span class="sev low">low</span><span class="ttl">L1 — §10 Delivery Mapping omits Epic 13</span> <span class="loc">§10</span></div><div class="fix"><b>Resolution:</b> Epic 13 paragraph added — references Epic 11/10/09 dependencies and the epic file to be created by <code>bmad-create-epics-and-stories</code>.</div></div>
     <div class="f"><div><span class="sev low">low</span><span class="ttl">L2 — <code>services_nl_op_sessions</code> placed in <code>semantaix_calendar.db</code> instead of <code>semantaix_nl_ops.db</code></span> <span class="loc">§6</span></div><div class="fix"><b>Resolution:</b> moved to <code>semantaix_nl_ops.db</code> alongside <code>nl_op_sessions</code> and <code>admin_nl_op_sessions</code>. Operator runbook "show all pending NL sessions" now queries a single DB.</div></div>
-    <div class="f"><div><span class="sev low">low</span><span class="ttl">L3 — Decision-log "Conflicts surfaced — (none)" overconfident</span> <span class="loc">.decision-log.md Epic 12 entry</span></div><div class="fix"><b>Resolution:</b> sub-section rewritten to list the three real near-conflicts (C1 permission asymmetry, H5 audit-discipline cargo-cult, H2 deprecation cadence vs Epic 11 zero-period precedent) and how each is resolved.</div></div>
+    <div class="f"><div><span class="sev low">low</span><span class="ttl">L3 — Decision-log "Conflicts surfaced — (none)" overconfident</span> <span class="loc">.decision-log.md Epic 13 entry</span></div><div class="fix"><b>Resolution:</b> sub-section rewritten to list the three real near-conflicts (C1 permission asymmetry, H5 audit-discipline cargo-cult, H2 deprecation cadence vs Epic 11 zero-period precedent) and how each is resolved.</div></div>
     <div class="f"><div><span class="sev low">low</span><span class="ttl">L4 — Glossary "Project service" doesn't surface eligibility split</span> <span class="loc">§11</span></div><div class="fix"><b>Resolution:</b> entry now states "catalog-eligible always; calendar-eligible iff <code>duration_minutes IS NOT NULL</code>" with FR-23 / FR-20 / FR-22 cross-references.</div></div>
-    <div class="f"><div><span class="sev low">low</span><span class="ttl">L5 — Decision log doesn't flag admin-gate narrowing</span> <span class="loc">.decision-log.md Epic 12 entry</span></div><div class="fix"><b>Resolution:</b> bullet added noting FR-24's admin must also be a registered project operator (narrower than FR-21's plain admin gate); rationale: services are project-content, not platform-level config.</div></div>
+    <div class="f"><div><span class="sev low">low</span><span class="ttl">L5 — Decision log doesn't flag admin-gate narrowing</span> <span class="loc">.decision-log.md Epic 13 entry</span></div><div class="fix"><b>Resolution:</b> bullet added noting FR-24's admin must also be a registered project operator (narrower than FR-21's plain admin gate); rationale: services are project-content, not platform-level config.</div></div>
   </details>
 
   <footer>
     Rubric: <code>.claude/skills/bmad-prd/assets/prd-validation-checklist.md</code> ·
-    Reviewer files: <code>review-rubric-epic12.md</code>, <code>review-adversarial-epic12.md</code> ·
+    Reviewer files: <code>review-rubric-epic13.md</code>, <code>review-adversarial-epic13.md</code> ·
     Generated 2026-05-24T00:00:00Z
   </footer>
 </div>

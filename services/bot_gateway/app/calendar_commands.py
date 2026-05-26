@@ -15,9 +15,13 @@ Give the project's designated calendar operator a Telegram entry point:
 
 Gating mirrors the existing operator-command dispatch (`kb_intent._SLASH_RE`,
 `/hitl_config`): the sender is resolved against the Epic-10 operator registry, and
-only a registered operator bound to a project may run these. The api enforces the
-*designated* calendar-operator rule (returns ``not_calendar_operator`` for a
-non-designated operator), which surfaces here as the Russian fallback DM.
+only a registered operator bound to a project may run these. The api's
+``/calendar/connect/initiate`` does NOT gate on project-enabled or
+designated-operator (so first-time bootstrap and operator handover work);
+the OAuth callback is the authoritative gate and records the connecting
+operator as the designated calendar operator on success. Read-only availability
+endpoints continue to enforce the designated-operator rule via
+``services.api.app.calendar.authorization`` (403 ``not_calendar_operator``).
 
 Never log the consent URL (it carries a single-use ``state``) or any token.
 """

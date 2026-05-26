@@ -335,13 +335,13 @@ Acceptance criteria:
 
 *Delivery:* **Epic 11.**
 
-### Feature Group: Unified Project Services Catalog (Epic 12)
+### Feature Group: Unified Project Services Catalog (Epic 13)
 
 One canonical operator-curated `project_services` table per project drives BOTH the catalog answer ("какие услуги?") AND the calendar availability flow. Rows are catalog-only when scheduling fields are absent, calendar-only when only the calendar uses them, and dual-use in the common case where a single offering is both advertised and bookable. The catalog answer reads structured services first and **merges** with the existing LLM digest path (deduplicating services that appear in both — the structured row wins on conflict because it is more authoritative); the digest is consulted in full only when the structured table is empty for that project. Services are editable by operators (and admins on projects where they are registered operators) through two converging paths: a slash command and a Russian natural-language dialog with explicit preview/confirm. This eliminates the prior duplication where the same offering ("маникюр") had to be described once as a calendar service rule and again indirectly via an uploaded PDF.
 
-**Out of scope for Epic 12** (deferred — see decision log):
+**Out of scope for Epic 13** (deferred — see decision log):
 - LLM-based extraction of services from `/kb_add`-uploaded PDFs into `project_services` rows (future epic).
-- Web admin UI for `project_services` CRUD (Epic 12 is bot-only — slash + NL).
+- Web admin UI for `project_services` CRUD (Epic 13 is bot-only — slash + NL).
 - Multi-operator / multi-calendar selection (Epic 11 deferral, unchanged here).
 - Booking / event creation (still the §2.2 Non-Goal).
 
@@ -359,7 +359,7 @@ One canonical operator-curated `project_services` table per project drives BOTH 
 - A row is **calendar-eligible iff `duration_minutes IS NOT NULL`**. The calendar code filters on that predicate; rows without a duration are catalog-only.
 - A new `ProjectServiceRepository` (sync `sqlite3`, dispatched via `asyncio.to_thread`) is the canonical CRUD seam for both the catalog answer and the calendar resolver. **`ProjectServiceRepository.upsert` is keyed on `(project_id, lower(name))`** — duplicate-name attempts via slash or NL **update** the existing row (upsert semantics) and emit a `services_upsert_duplicate_name` structured-log event.
 - **Concurrency:** per-`(project_id, lower(name))` `asyncio.Lock` around `ProjectServiceRepository.upsert` (single-flight, mirroring Epic 11's per-operator calendar-token refresh lock). Combined with the uniqueness constraint, same-row add-vs-add races serialize and the second writer wins (last-writer-wins is acceptable for operator-curated content). Add-vs-delete races resolve to the last operation's intent. **No optimistic concurrency / `updated_at` precondition checks in v1.**
-- `CalendarSettingsRepository`'s service-rule method names remain as delegating aliases (`upsert_service_rule`, etc.) until the **Epic 13 cleanup PR (no later than 60 days after Epic 12 merge)**; deprecated paths log a `deprecation_warning_calendar_settings_service_rule` event.
+- `CalendarSettingsRepository`'s service-rule method names remain as delegating aliases (`upsert_service_rule`, etc.) until the **Epic 14 cleanup PR (no later than 60 days after Epic 13 merge)**; deprecated paths log a `deprecation_warning_calendar_settings_service_rule` event.
 
 Acceptance criteria:
 
@@ -369,11 +369,11 @@ Acceptance criteria:
 - A row inserted with only `name` is valid and visible to the catalog answer; it is not visible to the calendar resolver until `duration_minutes` is set.
 - The other tables in `semantaix_calendar.db` (`calendar_project_settings`, `calendar_operator_tokens`, `calendar_oauth_pending_state`) are untouched by this migration (verified by snapshotting their schemas before/after).
 
-*Delivery:* **Epic 12.**
+*Delivery:* **Epic 13.**
 
 ### FR-24 Operator-facing service editing surface (slash + NL)
 
-- **Path A — slash command:** `/service add|edit|remove|list <name> [key=value …]`. Keys: `duration` (minutes), `days` (e.g. `mon-sat`), `hours` (e.g. `10:00-19:00`), `price` (free text), `desc` (free text), `tags` (comma list). Catalog-only entries omit scheduling keys. The existing `/calendar_service` command remains as a deprecation-logged alias until the **Epic 13 cleanup PR (no later than 60 days after Epic 12 merge)**; deprecated invocations log `deprecation_warning_calendar_service` AND the bot DMs a one-time user-facing migration hint: "Команда `/calendar_service` устарела — используйте `/service` или просто напишите 'добавь услугу …'".
+- **Path A — slash command:** `/service add|edit|remove|list <name> [key=value …]`. Keys: `duration` (minutes), `days` (e.g. `mon-sat`), `hours` (e.g. `10:00-19:00`), `price` (free text), `desc` (free text), `tags` (comma list). Catalog-only entries omit scheduling keys. The existing `/calendar_service` command remains as a deprecation-logged alias until the **Epic 14 cleanup PR (no later than 60 days after Epic 13 merge)**; deprecated invocations log `deprecation_warning_calendar_service` AND the bot DMs a one-time user-facing migration hint: "Команда `/calendar_service` устарела — используйте `/service` или просто напишите 'добавь услугу …'".
 - **Path B — Russian natural-language dialog** (mirrors the existing `nl_knowledge_ops` / `admin_nl_dialog` pattern):
   - New api module `services/api/app/services_nl_ops.py` with `ServicesNlOpsRepository` (state machine: `pending_confirmation → confirmed | cancelled | expired`; TTL 600s; `confirm_token = secrets.token_urlsafe(16)`; atomic `consume` via `hmac.compare_digest`). New table `services_nl_op_sessions` (shape mirrors `admin_nl_op_sessions`).
   - New api endpoints (behind `internal_service_token` auth): `POST /api/projects/{project_id}/services/nl-ops`, `POST /api/projects/{project_id}/services/nl-ops/{session_id}/confirm`, `POST /api/projects/{project_id}/services/nl-ops/{session_id}/cancel`, `GET /api/projects/{project_id}/services/nl-ops/latest-pending`.
@@ -406,9 +406,9 @@ Acceptance criteria:
   - `добавь услугу маникюр и педикюр` (two services in one utterance) → "не понял, добавьте по одной услуге за раз".
   - `добавь услугу маникюр на полтора часа` (non-digit duration) → "укажите длительность числом в минутах".
 - All quoted Russian strings are **illustrative**; actual copy is configured as data files (per the Russian-first-content-is-DATA rule).
-- **R1 refinement (post-12.04):** `name` is the only required field. A service may be created with just a name — it becomes a catalog-only entry (visible in "какие услуги?" answers but not calendar-eligible). To make it bookable, add `duration_minutes` (and optionally working hours / service days) later via `/service edit` or the canonical REST upsert.
+- **R1 refinement (post-13.04):** `name` is the only required field. A service may be created with just a name — it becomes a catalog-only entry (visible in "какие услуги?" answers but not calendar-eligible). To make it bookable, add `duration_minutes` (and optionally working hours / service days) later via `/service edit` or the canonical REST upsert.
 
-*Delivery:* **Epic 12.**
+*Delivery:* **Epic 13.**
 
 ### FR-25 Catalog answer reads structured services first (humanistic, question-tailored)
 
@@ -426,10 +426,10 @@ Acceptance criteria:
 - **General services question:** for "какие услуги?" on a 3-service project, the response includes the names of all 3 services and **NO `price_text` and NO `description` fields** unless the customer explicitly asks for them.
 - **Single-service question, bounded surface:** for "сколько стоит маникюр?", the response includes at most **one service's `price_text` and at most one service's `description`** (the resolved service); no other services' prices or descriptions appear in the answer.
 - **Trace source-id literal:** the `answer_traces.source_id` for the catalog branch carries exactly one of `project_services:<project_id>` (structured-only), `catalog_digest:<project_id>` (digest-only fallback), or `merged:<project_id>` (both sources merged) — per the four branches above.
-- **Brownfield continuity:** for a project that has only ever used `/kb_add` PDF uploads (empty `project_services`), the catalog answer continues to return the same content profile as before Epic 12 (digest-only path, `source_id` `catalog_digest:<project_id>`).
+- **Brownfield continuity:** for a project that has only ever used `/kb_add` PDF uploads (empty `project_services`), the catalog answer continues to return the same content profile as before Epic 13 (digest-only path, `source_id` `catalog_digest:<project_id>`).
 - **Single-row insert does NOT silently shrink the catalog:** after adding one service row to a project that already has a 12-service digest, "какие услуги?" still returns up to 12 services (merged + deduplicated), not just the one structured row; the new `source_id` is `merged:<project_id>`.
 
-*Delivery:* **Epic 12.**
+*Delivery:* **Epic 13.**
 
 ## 5. Non-Functional Requirements (NFR)
 
@@ -476,7 +476,7 @@ Persistence is SQLite, one DB file per concern under `.data/`. All access is via
 | `semantaix_knowledge.db` | `knowledge_candidates`, `knowledge_moderation_candidates` |
 | `semantaix_rag.db` | `rag_chunks`, `catalog_digests` |
 | `semantaix_answer_traces.db` | `answer_traces` (append-only transparency records; `answer_traces.source_id` for the catalog branch carries one of `project_services:<project_id>` (structured-only), `catalog_digest:<project_id>` (digest-only fallback), or `merged:<project_id>` (both sources merged) per FR-25) |
-| `semantaix_nl_ops.db` | `nl_op_sessions`, `admin_nl_op_sessions`, `services_nl_op_sessions` (operator NL services dialog sessions, Epic 12; TTL 600s; status enum `pending_confirmation → confirmed | cancelled | expired`; soft-deleted rows retained 30 days for audit; `payload_json` blob holds operator-typed structured intent and is preserved through soft-delete), `nl_audit_logs`, `knowledge_versions`, `trace_corrections` |
+| `semantaix_nl_ops.db` | `nl_op_sessions`, `admin_nl_op_sessions`, `services_nl_op_sessions` (operator NL services dialog sessions, Epic 13; TTL 600s; status enum `pending_confirmation → confirmed | cancelled | expired`; soft-deleted rows retained 30 days for audit; `payload_json` blob holds operator-typed structured intent and is preserved through soft-delete), `nl_audit_logs`, `knowledge_versions`, `trace_corrections` |
 | `semantaix_operator_files.db` | `operator_files`, `operator_kb_session`, `operator_media_group_buffer` |
 | `semantaix_projects.db` | `projects` |
 | `semantaix_operators.db` | `operators` |
@@ -484,7 +484,7 @@ Persistence is SQLite, one DB file per concern under `.data/`. All access is via
 | `semantaix_admin_sessions.db` | `admin_login_codes`, `admin_sessions` |
 | `semantaix_backups.db` | `backups`, `backup_events` |
 | `semantaix_calendar.db` (Epic 11) | `calendar_project_settings` (enablement, designated calendar operator, project timezone, freeBusy look-ahead), `calendar_operator_tokens` (Fernet-encrypted refresh tokens, upsert-keyed by project+operator), `calendar_oauth_pending_state` (single-use `state` with TTL) |
-| `semantaix_calendar.db` (Epic 12) | `project_services` (canonical project services catalog: `id, project_id, name, description, price_text, tags_json, duration_minutes, working_hours_json, service_days_json, date_exceptions_json, updated_at` — renamed from `calendar_service_rules`; `UNIQUE(project_id, lower(name))`; calendar-eligible iff `duration_minutes IS NOT NULL`; JSON shapes pinned in FR-23) |
+| `semantaix_calendar.db` (Epic 13) | `project_services` (canonical project services catalog: `id, project_id, name, description, price_text, tags_json, duration_minutes, working_hours_json, service_days_json, date_exceptions_json, updated_at` — renamed from `calendar_service_rules`; `UNIQUE(project_id, lower(name))`; calendar-eligible iff `duration_minutes IS NOT NULL`; JSON shapes pinned in FR-23) |
 
 Runtime configuration (operator routing, ack message, locale, grounding threshold,
 bot persona) lives in `hitl_runtime_config` rather than a separate `system_settings`
@@ -534,7 +534,7 @@ Post-MVP tenant capabilities (**FR-15–FR-17**) are planned in **Epic 08** and 
 
 Calendar availability & scheduling (**FR-18–FR-22**) is planned as **Epic 11** (read-only first). It builds on the answer pipeline (Epics 01/03), project & multi-operator scoping (Epics 08/10), incident integration (Epic 02), and the Telegram operator-command surface (Epic 09)—see `epics/epic-11-calendar-availability-scheduling.md` (to be created by `bmad-create-epics-and-stories`).
 
-Unified Project Services Catalog (**FR-23–FR-25**) is planned as **Epic 12** (one canonical structured services table powering both the catalog answer and the calendar). It depends on Epic 11 (table rename target + calendar reads), Epic 10 (operator registry for authorization), Epic 09 (operator command surface), and the existing `_catalog_digest` / `GroundedRagAnswerer` plumbing — see `epics/epic-12-unified-project-services-catalog.md` (to be created by `bmad-create-epics-and-stories`).
+Unified Project Services Catalog (**FR-23–FR-25**) is planned as **Epic 13** (one canonical structured services table powering both the catalog answer and the calendar). It depends on Epic 11 (table rename target + calendar reads), Epic 10 (operator registry for authorization), Epic 09 (operator command surface), and the existing `_catalog_digest` / `GroundedRagAnswerer` plumbing — see `epics/epic-13-unified-project-services-catalog.md` (to be created by `bmad-create-epics-and-stories`).
 
 ## 11. Glossary
 
@@ -542,8 +542,8 @@ Load-bearing nouns, disambiguated for downstream UX/architecture/story work:
 
 - **Service (microservice):** one of the five FastAPI runtime services (`api`, `web_ui`, `bot_gateway`, `ingest_worker`, `scheduler`). Used in §1, NFR, architecture.
 - **Project:** a tenant-scoped configuration boundary delivered by Epics 08/10; owns its knowledge, operators, runtime config, and (optionally) calendar settings.
-- **Project service (Epic 12):** a canonical operator-curated row in `project_services` per project, carrying `name` (required) plus optional description / price / tags AND optional scheduling fields. The same row may appear in the catalog answer AND be schedulable on the calendar. **Catalog-eligible always; calendar-eligible iff `duration_minutes IS NOT NULL`.** See FR-23 / FR-20 / FR-22.
-- **Schedulable service (Epic 12):** the calendar-eligible subset of project services — rows where `duration_minutes IS NOT NULL`; consumed by `compute_availability` and the calendar `service_resolver`. This is the sense used in **FR-19/FR-20/FR-22**. (Avoid the word "bookable" — booking/write is out of scope this phase.)
+- **Project service (Epic 13):** a canonical operator-curated row in `project_services` per project, carrying `name` (required) plus optional description / price / tags AND optional scheduling fields. The same row may appear in the catalog answer AND be schedulable on the calendar. **Catalog-eligible always; calendar-eligible iff `duration_minutes IS NOT NULL`.** See FR-23 / FR-20 / FR-22.
+- **Schedulable service (Epic 13):** the calendar-eligible subset of project services — rows where `duration_minutes IS NOT NULL`; consumed by `compute_availability` and the calendar `service_resolver`. This is the sense used in **FR-19/FR-20/FR-22**. (Avoid the word "bookable" — booking/write is out of scope this phase.)
 - **Operator:** a human who answers escalations and owns project assets (uploads, `/kb_add`, and now calendar connection). Identified by Telegram username.
 - **Calendar operator (Epic 11):** the single operator a calendar-enabled project designates as the source of availability (v1; multi-operator selection deferred).
 - **Tenant:** synonym for the project boundary in older PRD text (e.g. FR-15 "Tenant-Scoped"); "project" is the current term.
