@@ -8,6 +8,12 @@ Activation gate (always-on, cheap, first):
 Stages implemented:
   * `new` → greeting → transition to `scoping` (Story 12.03).
   * `scoping` → ask the next missing intent field (Story 12.03).
+  * `pricing` / `awaiting_operator_price` → KB-first price quote with
+    escalate-if-unknown (Story 12.04). On a price ask the answerer hits
+    the existing RAG knowledge base, quotes a verbatim price token when
+    one exists, and otherwise escalates to HITL with
+    ``reason='price_unknown'`` so the operator's reply feeds Epic-06's
+    knowledge extractor — the next identical ask hits the KB.
   * `proposing` → date proposer (Story 12.07): renders a verified slot,
     handles acceptance (→ closing), and escalates on calendar errors.
   * `closing` → handoff line + HITL ticket with
@@ -38,6 +44,11 @@ from services.api.app.sales.date_proposer import (
     Proposal,
 )
 from services.api.app.sales.intent import Intent, intent_merge
+from services.api.app.sales.price_lookup import (
+    PriceFound,
+    PriceMissing,
+    extract_price_tokens,
+)
 from services.api.app.sales.russian_sales_intent import is_sales_intent
 from services.api.app.sales.turn_intent import classify_turn
 
@@ -49,6 +60,8 @@ NAME = "sales_persona"
 STAGE_NEW = "new"
 STAGE_SCOPING = "scoping"
 STAGE_PITCHING = "pitching"
+STAGE_PRICING = "pricing"
+STAGE_AWAITING_OPERATOR_PRICE = "awaiting_operator_price"
 STAGE_PROPOSING = "proposing"
 STAGE_CLOSING = "closing"
 STAGE_DORMANT = "dormant"
@@ -59,6 +72,7 @@ HITL_REASON_CALENDAR_DISABLED = "date_calendar_disabled"
 HITL_REASON_PROPOSAL_DRIFT = "sales_proposal_drift"
 HITL_REASON_PROPOSAL_FAILED = "sales_proposal_failed"
 HITL_REASON_CLOSING_HANDOFF = "sales_closing_handoff"
+HITL_REASON_PRICE_UNKNOWN = "price_unknown"
 
 # Customer-facing Russian copy for the proposing / closing branches. Kept
 # inline as named constants — short, fixed strings, no LLM in the loop for
@@ -67,14 +81,23 @@ PROPOSAL_FALLBACK_CALENDAR_DISABLED = "Дату подтвержу у колле
 PROPOSAL_FALLBACK_UNAVAILABLE = "Уточню свободные даты и сразу сообщу."
 PROPOSAL_AMBIGUOUS_SERVICE_CLARIFIER = "На каком туре остановимся?"
 CLOSING_HANDOFF_LINE = "Передам коллегам для подтверждения, на связи."
+PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 
 _HANDLED_STAGES: frozenset[str] = frozenset(
-    {STAGE_NEW, STAGE_SCOPING, STAGE_PROPOSING, STAGE_CLOSING}
+    {
+        STAGE_NEW,
+        STAGE_SCOPING,
+        STAGE_PRICING,
+        STAGE_AWAITING_OPERATOR_PRICE,
+        STAGE_PROPOSING,
+        STAGE_CLOSING,
+    }
 )
-_DEFERRED_STAGES: frozenset[str] = frozenset({STAGE_PITCHING, "pricing"})
-# Stages where mid-funnel asides (catalog / concept) are intercepted before
-# the stage handler. Greeting is excluded: a brand-new chat hits the greeting
-# branch first and the sales-intent gate already covers catalog phrases.
+_DEFERRED_STAGES: frozenset[str] = frozenset({STAGE_PITCHING})
+# Stages where mid-funnel asides (catalog / concept / price) are intercepted
+# before the stage handler. Greeting is excluded: a brand-new chat hits the
+# greeting branch first and the sales-intent gate already covers catalog
+# phrases.
 _ASIDE_INTERCEPT_STAGES: frozenset[str] = (
     frozenset({STAGE_SCOPING}) | _DEFERRED_STAGES
 )
@@ -102,6 +125,7 @@ _SCOPING_PROMPT_PATH = _PROMPTS_DIR / "sales_scoping.txt"
 _CATALOG_PROMPT_PATH = _PROMPTS_DIR / "sales_catalog.txt"
 _CONCEPT_RAG_PROMPT_PATH = _PROMPTS_DIR / "sales_concept_rag.txt"
 _PROPOSAL_PROMPT_PATH = _PROMPTS_DIR / "sales_proposal.txt"
+_PRICING_HIT_PROMPT_PATH = _PROMPTS_DIR / "sales_pricing_hit.txt"
 
 
 def _read_prompt(path: Path) -> str:
@@ -113,6 +137,7 @@ _SCOPING_PROMPT_TEMPLATE = _read_prompt(_SCOPING_PROMPT_PATH)
 _CATALOG_PROMPT_TEMPLATE = _read_prompt(_CATALOG_PROMPT_PATH)
 _CONCEPT_RAG_PROMPT_TEMPLATE = _read_prompt(_CONCEPT_RAG_PROMPT_PATH)
 _PROPOSAL_PROMPT_TEMPLATE = _read_prompt(_PROPOSAL_PROMPT_PATH)
+_PRICING_HIT_PROMPT_TEMPLATE = _read_prompt(_PRICING_HIT_PROMPT_PATH)
 
 
 def _format_proposal_date(date_iso: str) -> str:
@@ -195,6 +220,16 @@ class _DateProposer(Protocol):
     ) -> Proposal | NoProposal: ...
 
 
+class _PriceLookup(Protocol):
+    async def lookup(
+        self,
+        *,
+        project_id: int | None,
+        intent: Intent,
+        question: str,
+    ) -> PriceFound | PriceMissing: ...
+
+
 def _skip(reason: str) -> AnswerResult:
     return AnswerResult(handled=False, metadata={"skip_reason": reason})
 
@@ -253,6 +288,7 @@ class SalesPersonaAnswerer:
         grounding_threshold_getter: Callable[[], float] | None = None,
         followup_repo: _FollowupRepo | None = None,
         date_proposer: _DateProposer | None = None,
+        price_lookup: _PriceLookup | None = None,
     ) -> None:
         self._state_repo = state_repo
         self._services_repo = services_repo
@@ -264,6 +300,7 @@ class SalesPersonaAnswerer:
         self._grounding_threshold_getter = grounding_threshold_getter
         self._followup_repo = followup_repo
         self._date_proposer = date_proposer
+        self._price_lookup = price_lookup
 
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
@@ -304,6 +341,11 @@ class SalesPersonaAnswerer:
 
         if current_stage in _DEFERRED_STAGES:
             return _skip("stage_not_implemented_yet")
+
+        if current_stage in (STAGE_PRICING, STAGE_AWAITING_OPERATOR_PRICE):
+            return await self._handle_pricing(
+                question=question, ctx=ctx, state=state
+            )
 
         if current_stage == STAGE_SCOPING:
             return await self._handle_scoping(
@@ -493,6 +535,10 @@ class SalesPersonaAnswerer:
                 ctx=ctx,
                 state=state,
                 term=turn_intent.term or "",
+            )
+        if turn_intent.kind == "price_ask" and self._price_lookup is not None:
+            return await self._handle_pricing(
+                question=question, ctx=ctx, state=state
             )
         return None
 
@@ -756,6 +802,222 @@ class SalesPersonaAnswerer:
                 last_bot_msg_at=now,
                 now=now,
             )
+        )
+
+    async def _handle_pricing(
+        self,
+        *,
+        question: str,
+        ctx: AnswerContext,
+        state: dict[str, Any],
+    ) -> AnswerResult:
+        """KB-first price quote; escalate-if-unknown.
+
+        On hit: one LLM call wraps the price snippet into a one-sentence
+        Russian reply. A regex verifier asserts the snippet's verbatim
+        price token reappears in the reply — drift escalates instead of
+        delivering a possibly-wrong price.
+
+        On miss: skips the LLM entirely, returns the fixed Russian line,
+        and signals a HITL ticket with ``reason='price_unknown'`` plus
+        the structured payload so the operator sees the customer's
+        verbatim question.
+        """
+        if self._price_lookup is None:
+            return _skip("pricing_not_configured")
+        current_stage = str(state.get("current_stage") or "")
+        existing_intent = Intent.from_dict(state.get("collected_intent") or {})
+
+        try:
+            outcome = await self._price_lookup.lookup(
+                project_id=ctx.project_id,
+                intent=existing_intent,
+                question=question,
+            )
+        except Exception as exc:  # defensive — RAG transport / sqlite error
+            logger.warning(
+                "sales_pricing_rag_unavailable",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "error": repr(exc),
+                },
+            )
+            return _skip("rag_unavailable")
+
+        if isinstance(outcome, PriceFound):
+            return await self._render_price_hit(
+                outcome=outcome,
+                ctx=ctx,
+                intent=existing_intent,
+                current_stage=current_stage,
+            )
+
+        return await self._escalate_price_unknown(
+            missing=outcome,
+            ctx=ctx,
+            intent=existing_intent,
+            current_stage=current_stage,
+        )
+
+    async def _render_price_hit(
+        self,
+        *,
+        outcome: PriceFound,
+        ctx: AnswerContext,
+        intent: Intent,
+        current_stage: str,
+    ) -> AnswerResult:
+        persona = self._persona_getter()
+        system = _PRICING_HIT_PROMPT_TEMPLATE.format(
+            persona=persona, snippet=outcome.snippet
+        )
+        user = f"Сообщение клиента:\n{outcome.snippet}"
+        try:
+            payload = await self._openrouter.complete_json(
+                system=system, user=user
+            )
+        except Exception as exc:  # defensive — LLM transport failure
+            logger.warning(
+                "sales_pricing_llm_error",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "error": repr(exc),
+                },
+            )
+            return await self._escalate_price_quote_drift(
+                ctx=ctx,
+                intent=intent,
+                current_stage=current_stage,
+                snippet=outcome.snippet,
+                source_chunk_id=outcome.source_chunk_id,
+                drift_text=None,
+            )
+
+        text = ""
+        if isinstance(payload, dict):
+            raw = payload.get("text") or payload.get("next_question")
+            if isinstance(raw, str):
+                text = raw.strip()
+        snippet_tokens = extract_price_tokens(outcome.snippet)
+        if not text or not snippet_tokens or not any(
+            token in text for token in snippet_tokens
+        ):
+            return await self._escalate_price_quote_drift(
+                ctx=ctx,
+                intent=intent,
+                current_stage=current_stage,
+                snippet=outcome.snippet,
+                source_chunk_id=outcome.source_chunk_id,
+                drift_text=text or None,
+            )
+
+        await self._persist(
+            ctx=ctx, current_stage=STAGE_PRICING, intent=intent
+        )
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": current_stage,
+                "stage_after": STAGE_PRICING,
+                "sales_turn_kind": "pricing_hit",
+                "sales_price_source_chunk_id": outcome.source_chunk_id,
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=text,
+            metadata={
+                "answerer": NAME,
+                "stage_before": current_stage,
+                "stage_after": STAGE_PRICING,
+                "sales_turn_kind": "pricing_hit",
+                "sales_price_source_chunk_id": outcome.source_chunk_id,
+            },
+        )
+
+    async def _escalate_price_quote_drift(
+        self,
+        *,
+        ctx: AnswerContext,
+        intent: Intent,
+        current_stage: str,
+        snippet: str,
+        source_chunk_id: str,
+        drift_text: str | None,
+    ) -> AnswerResult:
+        """LLM quote disagreed with the snippet — never deliver a wrong price.
+
+        The bot says the fixed ``уточню у коллег…`` line and signals an
+        operator handoff with ``price_unknown`` so the operator answers
+        the question authoritatively.
+        """
+        logger.warning(
+            "sales_price_quote_drift",
+            extra={
+                "trace_id": ctx.trace_id,
+                "source_chunk_id": source_chunk_id,
+                "snippet": snippet,
+                "drift_text": drift_text,
+            },
+        )
+        await self._persist(
+            ctx=ctx,
+            current_stage=STAGE_AWAITING_OPERATOR_PRICE,
+            intent=intent,
+        )
+        return AnswerResult(
+            handled=True,
+            text=PRICING_MISS_FALLBACK,
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
+            metadata={
+                "answerer": NAME,
+                "stage_before": current_stage,
+                "stage_after": STAGE_AWAITING_OPERATOR_PRICE,
+                "sales_turn_kind": "pricing_quote_drift",
+                "escalate": True,
+                "hitl_reason": HITL_REASON_PRICE_UNKNOWN,
+                "sales_price_source_chunk_id": source_chunk_id,
+                "drift_text": drift_text,
+            },
+        )
+
+    async def _escalate_price_unknown(
+        self,
+        *,
+        missing: PriceMissing,
+        ctx: AnswerContext,
+        intent: Intent,
+        current_stage: str,
+    ) -> AnswerResult:
+        await self._persist(
+            ctx=ctx,
+            current_stage=STAGE_AWAITING_OPERATOR_PRICE,
+            intent=intent,
+        )
+        payload_dict = missing.payload.as_dict()
+        logger.info(
+            "sales_price_unknown",
+            extra={
+                "trace_id": ctx.trace_id,
+                "payload": payload_dict,
+                "stage_before": current_stage,
+                "stage_after": STAGE_AWAITING_OPERATOR_PRICE,
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=PRICING_MISS_FALLBACK,
+            response_mode=RESPONSE_MODE_SALES_ESCALATION,
+            metadata={
+                "answerer": NAME,
+                "stage_before": current_stage,
+                "stage_after": STAGE_AWAITING_OPERATOR_PRICE,
+                "sales_turn_kind": "pricing_miss",
+                "escalate": True,
+                "hitl_reason": HITL_REASON_PRICE_UNKNOWN,
+                "sales_price_unknown_payload": payload_dict,
+            },
         )
 
     async def _handle_proposing(
@@ -1154,15 +1416,20 @@ __all__ = [
     "CLOSING_HANDOFF_LINE",
     "HITL_REASON_CALENDAR_DISABLED",
     "HITL_REASON_CLOSING_HANDOFF",
+    "HITL_REASON_PRICE_UNKNOWN",
     "HITL_REASON_PROPOSAL_DRIFT",
     "HITL_REASON_PROPOSAL_FAILED",
     "LlmSchemaViolation",
     "NAME",
+    "PRICING_MISS_FALLBACK",
     "PROPOSAL_AMBIGUOUS_SERVICE_CLARIFIER",
     "PROPOSAL_FALLBACK_CALENDAR_DISABLED",
     "PROPOSAL_FALLBACK_UNAVAILABLE",
     "RESPONSE_MODE_SALES_ESCALATION",
+    "STAGE_AWAITING_OPERATOR_PRICE",
     "STAGE_CLOSING",
+    "STAGE_PRICING",
     "STAGE_PROPOSING",
+    "STAGE_SCOPING",
     "SalesPersonaAnswerer",
 ]
