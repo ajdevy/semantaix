@@ -1,5 +1,5 @@
 # generated: 2026-05-23
-# last_updated: 2026-05-23
+# last_updated: 2026-05-24
 # project: Semantaix
 # project_key: NOKEY
 # tracking_system: file-system
@@ -26,15 +26,16 @@
 # WORKFLOW NOTES:
 # ===============
 # - Feature-sequential: only ONE feature epic in implementation at a time (epics/README.md hard rule).
-# - Epics 01-10 already shipped (as-built); tracked at epic level as `done`.
-# - Epic 11 is the active feature. Stories are `backlog` until `bmad-create-story` emits an
+# - Epics 01-11 already shipped (as-built); tracked at epic level as `done`.
+# - Epic 12 is the active feature. Stories are `backlog` until `bmad-create-story` emits an
 #   implementation story doc into story_location; then `ready-for-dev` → `in-progress` → `review` → `done`.
 # - One PR per story; 100% coverage gate on platform_common/ + services/.
-# - Dependency order (epics/stories/epic-11/README.md): 11-01 blocks all; 11-02 → {11-03, 11-04};
-#   11-05 ∥ 11-06 ∥ 11-08 after 11-01; 11-07 depends on 11-04/11-05/11-06/11-08.
+# - Dependency order (epics/stories/epic-12/README.md): 12-01 blocks all; 12-02 ∥ 12-03 ∥ 12-05 after 12-01;
+#   12-02b after 12-02; 12-05b ∥ 12-05c after 12-05; 12-04 after 12-02 + 12-03; 12-06 after 12-02;
+#   12-07 ∥ 12-08 after 12-03; 12-09 last (depends on all).
 
 generated: 2026-05-23
-last_updated: 2026-05-23
+last_updated: 2026-05-24
 project: Semantaix
 project_key: NOKEY
 tracking_system: file-system
@@ -63,7 +64,7 @@ development_status:
   epic-10: done
   epic-10-retrospective: optional
 
-  # --- Active feature epic ---
+  # --- Shipped (recent) ---
   epic-11: done
   11-01-calendar-schema-and-settings: done
   11-02-oauth-connect-api: done
@@ -74,3 +75,19 @@ development_status:
   11-07-availability-answerer-and-wiring: done
   11-08-enable-disable-and-service-config: done
   epic-11-retrospective: optional
+
+  # --- Active feature epic ---
+  epic-12: in-progress
+  12-01-sales-db-schema-and-repositories: backlog
+  12-02-service-commands-and-sales-state: backlog
+  12-02b-natural-language-service-management: backlog
+  12-03-sales-persona-answerer-greeting-and-intent: backlog
+  12-04-pricing-turn-kb-first-escalate-if-unknown: backlog
+  12-05-autonomous-client-materials-dispatch: backlog
+  12-05b-kb-upload-automatic-client-materials-analysis: backlog
+  12-05c-kb-upload-automatic-services-extraction: backlog
+  12-06-service-list-and-concept-explainer: backlog
+  12-07-date-proposal-turn: backlog
+  12-08-proactive-followup: backlog
+  12-09-pipeline-wiring-and-e2e-signoff: backlog
+  epic-12-retrospective: optional
