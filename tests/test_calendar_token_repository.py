@@ -88,6 +88,26 @@ def test_set_status_and_delete(tmp_path):
         repo.get_refresh_token(1, "@op")
 
 
+def test_get_status_returns_none_for_missing_row(tmp_path):
+    path = str(tmp_path / "calendar.sqlite3")
+    repo = CalendarTokenRepository(db_path=path, fernet=Fernet(Fernet.generate_key()))
+    assert repo.get_status(1, "@nobody") is None
+
+
+def test_get_status_returns_current_status_and_reflects_set_status(tmp_path):
+    path = str(tmp_path / "calendar.sqlite3")
+    repo = CalendarTokenRepository(db_path=path, fernet=Fernet(Fernet.generate_key()))
+    repo.upsert(1, "@op", "token")
+    assert repo.get_status(1, "@op") == STATUS_CONNECTED
+    repo.set_status(1, "@op", STATUS_RECONNECT_NEEDED)
+    assert repo.get_status(1, "@op") == STATUS_RECONNECT_NEEDED
+    # Upsert overwrites status back to 'connected' (the recovery path: operator
+    # successfully re-runs /connect_calendar → status flips back → next
+    # dead-token cycle can re-DM, since the dedup is unlatched).
+    repo.upsert(1, "@op", "new-token")
+    assert repo.get_status(1, "@op") == STATUS_CONNECTED
+
+
 def test_stored_blob_is_not_plaintext(tmp_path):
     path = str(tmp_path / "calendar.sqlite3")
     repo = CalendarTokenRepository(db_path=path, fernet=Fernet(Fernet.generate_key()))

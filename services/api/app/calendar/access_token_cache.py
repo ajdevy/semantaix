@@ -42,6 +42,7 @@ class _OAuthClient(Protocol):
 
 class _TokenRepo(Protocol):
     def get_refresh_token(self, project_id: int, operator: str) -> str: ...
+    def get_status(self, project_id: int, operator: str) -> str | None: ...
     def set_status(self, project_id: int, operator: str, status: str) -> None: ...
     def delete(self, project_id: int, operator: str) -> None: ...
 
@@ -125,6 +126,19 @@ class AccessTokenProvider:
         trace_id: str,
     ) -> str:
         project_id, operator = key
+        # Short-circuit: if the token row is already marked dead, do NOT call
+        # Google again and do NOT re-DM the operator. The user's first DM
+        # already told them to /connect_calendar; spamming the same message
+        # on every restart / every inbound message is the bug we are fixing.
+        existing_status = await asyncio.to_thread(
+            self._token_repo.get_status, project_id, operator
+        )
+        if existing_status == STATUS_RECONNECT_NEEDED:
+            logger.info(
+                "calendar_token_reconnect_pending_short_circuit",
+                extra={"trace_id": trace_id},
+            )
+            raise CalendarReconnectNeeded("reconnect_needed_already_pending")
         refresh_token = await asyncio.to_thread(
             self._token_repo.get_refresh_token, project_id, operator
         )
@@ -150,10 +164,33 @@ class AccessTokenProvider:
     ) -> None:
         project_id, operator = key
         self._cache.pop(key, None)
+        # Persistent dedup: if the token is ALREADY flagged reconnect_needed,
+        # the operator was already DM'd and an incident already exists for
+        # this dead-token cycle. Do not duplicate. The status is reset to
+        # 'connected' (and a future DM is re-armed) only when the operator
+        # successfully re-runs /connect_calendar, which calls
+        # CalendarTokenRepository.upsert — that overwrites status to
+        # 'connected'.
+        current_status = await asyncio.to_thread(
+            self._token_repo.get_status, project_id, operator
+        )
+        if current_status == STATUS_RECONNECT_NEEDED:
+            logger.info(
+                "calendar_token_reconnect_dm_dedup",
+                extra={"trace_id": trace_id},
+            )
+            return
         await asyncio.to_thread(
             self._token_repo.set_status, project_id, operator, STATUS_RECONNECT_NEEDED
         )
-        await asyncio.to_thread(self._token_repo.delete, project_id, operator)
+        # Note: we deliberately do NOT delete the token row. Keeping the row
+        # with status='reconnect_needed' (a) lets the dedup check above work
+        # persistently across api restarts, (b) lets the R2 connect-callback
+        # DM guard correctly recognize this as a re-consent (token row still
+        # present) and suppress its own "Календарь подключён" message on the
+        # recovery callback, and (c) preserves audit history of the dead
+        # event. The row is overwritten with fresh credentials + status
+        # 'connected' when the operator successfully runs /connect_calendar.
         await asyncio.to_thread(
             self._incident_sink.ingest,
             fingerprint=f"calendar_reconnect_needed:{project_id}:{operator}",

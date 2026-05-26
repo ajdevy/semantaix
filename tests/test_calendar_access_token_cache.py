@@ -24,16 +24,28 @@ class _FrozenClock:
 
 
 class _FakeTokenRepo:
-    def __init__(self, *, refresh_token: str = "refresh-xyz") -> None:
+    def __init__(
+        self,
+        *,
+        refresh_token: str = "refresh-xyz",
+        initial_status: str = "connected",
+    ) -> None:
         self._refresh_token = refresh_token
+        self._status = initial_status
         self.status_calls: list[tuple[int, str, str]] = []
         self.deleted: list[tuple[int, str]] = []
+        self.get_status_calls: list[tuple[int, str]] = []
 
     def get_refresh_token(self, project_id: int, operator: str) -> str:
         return self._refresh_token
 
+    def get_status(self, project_id: int, operator: str) -> str | None:
+        self.get_status_calls.append((project_id, operator))
+        return self._status
+
     def set_status(self, project_id: int, operator: str, status: str) -> None:
         self.status_calls.append((project_id, operator, status))
+        self._status = status
 
     def delete(self, project_id: int, operator: str) -> None:
         self.deleted.append((project_id, operator))
@@ -154,9 +166,15 @@ async def test_single_flight_two_concurrent_callers_refresh_once():
 
 
 @pytest.mark.asyncio
-async def test_dead_token_sets_reconnect_deletes_emits_notifies_and_raises():
+async def test_dead_token_first_time_sets_reconnect_emits_notifies_and_raises():
+    """First dead-token detection: status flips to reconnect_needed, ONE incident,
+    ONE DM to the operator, and CalendarReconnectNeeded raised. The token row is
+    NOT deleted (kept with status=reconnect_needed) so that (a) subsequent
+    refresh attempts can short-circuit + dedup the DM persistently across api
+    restarts, and (b) the R2 connect-confirmation callback DM can recognize a
+    re-consent (row present) and suppress its own message."""
     oauth = _FailingOAuthClient()
-    repo = _FakeTokenRepo()
+    repo = _FakeTokenRepo()  # initial_status="connected"
     sink = _FakeIncidentSink()
     notifier = _FakeNotifier()
     provider = _provider(
@@ -169,7 +187,8 @@ async def test_dead_token_sets_reconnect_deletes_emits_notifies_and_raises():
         )
 
     assert repo.status_calls == [(7, "@op", STATUS_RECONNECT_NEEDED)]
-    assert repo.deleted == [(7, "@op")]
+    # The row is intentionally NOT deleted — see _handle_dead_token comment.
+    assert repo.deleted == []
     assert len(sink.incidents) == 1
     incident = sink.incidents[0]
     assert incident["fingerprint"] == "calendar_reconnect_needed:7:@op"
@@ -178,3 +197,65 @@ async def test_dead_token_sets_reconnect_deletes_emits_notifies_and_raises():
     assert "/connect_calendar" in notifier.sent[0][1]
     # cache cleared so a later call would re-attempt rather than serve a dead token
     assert (7, "@op") not in provider._cache
+
+
+@pytest.mark.asyncio
+async def test_handle_dead_token_inner_dedup_when_already_reconnect_needed():
+    """Defensive belt-and-suspenders dedup inside `_handle_dead_token` itself
+    (against a hypothetical race between `_refresh`'s short-circuit and the
+    handler running). If `_handle_dead_token` is invoked when the row is
+    already `reconnect_needed`, it MUST be a no-op: no DM, no incident, no
+    status mutation. Covered by direct invocation since the short-circuit in
+    `_refresh` normally prevents re-entry through the public surface."""
+    oauth = _FailingOAuthClient()
+    repo = _FakeTokenRepo(initial_status=STATUS_RECONNECT_NEEDED)
+    sink = _FakeIncidentSink()
+    notifier = _FakeNotifier()
+    provider = _provider(
+        oauth_client=oauth, token_repo=repo, incident_sink=sink, notifier=notifier
+    )
+
+    await provider._handle_dead_token(
+        (7, "@op"), operator_chat_id=42, trace_id="t-defensive"
+    )
+
+    assert notifier.sent == []
+    assert sink.incidents == []
+    assert repo.status_calls == []
+
+
+@pytest.mark.asyncio
+async def test_dead_token_dedup_does_not_re_dm_on_repeat_calls():
+    """Regression for the spam bug: once an operator has been DM'd that their
+    calendar needs reconnecting, subsequent inbound calendar questions / api
+    restarts MUST NOT re-DM them. The status='reconnect_needed' row acts as a
+    persistent dedup flag; _refresh short-circuits and _handle_dead_token also
+    no-ops if it somehow re-runs."""
+    oauth = _FailingOAuthClient()
+    # Already in reconnect_needed (e.g., persisted across an api restart).
+    repo = _FakeTokenRepo(initial_status=STATUS_RECONNECT_NEEDED)
+    sink = _FakeIncidentSink()
+    notifier = _FakeNotifier()
+    provider = _provider(
+        oauth_client=oauth, token_repo=repo, incident_sink=sink, notifier=notifier
+    )
+
+    # Simulate three back-to-back calls from inbound customer messages.
+    for trace in ("t-restart-1", "t-restart-2", "t-restart-3"):
+        with pytest.raises(CalendarReconnectNeeded):
+            await provider.get_access_token(
+                7, "@op", operator_chat_id=42, trace_id=trace
+            )
+
+    # Google was never called (short-circuit before refresh).
+    assert oauth.refresh_count == 0
+    # No DMs sent at all (operator was already notified during the original
+    # dead-token event).
+    assert notifier.sent == []
+    # No additional incidents (the original incident captured the event).
+    assert sink.incidents == []
+    # No status mutations (it was already reconnect_needed).
+    assert repo.status_calls == []
+    # The row is preserved (no delete) so a successful /connect_calendar can
+    # overwrite it back to status='connected'.
+    assert repo.deleted == []

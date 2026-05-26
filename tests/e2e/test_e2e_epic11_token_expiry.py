@@ -33,7 +33,6 @@ from services.api.app.calendar.settings_repository import CalendarSettingsReposi
 from services.api.app.calendar.token_repository import (
     STATUS_RECONNECT_NEEDED,
     CalendarTokenRepository,
-    TokenNotFound,
 )
 from services.api.app.main import app as api_app
 from services.api.app.russian_text import get_russian_normalizer
@@ -154,9 +153,15 @@ def test_e2e_expired_token_reconnect_incident_and_customer_escalates(env) -> Non
     assert body["response_mode"] == "human_only"
     assert body.get("answer_text") is None
 
-    # The poison token was deleted; the operator moved to reconnect_needed.
-    with pytest.raises(TokenNotFound):
-        token_repo.get_refresh_token(_PROJECT_ID, _OPERATOR)
+    # The poison token row is PRESERVED with status=reconnect_needed so the
+    # reconnect DM is dedup'd persistently across api restarts (the spam fix —
+    # see access_token_cache._handle_dead_token). The operator is "marked
+    # dead" by status, not by deletion; the row is overwritten back to
+    # status=connected only by a successful /connect_calendar upsert.
+    assert (
+        token_repo.get_status(_PROJECT_ID, _OPERATOR)
+        == STATUS_RECONNECT_NEEDED
+    )
 
     # An incident was emitted for the reconnect.
     incidents = client.get("/incidents").json()["items"]
