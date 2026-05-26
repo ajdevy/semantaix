@@ -1,4 +1,4 @@
-"""Unit coverage for :mod:`project_service_validation` (Epic 12, story 12.02).
+"""Unit coverage for :mod:`project_service_validation` (Epic 13, story 13.02).
 
 The helper rejects every malformed payload with a stable ``reason`` code that
 the api endpoint translates 1:1 into a 400 response.

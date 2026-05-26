@@ -23,7 +23,7 @@ def test_init_schema_creates_tables(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-    # Epic 12 renamed calendar_service_rules → project_services.
+    # Epic 13 renamed calendar_service_rules → project_services.
     assert "calendar_project_settings" in names
     assert "project_services" in names
     assert "calendar_service_rules" not in names

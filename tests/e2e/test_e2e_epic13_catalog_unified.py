@@ -1,4 +1,4 @@
-"""Epic 12 Story 12.06 — unified catalog answer via merge-with-dedup.
+"""Epic 13 Story 13.06 — unified catalog answer via merge-with-dedup.
 
 Boots the api service against a fresh per-test set of SQLite files,
 stubs out the LLM (verifier always GROUNDED; ``answer_grounded`` echoes
@@ -37,7 +37,7 @@ from services.api.app.catalog_digest import (
 )
 from services.api.app.openrouter_client import GroundingVerdict
 
-pytestmark = [pytest.mark.e2e, pytest.mark.epic("12"), pytest.mark.story("12-06")]
+pytestmark = [pytest.mark.e2e, pytest.mark.epic("13"), pytest.mark.story("13-06")]
 
 
 _FORBIDDEN_LABELS = (

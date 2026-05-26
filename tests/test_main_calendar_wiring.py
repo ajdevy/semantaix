@@ -27,7 +27,7 @@ def test_system_clock_now_is_tz_aware() -> None:
 
 
 def test_startup_bootstraps_services_nl_op_sessions_table() -> None:
-    """Epic 12 (story 12.01): the api startup hook creates
+    """Epic 13 (story 13.01): the api startup hook creates
     services_nl_op_sessions in semantaix_nl_ops.db alongside admin_nl_op_sessions.
     """
     db_path = api_main.settings.nl_ops_db_path
@@ -42,7 +42,7 @@ def test_startup_bootstraps_services_nl_op_sessions_table() -> None:
 
 
 def test_startup_bootstraps_calendar_service_alias_hint_sent_table() -> None:
-    """Epic 12 (story 12.03): the api startup hook creates the dedup table for
+    """Epic 13 (story 13.03): the api startup hook creates the dedup table for
     the `/calendar_service` migration-hint DM in the same semantaix_nl_ops.db.
     """
     db_path = api_main.settings.nl_ops_db_path

@@ -1,4 +1,4 @@
-"""Tests for ``apply_confirmed`` side-effect dispatcher (Epic 12, story 12.04).
+"""Tests for ``apply_confirmed`` side-effect dispatcher (Epic 13, story 13.04).
 
 Exercises the OP_SERVICE_ADD / OP_SERVICE_EDIT / OP_SERVICE_REMOVE dispatch
 against a real ``ProjectServiceRepository`` plus the per-(project, lower(name))

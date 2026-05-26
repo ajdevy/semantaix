@@ -1,7 +1,7 @@
-"""Schema bootstrap for ``services_nl_op_sessions`` (Epic 12, story 12.01).
+"""Schema bootstrap for ``services_nl_op_sessions`` (Epic 13, story 13.01).
 
-The session state-machine + repository class itself lands in story 12.04;
-this module creates the table so 12.04's repo has a place to land. Lives in
+The session state-machine + repository class itself lands in story 13.04;
+this module creates the table so 13.04's repo has a place to land. Lives in
 ``.data/semantaix_nl_ops.db`` (alongside ``admin_nl_op_sessions``), NOT in
 ``semantaix_calendar.db`` — per the L2 validation fix in the story spec.
 
@@ -29,7 +29,7 @@ def init_services_nl_ops_schema(db_path: str) -> None:
     Schema mirrors ``admin_nl_op_sessions`` (Epic 10.05) but is **operator- +
     project-scoped** so cross-operator replays can be rejected. The full
     semantics (TTL, confirm_token, one-pending-per-(project, operator),
-    soft-delete with 30-day retention) land in story 12.04's repository class.
+    soft-delete with 30-day retention) land in story 13.04's repository class.
     """
     with _connect(db_path) as connection:
         connection.execute(

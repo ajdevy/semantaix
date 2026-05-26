@@ -1,5 +1,5 @@
 """Unit coverage for the `/calendar_service` migration-hint dedup table
-(Epic 12, story 12.03).
+(Epic 13, story 13.03).
 
 The table lives in ``.data/semantaix_nl_ops.db`` and keys on
 ``(project_id, operator)``; first call returns True (caller should DM), every

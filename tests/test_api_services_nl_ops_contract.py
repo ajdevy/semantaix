@@ -1,5 +1,5 @@
 """Contract tests for the /api/projects/{id}/services/nl-ops surface
-(Epic 12, story 12.04).
+(Epic 13, story 13.04).
 
 Covers internal-token auth on every endpoint, propose pending vs clarify,
 confirm happy + auth + invalid-token + expired + not-pending + admin-remove

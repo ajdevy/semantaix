@@ -1,4 +1,4 @@
-"""Canonical project services repository (Epic 12, story 12.01).
+"""Canonical project services repository (Epic 13, story 13.01).
 
 Owns the ``project_services`` table in ``.data/semantaix_calendar.db``. This
 table is the **one** structured catalog of operator-curated services per

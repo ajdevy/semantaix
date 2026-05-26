@@ -1,4 +1,4 @@
-"""Unit tests for the new `/service` slash command (Epic 12, story 12.03).
+"""Unit tests for the new `/service` slash command (Epic 13, story 13.03).
 
 Drives the bot_gateway webhook end-to-end with stubbed `ApiClient` methods and
 a fake `_send_dm`. Covers:
@@ -8,7 +8,7 @@ a fake `_send_dm`. Covers:
   day codes, hours format.
 - Operator gating: non-registered sender → `unauthorized_services` log, no DM,
   no `ApiClient` call.
-- `/service add` happy path → POSTs to the canonical Epic-12 endpoint, DMs
+- `/service add` happy path → POSTs to the canonical Epic-13 endpoint, DMs
   Russian confirmation.
 - `/service add` 400 validation → DMs reason in Russian, no exception.
 - `/service edit` (same handler as add) updates the row.

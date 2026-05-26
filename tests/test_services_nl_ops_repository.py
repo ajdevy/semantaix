@@ -1,4 +1,4 @@
-"""Repository tests for ``ServicesNlOpsRepository`` (Epic 12, story 12.04).
+"""Repository tests for ``ServicesNlOpsRepository`` (Epic 13, story 13.04).
 
 Covers schema bootstrap idempotency, propose (pending vs clarify), the
 single-pending-per-(project, operator) invariant, consume happy path +

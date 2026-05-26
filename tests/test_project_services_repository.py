@@ -1,4 +1,4 @@
-"""Unit coverage for :class:`ProjectServiceRepository` (Epic 12, story 12.01)."""
+"""Unit coverage for :class:`ProjectServiceRepository` (Epic 13, story 13.01)."""
 
 from __future__ import annotations
 

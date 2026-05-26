@@ -6,7 +6,7 @@ cheap gate the answerer hits FIRST before any intent detection or API call.
 Sync ``sqlite3`` per project-context; callers dispatch via
 ``asyncio.to_thread``. No raw SQL lives outside this class.
 
-Epic 12 (story 12.01) — the former ``calendar_service_rules`` table is now
+Epic 13 (story 13.01) — the former ``calendar_service_rules`` table is now
 ``project_services`` (in the same DB), owned by
 :class:`ProjectServiceRepository`. The legacy service-rule methods on this
 class (``list_service_rules`` / ``upsert_service_rule`` /
@@ -37,7 +37,7 @@ _DEFAULT_LOOKAHEAD_DAYS = 60
 
 _DEPRECATION_MESSAGE = (
     "CalendarSettingsRepository service-rule methods are deprecated; "
-    "use ProjectServiceRepository directly (Epic 12, story 12.01)."
+    "use ProjectServiceRepository directly (Epic 13, story 13.01)."
 )
 _DEPRECATION_EVENT = "deprecation_warning_calendar_settings_service_rule"
 
@@ -72,7 +72,7 @@ class ServiceRule:
     """Legacy 8-field projection of :class:`ProjectService`.
 
     Preserved for Epic-11 callers that still import ``ServiceRule`` directly.
-    Epic-12 callers should use :class:`ProjectService`. Removed in the Epic-13
+    Epic-13 callers should use :class:`ProjectService`. Removed in the Epic-13
     cleanup PR.
     """
 
@@ -134,7 +134,7 @@ class CalendarSettingsRepository:
                 )
                 """
             )
-        # Epic 12: the project_services table replaces calendar_service_rules.
+        # Epic 13: the project_services table replaces calendar_service_rules.
         # The migration is idempotent, so re-running on every constructor call
         # mirrors the existing init_schema() habit.
         run_project_services_migration(self.db_path)
@@ -231,7 +231,7 @@ class CalendarSettingsRepository:
                 (project_id, calendar_operator, now),
             )
 
-    # --- Epic-12 deprecated aliases ----------------------------------------
+    # --- Epic-13 deprecated aliases ----------------------------------------
     # These keep their Epic-11 signatures so the existing callers (api
     # endpoint, e2e tests, availability_answerer fakes) compile unchanged.
     # Removed in the Epic-13 cleanup PR.
@@ -253,7 +253,7 @@ class CalendarSettingsRepository:
         rule_id: int | None = None,
     ) -> int:
         _warn_deprecated(project_id=project_id)
-        # Epic 11 allowed name=None and updated by explicit rule_id. Epic 12's
+        # Epic 11 allowed name=None and updated by explicit rule_id. Epic 13's
         # canonical upsert is keyed on ``(project_id, lower(name))``; the
         # legacy by-id UPDATE path is bridged with a direct SQL update so the
         # caller-provided rule_id stays stable (existing tests assert this).

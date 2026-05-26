@@ -1,4 +1,4 @@
-"""Unit tests for ``services.api.app.answerers.catalog_merge`` (story 12.06)."""
+"""Unit tests for ``services.api.app.answerers.catalog_merge`` (story 13.06)."""
 
 from __future__ import annotations
 

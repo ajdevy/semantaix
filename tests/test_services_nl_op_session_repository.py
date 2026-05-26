@@ -1,4 +1,4 @@
-"""Bootstrap-only coverage for services_nl_op_sessions (Epic 12, story 12.01)."""
+"""Bootstrap-only coverage for services_nl_op_sessions (Epic 13, story 13.01)."""
 
 from __future__ import annotations
 

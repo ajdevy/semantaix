@@ -1,4 +1,4 @@
-"""Story 12.06 — default ``grounding_system`` prompt carries the FR-25 rule."""
+"""Story 13.06 — default ``grounding_system`` prompt carries the FR-25 rule."""
 
 from __future__ import annotations
 

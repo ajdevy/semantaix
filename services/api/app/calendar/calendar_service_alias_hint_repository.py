@@ -1,5 +1,5 @@
 """Per-(project, operator) dedup for the ``/calendar_service`` migration-hint DM
-(Epic 12, story 12.03).
+(Epic 13, story 13.03).
 
 The ``/calendar_service`` slash command is being retired in favor of ``/service``.
 On every invocation the bot emits a structured deprecation log; on the **first**

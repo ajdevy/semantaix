@@ -1,4 +1,4 @@
-"""Regex parser tests for ``parse_service_intent`` (Epic 12, story 12.04).
+"""Regex parser tests for ``parse_service_intent`` (Epic 13, story 13.04).
 
 Covers the FR-24 Path B "must parse" inventory (full field-set, alt verbs,
 ё/е + Cyrillic-dash normalization, edit, remove) and the explicit

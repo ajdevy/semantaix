@@ -1,5 +1,5 @@
 """Contract tests for the canonical ``/api/projects/{id}/services`` surface
-(Epic 12, story 12.02).
+(Epic 13, story 13.02).
 
 Covers:
 - ``GET`` empty vs populated.

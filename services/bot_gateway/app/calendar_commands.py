@@ -51,7 +51,7 @@ _CONNECT_RE = re.compile(r"^\s*/connect_calendar\b", re.IGNORECASE)
 _DISCONNECT_RE = re.compile(r"^\s*/disconnect_calendar\b", re.IGNORECASE)
 _CALENDAR_OFF_RE = re.compile(r"^\s*/calendar_off\b\s*$", re.IGNORECASE)
 _CALENDAR_SERVICE_RE = re.compile(r"^\s*/calendar_service\b\s*(?P<rest>.*)$", re.IGNORECASE)
-# Story 12.03 — start-of-message anchored `/service` slash command. Subcommand
+# Story 13.03 — start-of-message anchored `/service` slash command. Subcommand
 # is required; trailing args are parsed by ``parse_service_kv``. Quoted-reply
 # (`> /service add ...`) does NOT match because the ``>`` prefix breaks the
 # ``^\s*/service`` anchor.
@@ -94,7 +94,7 @@ _SERVICE_ADDED = "✅ Услуга #{rule_id} «{name}» сохранена."
 _SERVICE_REMOVED = "✅ Услуга #{rule_id} удалена."
 _SERVICE_FALLBACK = "Не получилось сохранить услугу — попробуйте чуть позже."
 
-# --- Story 12.03 /service slash command (canonical FR-24 Path A) -----------
+# --- Story 13.03 /service slash command (canonical FR-24 Path A) -----------
 #
 # Plain-text Russian copy: NO MarkdownV2 / HTML (matches the NL preview rule —
 # prevents preview/echo injection if a service name or description contains
@@ -327,12 +327,12 @@ async def handle_calendar_command(
 ) -> dict[str, str] | None:
     """Dispatch `/connect_calendar`, `/disconnect_calendar`, `/calendar_off`,
     `/calendar_service` (alias with migration hint), and `/service` (canonical
-    Epic-12 surface).
+    Epic-13 surface).
 
     Returns None for non-matching messages so the normal routing continues.
     A non-authorized sender (not a registered operator bound to a project) is
     ignored with the logged reason ``unauthorized_calendar`` (legacy commands)
-    or ``unauthorized_services`` (the new `/service` command — see story 12.03
+    or ``unauthorized_services`` (the new `/service` command — see story 13.03
     operator-gating rule). ``nl_ops_db_path`` is required when an operator
     invokes `/calendar_service` so the migration-hint DM can be deduped per
     `(project_id, operator)`.
@@ -373,7 +373,7 @@ async def handle_calendar_command(
     if resolved is None or resolved.project_id is None:
         # The new `/service` command uses a different ignored-reason so log
         # analytics can distinguish it from the legacy commands; the user is
-        # NOT DM'd in either case (story 12.03 + Epic-11 rule).
+        # NOT DM'd in either case (story 13.03 + Epic-11 rule).
         reason = "unauthorized_services" if is_new_service else "unauthorized_calendar"
         logger.warning(
             "calendar_command_unauthorized",
@@ -740,7 +740,7 @@ async def _do_service_remove(
     return {"status": "accepted", "route": "calendar_service", "decision": "removed"}
 
 
-# --- Story 12.03 /service dispatch + helpers --------------------------------
+# --- Story 13.03 /service dispatch + helpers --------------------------------
 
 
 async def _do_new_service(

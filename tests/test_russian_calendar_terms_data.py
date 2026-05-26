@@ -1,7 +1,7 @@
-"""Coverage for data/russian_calendar_terms.json (Epic 12, story 12.01).
+"""Coverage for data/russian_calendar_terms.json (Epic 13, story 13.01).
 
-No Python code reads this file yet (story 12.06 owns the renderer); this test
-guards the shape so 12.06 can land cleanly.
+No Python code reads this file yet (story 13.06 owns the renderer); this test
+guards the shape so 13.06 can land cleanly.
 """
 
 from __future__ import annotations

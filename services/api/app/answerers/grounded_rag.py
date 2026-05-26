@@ -81,7 +81,7 @@ class GroundedRagAnswerer:
         )
         if catalog_query:
             # Aggregate questions ("что ещё есть?") need the whole offerings set,
-            # not a few lemma-overlapping lines. Story 12.06 (FR-25): read the
+            # not a few lemma-overlapping lines. Story 13.06 (FR-25): read the
             # structured ``project_services`` rows first (humanistic prose, no
             # field labels), then merge with the LLM-built digest, deduping
             # digest sentences that the structured rows already cover.

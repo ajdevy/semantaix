@@ -1,4 +1,4 @@
-"""Services natural-language operations (Epic 12, story 12.04).
+"""Services natural-language operations (Epic 13, story 13.04).
 
 State-machine + regex parser for the FR-24 Path B operator dialog:
 
@@ -9,7 +9,7 @@ State-machine + regex parser for the FR-24 Path B operator dialog:
   ...). NO LLM.
 - ``ServicesNlOpsRepository`` — mirrors :mod:`services.api.app.admin_nl_ops`'s
   state machine on the operator + project-scoped ``services_nl_op_sessions``
-  table created in story 12.01. Single-pending-per-``(project, operator)``
+  table created in story 13.01. Single-pending-per-``(project, operator)``
   invariant is enforced atomically inside ``BEGIN IMMEDIATE`` (the prior
   pending row is flipped to ``cancelled`` with reason ``replaced_by_new_pending``
   before the new row is committed; concurrent proposes from the same operator

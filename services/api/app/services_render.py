@@ -6,7 +6,7 @@ here: **field labels never appear in the output**. The LLM cannot leak
 ``Название:`` / ``Цена:`` / ``Длительность:`` because they are not in the
 input it sees — only the natural prose this module emits.
 
-Stories: 12.06 (catalog cutover) + 12.01 (terms-data file).
+Stories: 13.06 (catalog cutover) + 13.01 (terms-data file).
 
 Examples (per FR-25):
 - Full row → ``"Маникюр — 60 минут, пн-сб 10:00-19:00, цена от 2000 ₽. Классический и аппаратный."``
@@ -115,7 +115,7 @@ def _render_hours(
     v1 simplification: pick the first defined day's windows (in weekday
     order). If all defined days share an identical windows list, that's
     still the same string; mixed-window per-day rendering is out of scope
-    for this pass (documented in story 12.06).
+    for this pass (documented in story 13.06).
     """
     if not working_hours_json:
         return None

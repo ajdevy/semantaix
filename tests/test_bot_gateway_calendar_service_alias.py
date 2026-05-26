@@ -1,5 +1,5 @@
 """Unit tests for the `/calendar_service` alias + migration-hint DM
-(Epic 12, story 12.03).
+(Epic 13, story 13.03).
 
 Covers:
 - `/calendar_service add ...` still works (delegates → existing handler).

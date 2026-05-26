@@ -1,4 +1,4 @@
-"""Story 12.06 — hedges file must not block legitimate price/duration phrasing.
+"""Story 13.06 — hedges file must not block legitimate price/duration phrasing.
 
 FR-25 catalog answers include strings like "от 2000 ₽" and "60 минут".
 The hedge guardrail does substring matching against normalized output,

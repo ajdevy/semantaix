@@ -1,7 +1,7 @@
 """Merge structured ``project_services`` rows with the LLM-built catalog digest.
 
 The catalog answer branch (``GroundedRagAnswerer``) now reads structured rows
-**first** (story 12.06 / FR-25). When both a structured set and a digest exist
+**first** (story 13.06 / FR-25). When both a structured set and a digest exist
 this helper deduplicates digest sentences whose lemma set is a superset of any
 structured row's name-lemmas, then returns the merged chunk plus a source-id
 suffix used in the ``answer_traces.source_id`` field.

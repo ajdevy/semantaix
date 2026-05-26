@@ -219,7 +219,7 @@ calendar_settings_repository = CalendarSettingsRepository(
 calendar_oauth_state_repository = CalendarOAuthStateRepository(
     db_path=settings.calendar_db_path
 )
-# Epic 12 (story 12.02): canonical project_services repository, shared by the
+# Epic 13 (story 13.02): canonical project_services repository, shared by the
 # new /api/projects/{id}/services endpoints. The old /calendar alias endpoints
 # still route through ``calendar_settings_repository``'s deprecated wrappers
 # (which themselves delegate into the same underlying table) so Epic-11 callers
@@ -228,16 +228,16 @@ project_services_repository = ProjectServiceRepository(
     db_path=settings.calendar_db_path
 )
 init_token_schema(settings.calendar_db_path)
-# Epic 12 (story 12.01): bootstrap the operator-scoped services NL ops session
+# Epic 13 (story 13.01): bootstrap the operator-scoped services NL ops session
 # table next to the existing admin_nl_op_sessions table. Both are idempotent.
 init_services_nl_ops_schema(settings.nl_ops_db_path)
-# Epic 12 (story 12.04): operator-scoped NL ops state machine + endpoints
+# Epic 13 (story 13.04): operator-scoped NL ops state machine + endpoints
 # share the same DB file via the bootstrap above.
 services_nl_ops_repository = ServicesNlOpsRepository(
     db_path=settings.nl_ops_db_path,
     pending_ttl_seconds=settings.services_nl_op_session_ttl_seconds,
 )
-# Epic 12 (story 12.03): bootstrap the per-(project, operator) dedup table for
+# Epic 13 (story 13.03): bootstrap the per-(project, operator) dedup table for
 # the ``/calendar_service`` migration-hint DM. Idempotent; lives in
 # semantaix_nl_ops.db alongside services_nl_op_sessions.
 init_calendar_service_alias_hint_schema(settings.nl_ops_db_path)
@@ -3764,12 +3764,12 @@ async def calendar_project_service_upsert(
     request: CalendarServiceRuleRequest,
     _principal: Annotated[str, Depends(require_internal_token)],
 ) -> dict[str, object]:
-    # Epic 12 (story 12.02): this endpoint is 60-day-deprecated; the canonical
+    # Epic 13 (story 13.02): this endpoint is 60-day-deprecated; the canonical
     # surface lives at ``POST /api/projects/{id}/services``. The deprecation log
     # is the ONLY behavioral change — the rest of the handler keeps the Epic-11
     # contract (``rule_id``-keyed updates, ``{"id": ...}`` response shape) so
     # existing callers see no breakage. The slash-command alias hint DM is owned
-    # by story 12.03; here we only emit the log.
+    # by story 13.03; here we only emit the log.
     logger.info(
         "deprecation_warning_calendar_services_endpoint",
         extra={
@@ -3829,7 +3829,7 @@ async def calendar_project_service_delete(
     request: CalendarServiceDeleteRequest,
     _principal: Annotated[str, Depends(require_internal_token)],
 ) -> dict[str, object]:
-    # Epic 12 (story 12.02): deprecated alias for
+    # Epic 13 (story 13.02): deprecated alias for
     # ``DELETE /api/projects/{project_id}/services/{service_id}``. The Epic-11
     # behavior (admin-allowed when designated operator) is preserved here on
     # purpose so existing automation keeps working — the canonical endpoint is
@@ -3861,7 +3861,7 @@ async def calendar_project_service_delete(
     return {"deleted": True}
 
 
-# --- Canonical /api/projects/{id}/services surface (Epic 12, story 12.02) ---
+# --- Canonical /api/projects/{id}/services surface (Epic 13, story 13.02) ---
 #
 # The single structured catalog of operator-curated services per project. Add /
 # edit is shared with admins (FR-21) via ``authorize_calendar_config``; remove
@@ -4034,10 +4034,10 @@ async def api_project_services_delete(
     return {"deleted": True}
 
 
-# --- /api/projects/{id}/services/nl-ops surface (Epic 12, story 12.04) ------
+# --- /api/projects/{id}/services/nl-ops surface (Epic 13, story 13.04) ------
 #
 # Operator-driven natural-language proposal/confirm/cancel state machine on the
-# canonical `project_services` catalog. The bot dispatcher (story 12.05) DMs
+# canonical `project_services` catalog. The bot dispatcher (story 13.05) DMs
 # previews + confirm-tokens; this api layer owns parsing, persistence, single-
 # pending invariant, ownership-checked confirmation, and full-payload audit
 # logging.
@@ -4092,7 +4092,7 @@ def _nl_session_to_dict(session: ServicesNlSession) -> dict[str, object]:
     if session.prior_cancelled_session_ids:
         # First (and typically only) prior-pending session id that the
         # single-pending invariant flipped to cancelled by this propose.
-        # The bot dispatcher (story 12.05) DMs a one-line notice before the
+        # The bot dispatcher (story 13.05) DMs a one-line notice before the
         # new preview so the operator knows the older draft is gone.
         body["prior_cancelled_session_id"] = session.prior_cancelled_session_ids[0]
     return body

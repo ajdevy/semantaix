@@ -1,5 +1,5 @@
 """Validate a ``project_services`` write before it reaches the repository
-(Epic 12, story 12.02).
+(Epic 13, story 13.02).
 
 The canonical surface accepts the full FR-23 service shape: ``name`` (required),
 optional catalog metadata (``description``, ``price_text``, ``tags``), and

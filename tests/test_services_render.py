@@ -1,4 +1,4 @@
-"""Unit tests for ``services.api.app.services_render`` (story 12.06 / FR-25).
+"""Unit tests for ``services.api.app.services_render`` (story 13.06 / FR-25).
 
 The hard structural guarantee FR-25 relies on is asserted here: no field
 labels (``Название:`` / ``Описание:`` / ``Цена:`` / ``Длительность:`` /

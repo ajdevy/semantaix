@@ -1,8 +1,8 @@
-"""Operator natural-language services dialog (Epic 12, story 12.05).
+"""Operator natural-language services dialog (Epic 13, story 13.05).
 
 Bot-side dispatcher that turns operator DMs like ``"добавь услугу маникюр …"``
 into propose/confirm/cancel calls against the api's project-scoped services
-NL-ops state machine (story 12.04 endpoints under
+NL-ops state machine (story 13.04 endpoints under
 ``/api/projects/{project_id}/services/nl-ops``).
 
 Mirrors :mod:`services.bot_gateway.app.admin_nl_dialog` shape — same

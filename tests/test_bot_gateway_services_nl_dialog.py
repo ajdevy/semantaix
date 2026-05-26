@@ -1,4 +1,4 @@
-"""Bot-side services NL dialog dispatcher tests (Epic 12, story 12.05)."""
+"""Bot-side services NL dialog dispatcher tests (Epic 13, story 13.05)."""
 
 from __future__ import annotations
 

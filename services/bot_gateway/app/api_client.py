@@ -249,9 +249,9 @@ class ApiClient:
         actor_role: str,
         internal_token: str,
     ) -> dict:
-        """Create or update a service row on the canonical Epic-12 surface.
+        """Create or update a service row on the canonical Epic-13 surface.
 
-        Calls ``POST /api/projects/{project_id}/services`` (story 12.02). The
+        Calls ``POST /api/projects/{project_id}/services`` (story 13.02). The
         request body is the ``payload`` dict (must contain ``name`` and may
         carry any of ``description``/``price_text``/``tags``/``duration_minutes``/
         ``working_hours``/``service_days``/``date_exceptions``) extended with
@@ -277,9 +277,9 @@ class ApiClient:
         project_id: int,
         internal_token: str,
     ) -> dict:
-        """List all service rows for a project on the canonical Epic-12 surface.
+        """List all service rows for a project on the canonical Epic-13 surface.
 
-        Calls ``GET /api/projects/{project_id}/services`` (story 12.02).
+        Calls ``GET /api/projects/{project_id}/services`` (story 13.02).
         Returns the raw JSON body (``{"project_id": int, "services": [...]}``).
         """
         async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -299,10 +299,10 @@ class ApiClient:
         actor_role: str,
         internal_token: str,
     ) -> dict:
-        """Delete a service row on the canonical Epic-12 surface.
+        """Delete a service row on the canonical Epic-13 surface.
 
         Calls ``DELETE /api/projects/{project_id}/services/{service_id}``
-        (story 12.02). Admin actors are rejected with 403
+        (story 13.02). Admin actors are rejected with 403
         ``admin_cannot_remove_service`` — surfaced as ``ApiError.detail``.
         """
         async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -389,7 +389,7 @@ class ApiClient:
         text: str,
         internal_token: str,
     ) -> dict:
-        """Propose a services NL op (story 12.05 / 12.04 endpoint).
+        """Propose a services NL op (story 13.05 / 13.04 endpoint).
 
         Calls ``POST /api/projects/{project_id}/services/nl-ops`` with the
         internal service token. Returns the api body which includes
@@ -418,7 +418,7 @@ class ApiClient:
         actor_role: str = "operator",
         internal_token: str,
     ) -> dict:
-        """Confirm a pending services NL session (story 12.05).
+        """Confirm a pending services NL session (story 13.05).
 
         Calls ``POST /api/projects/{project_id}/services/nl-ops/{session_id}/confirm``.
         Raises ``ApiError`` with structured ``.detail`` set (e.g.
@@ -445,7 +445,7 @@ class ApiClient:
         presenter_operator: str,
         internal_token: str,
     ) -> dict:
-        """Cancel a pending services NL session (story 12.05)."""
+        """Cancel a pending services NL session (story 13.05)."""
         response = await self._bearer_post(
             f"/api/projects/{project_id}/services/nl-ops/{session_id}/cancel",
             internal_token=internal_token,

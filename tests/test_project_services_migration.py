@@ -1,8 +1,8 @@
-"""Unit coverage for the project_services migration (Epic 12, story 12.01).
+"""Unit coverage for the project_services migration (Epic 13, story 13.01).
 
 Three bootstrap modes are exercised:
  1. fresh-deploy CREATE path (no calendar tables at all)
- 2. Epic-11 → Epic-12 RENAME path (calendar_service_rules exists, has rows)
+ 2. Epic-11 → Epic-13 RENAME path (calendar_service_rules exists, has rows)
  3. re-run no-op (second invocation must be a no-op)
 """
 

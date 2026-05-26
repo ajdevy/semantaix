@@ -716,7 +716,7 @@ async def test_delete_all_operator_files_raises_api_error(monkeypatch):
     assert info.value.detail == "confirm_required"
 
 
-# --- Story 12.03 canonical /api/projects/{id}/services methods ------------
+# --- Story 13.03 canonical /api/projects/{id}/services methods ------------
 
 
 @pytest.mark.asyncio

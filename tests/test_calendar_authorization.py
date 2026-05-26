@@ -85,7 +85,7 @@ def test_disconnect_unknown_role_rejected():
     assert exc.value.detail == "unknown_actor_role"
 
 
-# --- authorize_service_remove (Epic 12 story 12.02) ------------------------
+# --- authorize_service_remove (Epic 13 story 13.02) ------------------------
 
 
 def test_service_remove_allowed_for_operator():

@@ -1,6 +1,6 @@
 """Alias-delegation tests for the deprecated
-``POST/DELETE /calendar/projects/{id}/services`` endpoints (Epic 12, story
-12.02).
+``POST/DELETE /calendar/projects/{id}/services`` endpoints (Epic 13, story
+13.02).
 
 The Epic-11 contract (status codes, response shapes, ``rule_id``-keyed updates)
 stays exactly as-is so existing automation keeps working — the only behavior

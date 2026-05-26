@@ -542,7 +542,7 @@ async def test_catalog_query_still_gated_by_verifier(caplog, prompts):
     )
 
 
-# --- Story 12.06: catalog merge-with-dedup branch ----------------------------
+# --- Story 13.06: catalog merge-with-dedup branch ----------------------------
 
 
 class _FakeProjectServicesReader:

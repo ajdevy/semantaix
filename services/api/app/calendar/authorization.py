@@ -61,7 +61,7 @@ def authorize_calendar_disconnect(*, actor_role: str) -> None:
 
 
 def authorize_service_remove(*, actor_role: str) -> None:
-    """Authorize a destructive service-row removal (Epic 12, story 12.02).
+    """Authorize a destructive service-row removal (Epic 13, story 13.02).
 
     Mirrors :func:`authorize_calendar_disconnect`: operators may delete catalog
     rows, an admin (even one who is also a registered project operator) is
