@@ -55,8 +55,8 @@ There is no project-level enable for sales. The `SalesPersonaAnswerer` runs its 
 Story-aligned E2E tests land in `tests/e2e/test_e2e_epic12_*.py` (`@pytest.mark.e2e`, `@pytest.mark.epic("12")`, `@pytest.mark.story("12-0X")`). The earliest E2E belongs to 12.04 (price-unknown → HITL → moderation candidate → re-ask hits without escalation). 12.05b adds the KB-upload auto-analysis round-trip (sendable + non-sendable file fixtures). 12.07 covers the date-proposal handoff to Epic 11 with a mocked `compute_availability`. 12.08 covers the +1d nudge with a frozen clock (fires-in-window, cancel-on-reply, skip-if-stale). The full Данил dialog replay lands in 12.09. CI runs `pytest` (coverage) + `pytest -m e2e`. Story-level rows live in `_bmad-output/implementation-artifacts/e2e-coverage.md`. Scripted signoff: `scripts/epic12_signoff.sh`.
 
 ## Behavioral spec
-The two extracted Telegram transcripts are the canonical behavioral spec for the answerer:
-- [2026-04-28_telegram_chat_danil.md](/Users/aj/Downloads/2026-04-28_telegram_chat_danil.md) — routes → pricing per-vehicle → каньонинг concept → date proposal → next-day follow-up
-- [2026-04-28_telegram_chat_darya.md](/Users/aj/Downloads/2026-04-28_telegram_chat_darya.md) — greeting (with referral) → intent scoping → media demo → equipment Q&A → tiered pricing menu
+The two extracted Telegram transcripts are the canonical behavioral spec for the answerer (committed alongside this README):
+- [2026-04-28_telegram_chat_danil.md](2026-04-28_telegram_chat_danil.md) — routes → pricing per-vehicle → каньонинг concept → date proposal → next-day follow-up
+- [2026-04-28_telegram_chat_darya.md](2026-04-28_telegram_chat_darya.md) — greeting (with referral) → intent scoping → media demo → equipment Q&A → tiered pricing menu
 
 Story 12.09's E2E replays the Данил inbound messages end-to-end as the acceptance signal.
