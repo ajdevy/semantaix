@@ -37,7 +37,7 @@ Let the operator manage the `services` catalog from Telegram **without** memoriz
 - **Confidence gating.** The prompt instructs the LLM to set `action: null` when uncertain (e.g., the operator said `"послушай"`). The classifier returns `None` for any `action: null` response. This avoids false-positive service-add on chatty operator messages.
 - **Operator-only.** This handler is gated identically to the slash commands — only project's effective operator / admin per Epic 10. Unauthorized senders → ignored with `unauthorized_service_nl` log + no LLM call (cost-saving).
 - **Cost discipline.** The classifier runs on every authorized operator inbound that didn't match a slash command. Cap the input length at 500 chars before the LLM call to avoid runaway costs on a long pasted message.
-- **No persona prompt.** This is operator-facing, not customer-facing; the system prompt is utilitarian + Russian, no "Николай" voice. (Epic-10 NL admin dialog is the reference pattern.)
+- **No persona prompt.** This is operator-facing, not customer-facing; the system prompt is utilitarian + Russian, no sales-persona voice. (Epic-10 NL admin dialog is the reference pattern.)
 - **Trace metadata:** every NL-handled action logs `operator_service_nl_action_taken` with `{trace_id, action, service_id, from_username}`.
 
 ## Test Plan

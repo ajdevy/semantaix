@@ -18,12 +18,12 @@ This story lives entirely inside `SalesPersonaAnswerer` (the `scoping`, `pitchin
   - Returns `other` when nothing matches — the caller (the answerer) decides whether the turn is a scoping answer (in `scoping` stage) or `_skip`.
 - `SalesPersonaAnswerer` extension:
   - **At the top of every stage** (after the activation gate, before stage-specific logic): call `classify_turn(...)`. If `catalog_ask` or `concept_ask`, handle the turn inline and return — the funnel state (`current_stage`, `collected_intent`) is preserved across the aside.
-  - **`catalog_ask` branch:** `services_repo.list_active(project_id)` → render a Russian list using `system_prompts/nikolay_catalog.txt`. Format: `У нас есть:\n• Медовеевка Лайт\n• Ивановский водопад\n• Каньонинг\n\nЧто вас интересует?` (no IDs, no descriptions, no prices — the list is just names). Empty list → `_skip(reason="no_services")` (the dormancy gate should already have caught this, but defense-in-depth).
+  - **`catalog_ask` branch:** `services_repo.list_active(project_id)` → render a Russian list using `system_prompts/sales_catalog.txt`. Format: `У нас есть:\n• Медовеевка Лайт\n• Ивановский водопад\n• Каньонинг\n\nЧто вас интересует?` (no IDs, no descriptions, no prices — the list is just names). Empty list → `_skip(reason="no_services")` (the dormancy gate should already have caught this, but defense-in-depth).
   - **`concept_ask` branch:**
     1. `services_repo.find_by_name(project_id, term)` (case-insensitive). On hit + `description_md` populated → return the description as-is (no LLM rewriting — preserves the operator's intended copy). Stay in the current stage.
-    2. On hit but `description_md` is None → call `rag_retriever.retrieve(term + " определение")` scoped to the project. If a high-confidence chunk exists (reuse the existing `rag_grounding_score_threshold`), reply with the chunk text via a one-sentence persona wrapper (`system_prompts/nikolay_concept_rag.txt`). On low-confidence / no chunk → escalate via the existing HITL path with `reason='concept_unknown'`.
+    2. On hit but `description_md` is None → call `rag_retriever.retrieve(term + " определение")` scoped to the project. If a high-confidence chunk exists (reuse the existing `rag_grounding_score_threshold`), reply with the chunk text via a one-sentence persona wrapper (`system_prompts/sales_concept_rag.txt`). On low-confidence / no chunk → escalate via the existing HITL path with `reason='concept_unknown'`.
     3. On miss (no matching service) → same RAG-then-escalate path scoped to the term (so the bot can still answer "что такое каньонинг?" even if it's not a service row yet).
-- `system_prompts/nikolay_catalog.txt` and `nikolay_concept_rag.txt` — Russian, persona-aware, one short reply, no hedging.
+- `system_prompts/sales_catalog.txt` and `sales_concept_rag.txt` — Russian, persona-aware, one short reply, no hedging.
 
 ### Out of Scope
 - Per-service pricing in the catalog list (pricing is handled by the dedicated 12.04 turn).

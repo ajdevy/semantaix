@@ -1,6 +1,6 @@
 # Epic 12 Story Pack
 
-Epic: Sales Conversation Persona ("Николай")
+Epic: Sales Conversation Persona
 
 This story pack is implementation-ready and includes, per story:
 - scope boundaries (in/out)

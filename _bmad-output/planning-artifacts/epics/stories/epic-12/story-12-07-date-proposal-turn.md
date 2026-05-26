@@ -16,11 +16,11 @@ After scoping + pricing reach a natural close, the bot proposes a specific calen
 - `SalesPersonaAnswerer` integration:
   - **Entry condition for the `proposing` stage:** transition from `pricing` happens when (a) at least one price ask has been answered (hit or learned), AND (b) `intent.dates` is populated. Otherwise the answerer asks the missing piece (the existing scoping behavior).
   - In `proposing` stage: call `date_proposer.propose(...)`.
-    - **`Proposal`** → render via `system_prompts/nikolay_proposal.txt` (Russian, one sentence, includes the date + time as digits, no hedging). Persist into `state.last_proposal` via `StateRepository.upsert(..., last_proposal=proposal.as_dict())`. Stay in `proposing` (the customer may accept, decline, or counter).
+    - **`Proposal`** → render via `system_prompts/sales_proposal.txt` (Russian, one sentence, includes the date + time as digits, no hedging). Persist into `state.last_proposal` via `StateRepository.upsert(..., last_proposal=proposal.as_dict())`. Stay in `proposing` (the customer may accept, decline, or counter).
     - **`NoProposal(reason="ambiguous_service")`** → fall back to a one-line scoping clarifier ("На каком туре остановимся?"); stage stays `proposing`.
     - **`NoProposal(reason="calendar_not_enabled")`** → reply with a fixed Russian line "Дату подтвержу у коллег" and escalate to HITL with `reason='date_calendar_disabled'`. The funnel does NOT silently go quiet — it always tells the operator a date confirmation is pending.
     - **`NoProposal(reason="provider_error" | "no_slots_in_window")`** → same escalation pattern; the customer-facing line is "Уточню свободные даты и сразу сообщу".
-- `system_prompts/nikolay_proposal.txt` — Russian, persona-aware, one short sentence, format: `Предлагаю на <дата> с началом в <время>.` The prompt MUST include the constraint "только цифры, без 'около'/'примерно'" (no fuzzy times — the calendar gave us an exact slot).
+- `system_prompts/sales_proposal.txt` — Russian, persona-aware, one short sentence, format: `Предлагаю на <дата> с началом в <время>.` The prompt MUST include the constraint "только цифры, без 'около'/'примерно'" (no fuzzy times — the calendar gave us an exact slot).
 - Stage transition out of `proposing`:
   - Customer accepts (intent: `да|согласен|подтверждаю|давайте|устраивает`) → transition to `closing`; the actual booking remains with the operator per epic out-of-scope.
   - Customer declines / counter-offers (free-text date) → re-enter `proposing` with updated `intent.dates`.

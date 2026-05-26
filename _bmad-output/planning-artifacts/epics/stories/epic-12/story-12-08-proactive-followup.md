@@ -20,7 +20,7 @@ When a customer goes silent after the last bot message, fire exactly **one** nud
   - `POST /sales/followups/{id}/reschedule` `{new_fire_at}` → `{ok: true}`.
   - `POST /sales/followups/{id}/fire` → `{ok: true, sent: bool, fallback_text_used: bool}`.
 - **Fire-handler** in api:
-  - Renders the nudge via `system_prompts/nikolay_followup.txt` (Russian, one short sentence, persona-aware, includes the customer's first name if available from the Telegram chat metadata). Example: `"Данил, остались вопросы по туру 1 мая?"`. The LLM call is allowed to vary the wording; the prompt forbids new dates/prices.
+  - Renders the nudge via `system_prompts/sales_followup.txt` (Russian, one short sentence, persona-aware, includes the customer's first name if available from the Telegram chat metadata). Example: `"Данил, остались вопросы по туру 1 мая?"`. The LLM call is allowed to vary the wording; the prompt forbids new dates/prices.
   - Dispatches via `TelegramBotSender.send_message` (no media — a follow-up is text-only in v1).
   - On Telegram error: log + `mark_sent` is NOT called; instead `mark_skipped_stale(reason="telegram_send_failed")` (the queue is single-shot — no retry).
   - On success: `mark_sent` + record `state_repo.mark_bot_msg(...)`.
