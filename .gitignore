@@ -61,3 +61,7 @@ node_modules/
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+
+# yolo-runner local state (per-task clones + event-stream logs)
+.yolo-runner/clones/
+runner-logs/
