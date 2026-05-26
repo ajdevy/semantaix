@@ -21,7 +21,7 @@ agent:
   backend: claude
   model: opus
   concurrency: 1
-  runner_timeout: 1h
+  runner_timeout: 2h
   watchdog_timeout: 10m
   watchdog_interval: 5s
   retry_budget: 5
