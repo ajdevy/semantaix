@@ -791,6 +791,11 @@ async def _process_operator_upload(
             summary_lines.append(f"   • #{short_id} · {name}")
     if deduped:
         summary_lines.append(f"♻️ Из них уже было в базе: {deduped}.")
+    material_lines = await _analyze_kb_uploads_for_materials(
+        successes=successes,
+        successes_meta=successes_meta,
+    )
+    summary_lines.extend(material_lines)
     for label, reason, short_id in failures:
         friendly = _friendly_failure_reason(
             reason, max_bytes=settings.operator_upload_max_bytes
@@ -800,6 +805,56 @@ async def _process_operator_upload(
             f"⚠️ Не удалось обработать {label}: {friendly}{suffix}"
         )
     await _send_dm(normalized.chat_id, "\n".join(summary_lines))
+
+
+async def _analyze_kb_uploads_for_materials(
+    *,
+    successes: list[dict],
+    successes_meta: list[tuple[str | None, str | None]],
+) -> list[str]:
+    """Story 12.05b hook: register each non-confidential KB upload as a
+    candidate ``client_materials`` row via the analyzer endpoint.
+
+    Returns the lines (zero or more) to append to the KB-upload ack. The
+    analyze call is silent to the operator on every failure path — KB
+    ingest succeeds regardless.
+    """
+    lines: list[str] = []
+    token = settings.internal_service_token or ""
+    if not token:
+        return lines
+    for item, (short_id, _name) in zip(successes, successes_meta):
+        if short_id is None:
+            continue
+        if item.get("is_confidential"):
+            continue
+        project_id = item.get("project_id")
+        if project_id is None:
+            continue
+        try:
+            outcome = await api_client.analyze_kb_material(
+                project_id=int(project_id),
+                operator_file_short_id=short_id,
+                internal_token=token,
+            )
+        except Exception as exc:
+            logger.warning(
+                "sales_kb_material_analyze_failed",
+                extra={
+                    "operator_file_short_id": short_id,
+                    "project_id": project_id,
+                    "error": _redact_token(str(exc)),
+                },
+            )
+            continue
+        if outcome.get("registered"):
+            material_id = outcome.get("material_id")
+            if material_id is not None:
+                lines.append(
+                    f"📎 Добавлен в материалы для клиентов "
+                    f"(id={material_id})."
+                )
+    return lines
 
 
 _API_DETAIL_FRIENDLY: dict[str, str] = {

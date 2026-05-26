@@ -115,6 +115,31 @@ class ApiClient:
             timeout_override=timeout_seconds,
         )
 
+    async def analyze_kb_material(
+        self,
+        *,
+        project_id: int,
+        operator_file_short_id: str,
+        internal_token: str,
+    ) -> dict:
+        """Call the 12.05b client-materials analyzer endpoint.
+
+        Returns the api body ``{registered: bool, material_id: int|None,
+        reason: str}``. Raises ``ApiError`` on a non-2xx response so the
+        caller can surface a redacted error in the operator-facing DM (or,
+        per the story, swallow it and keep the KB ack visible).
+        """
+        response = await self._bearer_post(
+            "/sales/materials/analyze-kb-file",
+            internal_token=internal_token,
+            json={
+                "project_id": project_id,
+                "operator_file_short_id": operator_file_short_id,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
     async def initiate_calendar_connect(
         self,
         *,
