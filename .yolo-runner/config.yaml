@@ -13,14 +13,14 @@ profiles:
       type: github
       github:
         scope:
-          owner: flexsent-labs
+          owner: ajdevy
           repo: semantaix
         auth:
           token_env: GITHUB_TOKEN
 agent:
   backend: claude
   model: opus
-  concurrency: 3
+  concurrency: 1
   runner_timeout: 1h
   watchdog_timeout: 10m
   watchdog_interval: 5s
