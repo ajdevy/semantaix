@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -32,6 +32,8 @@ from services.api.app.sales.russian_sales_intent import is_sales_intent
 from services.api.app.sales.turn_intent import classify_turn
 
 logger = logging.getLogger(__name__)
+
+FOLLOWUP_DELAY = timedelta(hours=24)
 
 NAME = "sales_persona"
 STAGE_NEW = "new"
@@ -110,6 +112,17 @@ class _RagRetriever(Protocol):
     ) -> list[RagChunk]: ...
 
 
+class _FollowupRepo(Protocol):
+    def enqueue(
+        self,
+        *,
+        chat_id: int,
+        project_id: int,
+        fire_at: datetime,
+        now: datetime,
+    ) -> int: ...
+
+
 class _OpenRouter(Protocol):
     async def complete_json(
         self,
@@ -176,6 +189,7 @@ class SalesPersonaAnswerer:
         bot_persona_getter: Callable[[], str],
         rag_retriever: _RagRetriever | None = None,
         grounding_threshold_getter: Callable[[], float] | None = None,
+        followup_repo: _FollowupRepo | None = None,
     ) -> None:
         self._state_repo = state_repo
         self._services_repo = services_repo
@@ -185,8 +199,17 @@ class SalesPersonaAnswerer:
         self._persona_getter = bot_persona_getter
         self._rag = rag_retriever
         self._grounding_threshold_getter = grounding_threshold_getter
+        self._followup_repo = followup_repo
 
     async def try_answer(
+        self, *, question: str, ctx: AnswerContext
+    ) -> AnswerResult:
+        result = await self._dispatch(question=question, ctx=ctx)
+        if result.handled and ctx.chat_id is not None:
+            await self._enqueue_followup(ctx=ctx)
+        return result
+
+    async def _dispatch(
         self, *, question: str, ctx: AnswerContext
     ) -> AnswerResult:
         if ctx.chat_id is None:
@@ -228,6 +251,33 @@ class SalesPersonaAnswerer:
 
         # Unknown / future stage value — defer to downstream answerers.
         return _skip("stage_not_implemented_yet")
+
+    async def _enqueue_followup(self, *, ctx: AnswerContext) -> None:
+        """Schedule one nudge T+24h after every successful sales turn.
+
+        Re-enqueueing replaces any prior ``scheduled`` row for the chat —
+        the queue keeps exactly one outstanding nudge per silent customer.
+        """
+        if self._followup_repo is None:
+            return
+        now = self._clock()
+        try:
+            await asyncio.to_thread(
+                self._followup_repo.enqueue,
+                chat_id=int(ctx.chat_id),  # type: ignore[arg-type]
+                project_id=int(ctx.project_id or 0),
+                fire_at=now + FOLLOWUP_DELAY,
+                now=now,
+            )
+        except Exception as exc:  # defensive — never break the answer path
+            logger.warning(
+                "sales_followup_enqueue_failed",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "chat_id": ctx.chat_id,
+                    "error": repr(exc),
+                },
+            )
 
     async def _handle_greeting(
         self, *, question: str, ctx: AnswerContext

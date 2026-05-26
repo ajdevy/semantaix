@@ -132,6 +132,13 @@ from services.api.app.projects import (
 )
 from services.api.app.rag import RagRepository
 from services.api.app.russian_text import get_russian_normalizer
+from services.api.app.sales.followup_cancel_hook import maybe_cancel
+from services.api.app.sales.followup_fire_handler import FollowupFireHandler
+from services.api.app.sales.followup_queue_repository import (
+    REASON_PAST_INTENT_DATE,
+    FollowupQueueRepository,
+    FollowupRow,
+)
 from services.api.app.sales.sales_persona_answerer import SalesPersonaAnswerer
 from services.api.app.sales.state_repository import (
     StateRepository as SalesStateRepository,
@@ -427,6 +434,9 @@ def _effective_sales_persona_name() -> str:
 # owns the pipeline wiring. Construction is unconditional; the always-on
 # activation gate inside the answerer handles dormancy.
 sales_state_repository = SalesStateRepository(db_path=settings.sales_db_path)
+sales_followup_repository = FollowupQueueRepository(
+    db_path=settings.sales_db_path
+)
 sales_persona_answerer = SalesPersonaAnswerer(
     state_repo=sales_state_repository,
     # ServicesRepository ships in Story 12.01; until that lands the gate
@@ -437,6 +447,16 @@ sales_persona_answerer = SalesPersonaAnswerer(
     normalizer=get_russian_normalizer(),
     clock=lambda: datetime.now(UTC),
     bot_persona_getter=_effective_sales_persona_name,
+    followup_repo=sales_followup_repository,
+)
+
+sales_followup_fire_handler = FollowupFireHandler(
+    followup_repo=sales_followup_repository,
+    state_repo=sales_state_repository,
+    openrouter=openrouter_client,
+    telegram_sender=telegram_bot_sender,
+    persona_getter=_effective_sales_persona_name,
+    clock=lambda: datetime.now(UTC),
 )
 
 
@@ -1954,6 +1974,16 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         }
 
     now = datetime.now(UTC)
+    # Story 12.08: cancel any pending +1d nudge BEFORE the pipeline runs so a
+    # reply arriving at the same instant the queue fires never double-notifies.
+    # The hook is a no-op when chat_id is None.
+    await asyncio.to_thread(
+        maybe_cancel,
+        repo=sales_followup_repository,
+        chat_id=request.chat_id,
+        now=now,
+        trace_id=trace_id,
+    )
     ctx = _build_answer_context(
         chat_id=request.chat_id,
         customer_username=request.customer_username,
@@ -2131,6 +2161,107 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
         "hitl_ticket_id": ticket.id,
         "hitl_operator_username": _effective_hitl_operator_username(),
         "trace_id": persisted_trace_id,
+    }
+
+
+class FollowupRescheduleRequest(BaseModel):
+    new_fire_at: datetime
+
+
+def _followup_row_to_dict(
+    row: FollowupRow, *, intent_dates: str | None = None
+) -> dict[str, object]:
+    return {
+        "id": row.id,
+        "chat_id": row.chat_id,
+        "project_id": row.project_id,
+        "fire_at": row.fire_at.isoformat(),
+        "status": row.status,
+        "reason": row.reason,
+        "intent_dates": intent_dates,
+        "created_at": row.created_at.isoformat(),
+        "updated_at": row.updated_at.isoformat(),
+    }
+
+
+def _intent_dates_for_chat(chat_id: int) -> str | None:
+    state = sales_state_repository.get(chat_id)
+    if state is None:
+        return None
+    collected = state.get("collected_intent") or {}
+    raw = collected.get("dates")
+    return str(raw) if isinstance(raw, str) and raw.strip() else None
+
+
+@app.get("/sales/followups/due")
+def list_due_followups(
+    now: str | None = None,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    if now is None:
+        cursor = datetime.now(UTC)
+    else:
+        try:
+            parsed = datetime.fromisoformat(now)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid_now") from exc
+        cursor = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    rows = sales_followup_repository.due(now=cursor, limit=100)
+    return {
+        "rows": [
+            _followup_row_to_dict(
+                row, intent_dates=_intent_dates_for_chat(row.chat_id)
+            )
+            for row in rows
+        ]
+    }
+
+
+@app.post("/sales/followups/{followup_id}/skip-stale")
+def skip_stale_followup(
+    followup_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    row = sales_followup_repository.get(followup_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="followup_not_found")
+    sales_followup_repository.mark_skipped_stale(
+        followup_id, reason=REASON_PAST_INTENT_DATE, now=datetime.now(UTC)
+    )
+    return {"ok": True}
+
+
+@app.post("/sales/followups/{followup_id}/reschedule")
+def reschedule_followup(
+    followup_id: int,
+    payload: FollowupRescheduleRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    row = sales_followup_repository.get(followup_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="followup_not_found")
+    fire_at = payload.new_fire_at
+    if fire_at.tzinfo is None:
+        fire_at = fire_at.replace(tzinfo=UTC)
+    sales_followup_repository.reschedule(
+        followup_id, new_fire_at=fire_at, now=datetime.now(UTC)
+    )
+    return {"ok": True}
+
+
+@app.post("/sales/followups/{followup_id}/fire")
+async def fire_followup(
+    followup_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    row = sales_followup_repository.get(followup_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="followup_not_found")
+    outcome = await sales_followup_fire_handler.fire(row)
+    return {
+        "ok": True,
+        "sent": outcome.sent,
+        "fallback_text_used": outcome.fallback_text_used,
     }
 
 
