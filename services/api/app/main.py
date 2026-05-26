@@ -132,6 +132,13 @@ from services.api.app.projects import (
 )
 from services.api.app.rag import RagRepository
 from services.api.app.russian_text import get_russian_normalizer
+from services.api.app.sales.client_materials_analyzer import (
+    AnalysisOutcome,
+    ClientMaterialsAnalyzer,
+)
+from services.api.app.sales.client_materials_repository import (
+    ClientMaterialsRepository,
+)
 from services.api.app.sales.followup_cancel_hook import maybe_cancel
 from services.api.app.sales.followup_fire_handler import FollowupFireHandler
 from services.api.app.sales.followup_queue_repository import (
@@ -448,6 +455,15 @@ sales_persona_answerer = SalesPersonaAnswerer(
     clock=lambda: datetime.now(UTC),
     bot_persona_getter=_effective_sales_persona_name,
     followup_repo=sales_followup_repository,
+)
+
+client_materials_repository = ClientMaterialsRepository(
+    db_path=settings.sales_db_path
+)
+client_materials_analyzer = ClientMaterialsAnalyzer(
+    openrouter=openrouter_client,
+    operator_files_view=operator_files_view,
+    materials_repo=client_materials_repository,
 )
 
 sales_followup_fire_handler = FollowupFireHandler(
@@ -2265,6 +2281,43 @@ async def fire_followup(
     }
 
 
+class SalesAnalyzeKbFileRequest(BaseModel):
+    project_id: int
+    operator_file_short_id: str
+    now: str | None = None
+
+
+def _analysis_outcome_to_dict(outcome: AnalysisOutcome) -> dict[str, object]:
+    return {
+        "registered": outcome.registered,
+        "material_id": outcome.material_id,
+        "reason": outcome.reason,
+    }
+
+
+@app.post("/sales/materials/analyze-kb-file")
+async def sales_materials_analyze_kb_file(
+    request: SalesAnalyzeKbFileRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    """Run the 12.05b client-materials analyzer on a KB-uploaded file.
+
+    Called by the bot_gateway KB-upload hook after a successful KB ingest.
+    The endpoint always returns a 200 with the ``AnalysisOutcome`` shape —
+    the bot treats ``registered=False`` as "no extra message" and never
+    surfaces an error from this endpoint. The injected ``now`` is tz-aware
+    UTC; tests may pass an explicit ISO string for determinism.
+    """
+    parsed_now = _parse_optional_now(request.now)
+    effective_now = parsed_now if parsed_now is not None else datetime.now(UTC)
+    outcome = await client_materials_analyzer.analyze_and_register(
+        project_id=request.project_id,
+        operator_file_short_id=request.operator_file_short_id,
+        now=effective_now,
+    )
+    return _analysis_outcome_to_dict(outcome)
+
+
 @app.post("/rag/ingest")
 def ingest_rag(request: RagIngestRequest) -> dict[str, object]:
     try:
@@ -2929,6 +2982,7 @@ async def _perform_operator_upload(request: OperatorUploadRequest) -> dict[str, 
                 "extracted_chars": 0,
                 "is_confidential": existing.is_confidential,
                 "deduplicated": True,
+                "project_id": existing.project_id,
             }
 
     try:
@@ -3047,6 +3101,7 @@ async def _perform_operator_upload(request: OperatorUploadRequest) -> dict[str, 
         "extracted_chars": len(wrapped),
         "is_confidential": request.is_confidential,
         "deduplicated": False,
+        "project_id": resolved_project_id,
     }
 
 
