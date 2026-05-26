@@ -132,6 +132,10 @@ from services.api.app.projects import (
 )
 from services.api.app.rag import RagRepository
 from services.api.app.russian_text import get_russian_normalizer
+from services.api.app.sales.sales_persona_answerer import SalesPersonaAnswerer
+from services.api.app.sales.state_repository import (
+    StateRepository as SalesStateRepository,
+)
 from services.api.app.services_nl_ops import (
     OP_SERVICE_REMOVE,
     ServicesNlOpsRepository,
@@ -392,6 +396,48 @@ def _effective_bot_persona() -> tuple[str, str]:
         default_first_name=settings.bot_persona_first_name,
         default_last_name=settings.bot_persona_last_name,
     )
+
+
+class _SalesServicesRepoStub:
+    """Placeholder until Story 12.01's ServicesRepository ships.
+
+    The Story 12.03 activation gate is always-on and never consults
+    `count_active`; the stub exists only to satisfy the constructor's
+    typed dependency without coupling 12.03 to 12.01's full surface.
+    """
+
+    def count_active(self, *, project_id: int) -> int:
+        return 0
+
+
+def _effective_sales_persona_name() -> str:
+    """Resolve the persona name passed to the sales LLM prompts.
+
+    Joins the configurable first/last name (already used by the HITL bot
+    identity) so the sales persona is the same human face the customer
+    sees elsewhere.
+    """
+    first, last = _effective_bot_persona()
+    return f"{first} {last}".strip() if last else first
+
+
+# Epic 12 story 12.03: construct the SalesPersonaAnswerer eagerly so the
+# `sales_conversation_state` table is bootstrapped at startup. The answerer
+# is intentionally NOT inserted into `answer_pipeline` here — story 12.09
+# owns the pipeline wiring. Construction is unconditional; the always-on
+# activation gate inside the answerer handles dormancy.
+sales_state_repository = SalesStateRepository(db_path=settings.sales_db_path)
+sales_persona_answerer = SalesPersonaAnswerer(
+    state_repo=sales_state_repository,
+    # ServicesRepository ships in Story 12.01; until that lands the gate
+    # never consults it (sales is always-on). Pass a stub conforming to
+    # the protocol so the constructor signature stays stable for 12.04+.
+    services_repo=_SalesServicesRepoStub(),
+    openrouter=openrouter_client,
+    normalizer=get_russian_normalizer(),
+    clock=lambda: datetime.now(UTC),
+    bot_persona_getter=_effective_sales_persona_name,
+)
 
 
 answer_pipeline = AnswerPipeline(

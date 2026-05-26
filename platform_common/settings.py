@@ -92,6 +92,7 @@ class AppSettings(BaseSettings):
     faster_whisper_cache_dir: str = "/app/.cache/whisper"
     projects_db_path: str = ".data/semantaix_projects.db"
     operators_db_path: str = ".data/semantaix_operators.db"
+    sales_db_path: str = ".data/semantaix_sales.db"
     admin_session_db_path: str = ".data/semantaix_admin_sessions.db"
     admin_telegram_username: str = "@ajdevy"
     admin_login_code_ttl_seconds: int = 300
