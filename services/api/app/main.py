@@ -147,6 +147,11 @@ from services.api.app.sales.followup_queue_repository import (
     FollowupRow,
 )
 from services.api.app.sales.sales_persona_answerer import SalesPersonaAnswerer
+from services.api.app.sales.services_repository import (
+    ServiceAlreadyExists,
+    ServiceNotFound,
+    ServicesRepository,
+)
 from services.api.app.sales.state_repository import (
     StateRepository as SalesStateRepository,
 )
@@ -412,18 +417,6 @@ def _effective_bot_persona() -> tuple[str, str]:
     )
 
 
-class _SalesServicesRepoStub:
-    """Placeholder until Story 12.01's ServicesRepository ships.
-
-    The Story 12.03 activation gate is always-on and never consults
-    `count_active`; the stub exists only to satisfy the constructor's
-    typed dependency without coupling 12.03 to 12.01's full surface.
-    """
-
-    def count_active(self, *, project_id: int) -> int:
-        return 0
-
-
 def _effective_sales_persona_name() -> str:
     """Resolve the persona name passed to the sales LLM prompts.
 
@@ -441,15 +434,13 @@ def _effective_sales_persona_name() -> str:
 # owns the pipeline wiring. Construction is unconditional; the always-on
 # activation gate inside the answerer handles dormancy.
 sales_state_repository = SalesStateRepository(db_path=settings.sales_db_path)
+sales_services_repository = ServicesRepository(db_path=settings.sales_db_path)
 sales_followup_repository = FollowupQueueRepository(
     db_path=settings.sales_db_path
 )
 sales_persona_answerer = SalesPersonaAnswerer(
     state_repo=sales_state_repository,
-    # ServicesRepository ships in Story 12.01; until that lands the gate
-    # never consults it (sales is always-on). Pass a stub conforming to
-    # the protocol so the constructor signature stays stable for 12.04+.
-    services_repo=_SalesServicesRepoStub(),
+    services_repo=sales_services_repository,
     openrouter=openrouter_client,
     normalizer=get_russian_normalizer(),
     clock=lambda: datetime.now(UTC),
@@ -2293,6 +2284,111 @@ def _analysis_outcome_to_dict(outcome: AnalysisOutcome) -> dict[str, object]:
         "material_id": outcome.material_id,
         "reason": outcome.reason,
     }
+
+
+class SalesServiceCreateRequest(BaseModel):
+    project_id: int
+    name: str
+    description_md: str | None = None
+    tags: list[str] | None = None
+
+
+def _sales_service_to_dict(service) -> dict[str, object]:
+    return {
+        "id": service.id,
+        "project_id": service.project_id,
+        "name": service.name,
+        "description_md": service.description_md,
+        "tags": service.tags,
+        "is_active": service.is_active,
+    }
+
+
+def _sales_state_row_to_dict(row: dict) -> dict[str, object]:
+    """Curated projection of a `StateRepository` row for the API response.
+
+    Explicitly enumerates only the keys we want on the wire so a future
+    column added to the row dict (e.g. a token-bearing field) cannot
+    silently leak through.
+    """
+    last_customer = row.get("last_customer_msg_at")
+    last_bot = row.get("last_bot_msg_at")
+    return {
+        "chat_id": row["chat_id"],
+        "project_id": row["project_id"],
+        "current_stage": row["current_stage"],
+        "collected_intent": row.get("collected_intent") or {},
+        "last_proposal": row.get("last_proposal"),
+        "last_customer_msg_at": (
+            last_customer.isoformat() if last_customer is not None else None
+        ),
+        "last_bot_msg_at": (
+            last_bot.isoformat() if last_bot is not None else None
+        ),
+    }
+
+
+@app.post("/sales/services")
+async def sales_services_add(
+    request: SalesServiceCreateRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    clean_name = (request.name or "").strip()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="invalid_service_name")
+    try:
+        service_id = await asyncio.to_thread(
+            sales_services_repository.add,
+            project_id=request.project_id,
+            name=clean_name,
+            description_md=request.description_md,
+            tags=request.tags,
+            now=datetime.now(UTC),
+        )
+    except ServiceAlreadyExists as exc:
+        raise HTTPException(
+            status_code=409, detail="service_already_exists"
+        ) from exc
+    return {"id": service_id}
+
+
+@app.get("/sales/services")
+async def sales_services_list(
+    project_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    services = await asyncio.to_thread(
+        sales_services_repository.list_active, project_id=project_id
+    )
+    return {"services": [_sales_service_to_dict(s) for s in services]}
+
+
+@app.delete("/sales/services/{service_id}")
+async def sales_services_delete(
+    service_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    try:
+        await asyncio.to_thread(
+            sales_services_repository.soft_delete, service_id=service_id
+        )
+    except ServiceNotFound as exc:
+        raise HTTPException(status_code=404, detail="service_not_found") from exc
+    return {"ok": True}
+
+
+@app.get("/sales/state")
+async def sales_state_list(
+    project_id: int,
+    chat_id: int | None = None,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    rows = await asyncio.to_thread(
+        sales_state_repository.list_active,
+        project_id=project_id,
+        chat_id=chat_id,
+    )
+    return {"states": [_sales_state_row_to_dict(row) for row in rows]}
 
 
 @app.post("/sales/materials/analyze-kb-file")

@@ -52,8 +52,10 @@ def test_effective_sales_persona_name_uses_first_only_when_last_empty(
     assert main._effective_sales_persona_name() == "Анна"
 
 
-def test_sales_services_repo_stub_returns_zero() -> None:
-    """The stub satisfies the constructor protocol but never gates the
-    answerer — calling it just returns 0 until story 12.01 lands."""
-    stub = main._SalesServicesRepoStub()
-    assert stub.count_active(project_id=1) == 0
+def test_sales_services_repository_constructed() -> None:
+    """Story 12.02 replaces the 12.03 stub with the real
+    ``ServicesRepository`` so the answerer + endpoints share the same
+    backing table from boot."""
+    from services.api.app.sales.services_repository import ServicesRepository
+
+    assert isinstance(main.sales_services_repository, ServicesRepository)
