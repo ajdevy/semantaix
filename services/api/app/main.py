@@ -140,7 +140,11 @@ from services.api.app.sales.client_materials_analyzer import (
     ClientMaterialsAnalyzer,
 )
 from services.api.app.sales.client_materials_repository import (
+    ClientMaterial,
     ClientMaterialsRepository,
+)
+from services.api.app.sales.client_materials_selector import (
+    ClientMaterialsSelector,
 )
 from services.api.app.sales.followup_cancel_hook import maybe_cancel
 from services.api.app.sales.followup_fire_handler import FollowupFireHandler
@@ -186,7 +190,10 @@ from services.api.app.services_nl_ops import (
 from services.api.app.services_nl_ops import (
     NlOpSessionNotPending as ServicesNlSessionNotPending,
 )
-from services.api.app.telegram_bot_sender import TelegramBotSender
+from services.api.app.telegram_bot_sender import (
+    TelegramBotSender,
+    TelegramMediaSendError,
+)
 from services.api.app.telegram_notifier import TelegramIncidentNotifier
 from services.api.app.trace_corrections import (
     BRANCH_MODERATION,
@@ -455,6 +462,40 @@ sales_services_repository = ServicesRepository(db_path=settings.sales_db_path)
 sales_followup_repository = FollowupQueueRepository(
     db_path=settings.sales_db_path
 )
+client_materials_repository = ClientMaterialsRepository(
+    db_path=settings.sales_db_path
+)
+client_materials_selector = ClientMaterialsSelector(
+    repo=client_materials_repository
+)
+
+
+async def _in_process_material_dispatcher(
+    *,
+    chat_id: int,
+    material_id: int,
+    trace_id: str | None,
+    caption_override: str | None = None,
+) -> dict[str, object]:
+    """Story 12.05 — call ``POST /sales/dispatch/material`` in-process.
+
+    The sales answerer threads the trace_id through so both the textual
+    pitch and the dispatch log land on the same ``answer_traces`` row.
+    Internally calls :func:`sales_dispatch_material` directly so we don't
+    pay the HTTP round-trip when both sides live in the api service.
+    """
+    request = SalesMaterialDispatchRequest(
+        chat_id=chat_id,
+        material_id=material_id,
+        caption_override=caption_override,
+        trace_id=trace_id,
+    )
+    return await sales_dispatch_material(
+        request=request,
+        _="internal",
+    )
+
+
 sales_persona_answerer = SalesPersonaAnswerer(
     state_repo=sales_state_repository,
     services_repo=sales_services_repository,
@@ -463,10 +504,8 @@ sales_persona_answerer = SalesPersonaAnswerer(
     clock=lambda: datetime.now(UTC),
     bot_persona_getter=_effective_sales_persona_name,
     followup_repo=sales_followup_repository,
-)
-
-client_materials_repository = ClientMaterialsRepository(
-    db_path=settings.sales_db_path
+    material_selector=client_materials_selector,
+    material_dispatcher=_in_process_material_dispatcher,
 )
 client_materials_analyzer = ClientMaterialsAnalyzer(
     openrouter=openrouter_client,
@@ -2682,6 +2721,198 @@ async def sales_services_extract_from_kb_file(
         now=effective_now,
     )
     return _extraction_outcome_to_dict(outcome)
+
+
+_MATERIAL_CAPTION_MAX_CHARS = 200
+_MATERIAL_ALLOWED_KINDS: frozenset[str] = frozenset(
+    {"video", "photo", "pdf", "document"}
+)
+
+
+class SalesMaterialCreateRequest(BaseModel):
+    project_id: int
+    kind: str
+    local_path: str
+    byte_size: int
+    duration_seconds: int | None = None
+    caption: str | None = None
+    tags: list[str] | None = None
+    telegram_file_id: str | None = None
+    source_operator_file_id: str | None = None
+
+
+class SalesMaterialDispatchRequest(BaseModel):
+    chat_id: int
+    material_id: int
+    caption_override: str | None = None
+    trace_id: str | None = None
+
+
+def _client_material_to_dict(row: ClientMaterial) -> dict[str, object]:
+    return {
+        "id": row.id,
+        "project_id": row.project_id,
+        "kind": row.kind,
+        "local_path": row.local_path,
+        "byte_size": row.byte_size,
+        "duration_seconds": row.duration_seconds,
+        "caption": row.caption,
+        "tags": row.tags,
+        "telegram_file_id": row.telegram_file_id,
+        "source_operator_file_id": row.source_operator_file_id,
+        "is_active": row.is_active,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _validate_material_caption(caption: str | None) -> None:
+    if caption is not None and len(caption) > _MATERIAL_CAPTION_MAX_CHARS:
+        raise HTTPException(status_code=400, detail="caption_too_long")
+
+
+@app.post("/sales/materials")
+async def sales_materials_add(
+    request: SalesMaterialCreateRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    if request.kind not in _MATERIAL_ALLOWED_KINDS:
+        raise HTTPException(status_code=400, detail="invalid_kind")
+    _validate_material_caption(request.caption)
+    material_id = await asyncio.to_thread(
+        client_materials_repository.add,
+        project_id=request.project_id,
+        kind=request.kind,
+        local_path=request.local_path,
+        byte_size=request.byte_size,
+        duration_seconds=request.duration_seconds,
+        caption=request.caption,
+        tags=request.tags,
+        telegram_file_id=request.telegram_file_id,
+        source_operator_file_id=request.source_operator_file_id,
+        now=datetime.now(UTC),
+    )
+    return {"id": material_id}
+
+
+@app.get("/sales/materials")
+async def sales_materials_list(
+    project_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    rows = await asyncio.to_thread(
+        client_materials_repository.list_active, project_id=project_id
+    )
+    return {"materials": [_client_material_to_dict(row) for row in rows]}
+
+
+@app.delete("/sales/materials/{material_id}")
+async def sales_materials_delete(
+    material_id: int,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    row = await asyncio.to_thread(
+        client_materials_repository.get, material_id=material_id
+    )
+    if row is None or not row.is_active:
+        raise HTTPException(status_code=404, detail="material_not_found")
+    await asyncio.to_thread(
+        client_materials_repository.soft_delete, material_id=material_id
+    )
+    return {"ok": True}
+
+
+_DISPATCH_METHOD_BY_KIND: dict[str, str] = {
+    "video": "send_video",
+    "photo": "send_photo",
+    "pdf": "send_document",
+    "document": "send_document",
+}
+
+
+@app.post("/sales/dispatch/material")
+async def sales_dispatch_material(
+    request: SalesMaterialDispatchRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    """Send a registered client material to a Telegram chat.
+
+    Prefers the cached ``telegram_file_id`` so subsequent sends never read
+    from disk; on a fresh upload the returned ``file_id`` is cached on the
+    row via :meth:`ClientMaterialsRepository.update_telegram_file_id`.
+
+    Telegram-side failures resolve to ``{ok: false, error_reason}`` so the
+    caller (the answerer's media moment) can fall back to a textual reply
+    within the same turn. The ``telegram_file_id`` is never logged.
+    """
+    _validate_material_caption(request.caption_override)
+    row = await asyncio.to_thread(
+        client_materials_repository.get, material_id=request.material_id
+    )
+    if row is None or not row.is_active:
+        raise HTTPException(status_code=404, detail="material_not_found")
+
+    method_name = _DISPATCH_METHOD_BY_KIND.get(row.kind)
+    if method_name is None:
+        raise HTTPException(status_code=400, detail="invalid_kind")
+
+    caption = (
+        request.caption_override
+        if request.caption_override is not None
+        else row.caption
+    )
+    send_method = getattr(telegram_bot_sender, method_name)
+    has_cached_id = row.telegram_file_id is not None
+    kwargs: dict[str, object] = {"chat_id": request.chat_id}
+    if caption is not None:
+        kwargs["caption"] = caption
+    if has_cached_id:
+        kwargs["file_id"] = row.telegram_file_id
+    else:
+        kwargs["local_path"] = Path(row.local_path)
+
+    try:
+        result = await send_method(**kwargs)
+    except TelegramMediaSendError as exc:
+        # NOTE: never log ``exc.description`` — Telegram error descriptions can
+        # echo the ``file_id`` back to us, which would violate the Story 12.05
+        # 'never log telegram_file_id' exit criterion.
+        logger.warning(
+            "sales_material_dispatch_failed",
+            extra={
+                "trace_id": request.trace_id,
+                "material_id": row.id,
+                "kind": row.kind,
+                "reason": exc.reason,
+                "cached_file_id_used": has_cached_id,
+            },
+        )
+        return {"ok": False, "error_reason": exc.reason}
+
+    returned_file_id = result.get("telegram_file_id")
+    if not has_cached_id and isinstance(returned_file_id, str) and returned_file_id:
+        await asyncio.to_thread(
+            client_materials_repository.update_telegram_file_id,
+            material_id=row.id,
+            telegram_file_id=returned_file_id,
+        )
+        cached_now = True
+    else:
+        cached_now = False
+    logger.info(
+        "sales_material_dispatched",
+        extra={
+            "trace_id": request.trace_id,
+            "material_id": row.id,
+            "kind": row.kind,
+            "telegram_file_id_cached_now": cached_now,
+            "used_cached_file_id": has_cached_id,
+        },
+    )
+    return {
+        "ok": True,
+        "telegram_file_id_cached": has_cached_id,
+    }
 
 
 @app.post("/rag/ingest")

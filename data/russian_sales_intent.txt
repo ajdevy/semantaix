@@ -57,3 +57,10 @@
 объясните
 расскажите про
 расскажите о
+# Story 12.05 — equipment-question triggers so the funnel can detect a
+# customer asking what to bring or wear and dispatch the equipment gallery.
+снаряжение
+экипировка
+шлем
+одежда
+что нужно

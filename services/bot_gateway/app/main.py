@@ -20,6 +20,9 @@ from services.bot_gateway.app.api_client import ApiClient, ApiError
 from services.bot_gateway.app.calendar_commands import handle_calendar_command
 from services.bot_gateway.app.kb_intent import KbIntent, detect_kb_intent
 from services.bot_gateway.app.kb_session import OperatorKbSessionRepository
+from services.bot_gateway.app.material_command_dispatch import (
+    handle_material_command,
+)
 from services.bot_gateway.app.media_group_buffer import (
     MediaGroupBuffer,
 )
@@ -610,6 +613,22 @@ def _kb_attachment_count_word(count: int) -> str:
     if 2 <= count <= 4:
         return "файла"
     return "файлов"
+
+
+def _material_downloader_factory(storage_dir: Path) -> TelegramFileDownloader:
+    """Construct a :class:`TelegramFileDownloader` rooted at the per-project
+    sales materials subdir; the ``/material`` handler passes
+    ``<storage_root>/<project_id>/`` so files land under
+    ``.data/sales_materials/<project_id>/<file>`` (spec exit criterion).
+    Reuses the same Telegram fetch path as ``/kb_add``.
+    """
+    return TelegramFileDownloader(
+        bot_token=settings.telegram_bot_token,
+        storage_dir=storage_dir,
+        max_bytes=settings.operator_upload_max_bytes,
+        base_url=settings.telegram_bot_api_base_url,
+        local_mode=settings.telegram_bot_api_local_mode,
+    )
 
 
 async def _process_operator_upload(
@@ -2186,6 +2205,26 @@ async def _process_telegram_update(
             trace_id=trace_id,
             result=sales_command_result,
             fallback="sales_command",
+        )
+        return response
+
+    material_command_result = await handle_material_command(
+        normalized=normalized,
+        api_client=api_client,
+        send_dm=_send_dm,
+        primary_operator_username=_effective_operator_username(),
+        admin_username=settings.hitl_config_admin_username,
+        internal_token=settings.internal_service_token or "",
+        downloader_factory=_material_downloader_factory,
+        storage_root=Path(settings.sales_materials_storage_dir),
+    )
+    if material_command_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(material_command_result)
+        _log_routed(
+            trace_id=trace_id,
+            result=material_command_result,
+            fallback="material_command",
         )
         return response
 
