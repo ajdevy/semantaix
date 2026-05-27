@@ -1,11 +1,10 @@
-"""Minimal `StateRepository` for SalesPersonaAnswerer (Story 12.03).
+"""`StateRepository` for the sales persona answerer.
 
-Story 12.01 owns the canonical sales DB schema (4 tables + indexes); this
-module ships only what 12.03's answerer needs — the `sales_conversation_state`
-table with idempotent bootstrap, `get`, and `upsert`. Later stories (and the
-broader Story 12.01 PR) will add `transition_stage`, `mark_*`, `list_active`,
-plus the other three repositories. Keeping the surface tight here makes 12.03
-mergeable in isolation.
+Owns the ``sales_conversation_state`` table in ``.data/semantaix_sales.db``:
+idempotent bootstrap, ``get`` / ``upsert`` round-trip, atomic ``transition_stage``
+(``StateNotFound`` when the row is missing), ``mark_customer_msg`` /
+``mark_bot_msg`` timestamp-only updates, and ``list_active`` for the
+``/sales_state`` operator command.
 
 Sync ``sqlite3`` per the project-context rule; callers dispatch via
 ``asyncio.to_thread`` from the async answerer.
@@ -18,6 +17,14 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+
+class StateNotFound(Exception):
+    """Raised when a state-mutation method targets a missing ``chat_id``.
+
+    ``args[0]`` is the offending ``chat_id`` so callers can echo it in
+    debug logs without re-parsing the message.
+    """
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -206,3 +213,47 @@ class StateRepository:
                     _format_now(now),
                 ),
             )
+
+    def transition_stage(
+        self,
+        *,
+        chat_id: int,
+        new_stage: str,
+        now: datetime,
+    ) -> None:
+        timestamp = _format_now(now)
+        with _connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE sales_conversation_state
+                   SET current_stage = ?, updated_at = ?
+                 WHERE chat_id = ?
+                """,
+                (new_stage, timestamp, int(chat_id)),
+            )
+            if cursor.rowcount == 0:
+                raise StateNotFound(int(chat_id))
+
+    def mark_customer_msg(self, *, chat_id: int, now: datetime) -> None:
+        self._touch_timestamp(
+            chat_id=chat_id, column="last_customer_msg_at", now=now
+        )
+
+    def mark_bot_msg(self, *, chat_id: int, now: datetime) -> None:
+        self._touch_timestamp(
+            chat_id=chat_id, column="last_bot_msg_at", now=now
+        )
+
+    def _touch_timestamp(
+        self, *, chat_id: int, column: str, now: datetime
+    ) -> None:
+        timestamp = _format_now(now)
+        with _connect(self.db_path) as connection:
+            cursor = connection.execute(
+                f"UPDATE sales_conversation_state "
+                f"SET {column} = ?, updated_at = ? "
+                f"WHERE chat_id = ?",
+                (timestamp, timestamp, int(chat_id)),
+            )
+            if cursor.rowcount == 0:
+                raise StateNotFound(int(chat_id))
