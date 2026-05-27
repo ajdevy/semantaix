@@ -73,6 +73,7 @@ HITL_REASON_PROPOSAL_DRIFT = "sales_proposal_drift"
 HITL_REASON_PROPOSAL_FAILED = "sales_proposal_failed"
 HITL_REASON_CLOSING_HANDOFF = "sales_closing_handoff"
 HITL_REASON_PRICE_UNKNOWN = "price_unknown"
+HITL_REASON_EMPTY_CATALOG = "catalog_empty"
 
 # Customer-facing Russian copy for the proposing / closing branches. Kept
 # inline as named constants — short, fixed strings, no LLM in the loop for
@@ -82,6 +83,7 @@ PROPOSAL_FALLBACK_UNAVAILABLE = "Уточню свободные даты и с�
 PROPOSAL_AMBIGUOUS_SERVICE_CLARIFIER = "На каком туре остановимся?"
 CLOSING_HANDOFF_LINE = "Передам коллегам для подтверждения, на связи."
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
+EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
 
 _HANDLED_STAGES: frozenset[str] = frozenset(
     {
@@ -419,6 +421,16 @@ class SalesPersonaAnswerer:
                 },
             )
             return _skip("llm_schema_violation")
+        except Exception as exc:  # defensive — LLM transport failure
+            logger.warning(
+                "sales_llm_transport_error",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "stage": STAGE_NEW,
+                    "error": repr(exc),
+                },
+            )
+            return _skip("llm_transport_error")
 
         merged = intent_merge(Intent(), extracted)
         # Greeting always transitions into scoping. Even if the customer
@@ -480,6 +492,16 @@ class SalesPersonaAnswerer:
                 },
             )
             return _skip("llm_schema_violation")
+        except Exception as exc:  # defensive — LLM transport failure
+            logger.warning(
+                "sales_llm_transport_error",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "stage": STAGE_SCOPING,
+                    "error": repr(exc),
+                },
+            )
+            return _skip("llm_transport_error")
 
         merged = intent_merge(existing_intent, extracted)
         stage_after = STAGE_PITCHING if merged.is_complete() else STAGE_SCOPING
@@ -558,15 +580,29 @@ class SalesPersonaAnswerer:
             for row in services
             if getattr(row, "name", None) and row.name.strip()
         ]
+        current_stage = str(state.get("current_stage") or "")
         if not active_names:
             logger.info(
                 "sales_catalog_ask_empty",
                 extra={
                     "trace_id": ctx.trace_id,
                     "project_id": project_id,
+                    "hitl_reason": HITL_REASON_EMPTY_CATALOG,
                 },
             )
-            return _skip("no_services")
+            return AnswerResult(
+                handled=True,
+                text=EMPTY_CATALOG_ESCALATION_LINE,
+                response_mode=RESPONSE_MODE_SALES_ESCALATION,
+                metadata={
+                    "answerer": NAME,
+                    "stage_before": current_stage,
+                    "stage_after": current_stage,
+                    "sales_turn_kind": "catalog_empty",
+                    "escalate": True,
+                    "hitl_reason": HITL_REASON_EMPTY_CATALOG,
+                },
+            )
 
         names_block = "\n".join(f"• {name}" for name in active_names)
         text = _CATALOG_PROMPT_TEMPLATE.format(names_block=names_block).strip()
@@ -1414,8 +1450,10 @@ class SalesPersonaAnswerer:
 
 __all__ = [
     "CLOSING_HANDOFF_LINE",
+    "EMPTY_CATALOG_ESCALATION_LINE",
     "HITL_REASON_CALENDAR_DISABLED",
     "HITL_REASON_CLOSING_HANDOFF",
+    "HITL_REASON_EMPTY_CATALOG",
     "HITL_REASON_PRICE_UNKNOWN",
     "HITL_REASON_PROPOSAL_DRIFT",
     "HITL_REASON_PROPOSAL_FAILED",

@@ -1,8 +1,8 @@
-"""Story 12.03 — main.py wiring smoke tests.
+"""Story 12.03 + 12.09 — main.py wiring smoke tests.
 
 The SalesPersonaAnswerer is constructed at startup (so the DB schema is
-bootstrapped) but MUST NOT yet be inserted into the AnswerPipeline.
-Story 12.09 owns pipeline insertion.
+bootstrapped). Story 12.09 inserts it into the live ``AnswerPipeline``
+immediately before the calendar availability answerer.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ def test_sales_persona_answerer_constructed() -> None:
     assert main.sales_persona_answerer.name == "sales_persona"
 
 
-def test_sales_persona_answerer_not_in_pipeline() -> None:
-    """Story 12.09 will insert this; 12.03 must NOT."""
+def test_sales_persona_answerer_inserted_into_pipeline() -> None:
+    """Story 12.09 wires the answerer into the live pipeline."""
     pipeline_names = [a.name for a in main.answer_pipeline.answerers]
-    assert "sales_persona" not in pipeline_names
+    assert "sales_persona" in pipeline_names
 
 
 def test_sales_state_repository_bootstrap_creates_table() -> None:
