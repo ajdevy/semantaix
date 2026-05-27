@@ -147,6 +147,10 @@ from services.api.app.sales.followup_queue_repository import (
     FollowupRow,
 )
 from services.api.app.sales.sales_persona_answerer import SalesPersonaAnswerer
+from services.api.app.sales.services_extractor import (
+    ExtractionOutcome,
+    ServicesExtractor,
+)
 from services.api.app.sales.state_repository import (
     StateRepository as SalesStateRepository,
 )
@@ -464,6 +468,55 @@ client_materials_analyzer = ClientMaterialsAnalyzer(
     openrouter=openrouter_client,
     operator_files_view=operator_files_view,
     materials_repo=client_materials_repository,
+)
+
+
+class _ServicesExtractorRepoAdapter:
+    """Adapts the canonical ``project_services_repository`` (Epic-13) to the
+    ``ServicesExtractor``'s 12.01-shaped ``find_by_name`` + ``add`` surface.
+
+    The extractor uses ``find_by_name`` solely to soft-skip an existing
+    service — it never overwrites an operator's manually-crafted description
+    on file upload (per the 12.05c story rules). ``add`` for a brand-new
+    name maps to ``upsert`` on the underlying repo; since the SELECT-then-
+    INSERT path of ``upsert`` is only reached when the row does not exist,
+    the call cannot accidentally update a pre-existing row.
+    """
+
+    def __init__(self, *, repo: ProjectServiceRepository) -> None:
+        self._repo = repo
+
+    def find_by_name(
+        self, *, project_id: int, name: str
+    ) -> ProjectService | None:
+        return self._repo.get_by_name(project_id=project_id, name=name)
+
+    def add(
+        self,
+        *,
+        project_id: int,
+        name: str,
+        description_md: str | None,
+        tags: list[str],
+        now: datetime,
+    ) -> int:
+        # ``now`` is accepted for the 12.01-shaped protocol but the canonical
+        # repo stamps its own ``updated_at`` UTC string inside ``upsert``.
+        created = self._repo.upsert(
+            project_id=project_id,
+            name=name,
+            description=description_md,
+            tags=tags,
+        )
+        return created.id
+
+
+services_extractor = ServicesExtractor(
+    openrouter=openrouter_client,
+    operator_files_view=operator_files_view,
+    services_repo=_ServicesExtractorRepoAdapter(
+        repo=project_services_repository
+    ),
 )
 
 sales_followup_fire_handler = FollowupFireHandler(
@@ -2316,6 +2369,43 @@ async def sales_materials_analyze_kb_file(
         now=effective_now,
     )
     return _analysis_outcome_to_dict(outcome)
+
+
+def _extraction_outcome_to_dict(
+    outcome: ExtractionOutcome,
+) -> dict[str, object]:
+    return {
+        "added": [
+            {"service_id": item.service_id, "name": item.name}
+            for item in outcome.added
+        ],
+        "skipped_existing": list(outcome.skipped_existing),
+        "reason": outcome.reason,
+    }
+
+
+@app.post("/sales/services/extract-from-kb-file")
+async def sales_services_extract_from_kb_file(
+    request: SalesAnalyzeKbFileRequest,
+    _: Annotated[str, Depends(require_internal_token)] = "",
+) -> dict[str, object]:
+    """Run the 12.05c services extractor on a KB-uploaded file.
+
+    Called by the bot_gateway KB-upload hook in parallel with the 12.05b
+    materials analyzer. The endpoint always returns a 200 with the
+    ``ExtractionOutcome`` shape — the bot treats an empty ``added`` list
+    as "no extra message" and never surfaces an error from this endpoint.
+    The injected ``now`` is tz-aware UTC; tests may pass an explicit ISO
+    string for determinism.
+    """
+    parsed_now = _parse_optional_now(request.now)
+    effective_now = parsed_now if parsed_now is not None else datetime.now(UTC)
+    outcome = await services_extractor.extract_and_register(
+        project_id=request.project_id,
+        operator_file_short_id=request.operator_file_short_id,
+        now=effective_now,
+    )
+    return _extraction_outcome_to_dict(outcome)
 
 
 @app.post("/rag/ingest")
