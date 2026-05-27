@@ -99,6 +99,53 @@ class StateRepository:
             "last_bot_msg_at": _parse_iso(row["last_bot_msg_at"]),
         }
 
+    def list_active(
+        self,
+        *,
+        project_id: int,
+        chat_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return non-dormant state rows for the project.
+
+        Optional ``chat_id`` filters to a single chat server-side so the
+        ``/sales_state @customer`` command doesn't have to fetch + scan
+        the whole project. Each returned dict matches the shape :meth:`get`
+        returns so callers can render either path with one map function.
+        """
+        sql = (
+            "SELECT chat_id, project_id, current_stage, collected_intent_json, "
+            "last_proposal_json, last_customer_msg_at, last_bot_msg_at "
+            "FROM sales_conversation_state "
+            "WHERE project_id = ? AND current_stage != 'dormant'"
+        )
+        params: tuple[Any, ...] = (int(project_id),)
+        if chat_id is not None:
+            sql += " AND chat_id = ?"
+            params = (*params, int(chat_id))
+        sql += " ORDER BY chat_id ASC"
+        with _connect(self.db_path) as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [
+            {
+                "chat_id": int(row["chat_id"]),
+                "project_id": int(row["project_id"]),
+                "current_stage": str(row["current_stage"]),
+                "collected_intent": (
+                    json.loads(row["collected_intent_json"])
+                    if row["collected_intent_json"]
+                    else {}
+                ),
+                "last_proposal": (
+                    json.loads(row["last_proposal_json"])
+                    if row["last_proposal_json"]
+                    else None
+                ),
+                "last_customer_msg_at": _parse_iso(row["last_customer_msg_at"]),
+                "last_bot_msg_at": _parse_iso(row["last_bot_msg_at"]),
+            }
+            for row in rows
+        ]
+
     def upsert(
         self,
         *,
