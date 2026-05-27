@@ -1,8 +1,11 @@
-"""Catalog-ask aside tests for SalesPersonaAnswerer (Story 12.06).
+"""Catalog-ask aside tests for SalesPersonaAnswerer (Story 12.06 + 12.09).
 
 A mid-funnel "что у вас есть?" / "какие туры?" must list the active service
 names (operator-authored, verbatim) and preserve the customer's funnel state
-across the aside. Empty services → defensive `_skip(reason="no_services")`.
+across the aside. Story 12.09 extends the empty-catalog branch: instead of
+silently skipping, the bot speaks ``EMPTY_CATALOG_ESCALATION_LINE`` and
+escalates with ``hitl_reason='catalog_empty'`` — the always-on activation
+invariant means an empty-catalog project still gives an honest reply.
 """
 
 from __future__ import annotations
@@ -16,7 +19,12 @@ import pytest
 from services.api.app.answerers import AnswerContext
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.sales.intent import Intent
-from services.api.app.sales.sales_persona_answerer import SalesPersonaAnswerer
+from services.api.app.sales.sales_persona_answerer import (
+    EMPTY_CATALOG_ESCALATION_LINE,
+    HITL_REASON_EMPTY_CATALOG,
+    RESPONSE_MODE_SALES_ESCALATION,
+    SalesPersonaAnswerer,
+)
 
 
 class _FakeStateRepo:
@@ -170,7 +178,13 @@ async def test_catalog_ask_preserves_funnel_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_catalog_ask_empty_services_skips_no_services() -> None:
+async def test_catalog_ask_empty_services_escalates_with_fixed_line() -> None:
+    """Story 12.09: empty catalog → fixed Russian line + sales escalation.
+
+    The bot must give an honest "пока нет" answer (never the default ack)
+    and signal a HITL ticket via the metadata so the operator can fill the
+    catalog before the next customer.
+    """
     answerer, state_repo, openrouter, _ = _build(services=[])
     _seed_scoping_state(state_repo)
 
@@ -178,8 +192,13 @@ async def test_catalog_ask_empty_services_skips_no_services() -> None:
         question="Что у вас есть?", ctx=_ctx()
     )
 
-    assert result.handled is False
-    assert result.metadata.get("skip_reason") == "no_services"
+    assert result.handled is True
+    assert result.text == EMPTY_CATALOG_ESCALATION_LINE
+    assert result.response_mode == RESPONSE_MODE_SALES_ESCALATION
+    assert result.metadata.get("sales_turn_kind") == "catalog_empty"
+    assert result.metadata.get("hitl_reason") == HITL_REASON_EMPTY_CATALOG
+    assert result.metadata.get("escalate") is True
+    # No LLM call — the line is a fixed, operator-authored Russian copy.
     assert openrouter.calls == []
 
 

@@ -146,7 +146,10 @@ from services.api.app.sales.followup_queue_repository import (
     FollowupQueueRepository,
     FollowupRow,
 )
-from services.api.app.sales.sales_persona_answerer import SalesPersonaAnswerer
+from services.api.app.sales.sales_persona_answerer import (
+    RESPONSE_MODE_SALES_ESCALATION,
+    SalesPersonaAnswerer,
+)
 from services.api.app.sales.services_repository import (
     ServiceAlreadyExists,
     ServiceNotFound,
@@ -429,10 +432,11 @@ def _effective_sales_persona_name() -> str:
 
 
 # Epic 12 story 12.03: construct the SalesPersonaAnswerer eagerly so the
-# `sales_conversation_state` table is bootstrapped at startup. The answerer
-# is intentionally NOT inserted into `answer_pipeline` here — story 12.09
-# owns the pipeline wiring. Construction is unconditional; the always-on
-# activation gate inside the answerer handles dormancy.
+# `sales_conversation_state` table is bootstrapped at startup. Story 12.09
+# wires the answerer into `answer_pipeline` below, immediately BEFORE the
+# calendar availability answerer. Construction is unconditional; the
+# always-on activation gate inside the answerer (state row OR sales-intent
+# regex match) handles dormancy without consulting the services catalog.
 sales_state_repository = SalesStateRepository(db_path=settings.sales_db_path)
 sales_services_repository = ServicesRepository(db_path=settings.sales_db_path)
 sales_followup_repository = FollowupQueueRepository(
@@ -469,7 +473,14 @@ sales_followup_fire_handler = FollowupFireHandler(
 
 answer_pipeline = AnswerPipeline(
     [
-        # Calendar availability runs FIRST so an enabled project answers its own
+        # Story 12.09: SalesPersonaAnswerer runs BEFORE CalendarAvailabilityAnswerer
+        # so the sales funnel (greeting → scoping → pricing → proposing → closing)
+        # owns the turn before scheduling questions ever reach the calendar. The
+        # answerer's own activation gate (existing state OR sales-intent regex)
+        # keeps the dormant cost at one cheap repo read + one regex match for
+        # every non-sales inbound message.
+        sales_persona_answerer,
+        # Calendar availability runs next so an enabled project answers its own
         # scheduling questions before they ever reach RAG. A disabled project
         # (the default) is a cheap no-op skip, so this is a pure prepend with no
         # behaviour change when calendar is off.
@@ -1937,6 +1948,130 @@ async def _escalate_calendar_availability(
     }
 
 
+async def _dispatch_sales_escalation(
+    *,
+    request: InboundMessageRequest,
+    trace_id: str,
+    latency_ms: int,
+    pipeline_result,
+) -> dict[str, object]:
+    """Deliver the sales fixed-line + open a HITL ticket (story 12.09 wiring).
+
+    The sales answerer signals an escalation by returning
+    ``handled=True`` with ``response_mode='sales_escalation'`` and a
+    ``hitl_reason`` in its metadata. The customer receives the verbatim
+    fallback line; the operator picks up via the resulting HITL ticket
+    so unknown prices / drift / closing handoffs always reach a human.
+    """
+    metadata = pipeline_result.metadata
+    answer_text = pipeline_result.text or ""
+    hitl_reason = str(metadata.get("hitl_reason") or "sales_escalation")
+
+    delivered = True
+    if request.chat_id is not None:
+        delivered = await _safe_send_message(
+            chat_id=request.chat_id,
+            text=answer_text,
+            failure_summary="Inbound sales answer delivery failed",
+            failure_kind="inbound_delivery_failed",
+        )
+
+    active_ticket = (
+        hitl_ticket_repository.find_active_for_chat(request.chat_id)
+        if request.chat_id is not None
+        else None
+    )
+    if active_ticket is not None:
+        await _notify_hitl_operator_with_question(
+            ticket_id=active_ticket.id,
+            question=f"[follow-up] {request.text}",
+            customer_username=request.customer_username,
+        )
+        logger.info(
+            "sales_escalation_coalesced",
+            extra={
+                "trace_id": trace_id,
+                "chat_id": request.chat_id,
+                "ticket_id": active_ticket.id,
+                "hitl_reason": hitl_reason,
+                "sales_turn_kind": metadata.get("sales_turn_kind"),
+            },
+        )
+        persisted_trace_id = _persist_answer_trace(
+            trace_id=trace_id,
+            request_text=request.text,
+            response_mode=pipeline_result.response_mode or "sales_escalation",
+            guardrail_outcome="escalated",
+            guardrail_reasons=[],
+            guardrail_score=None,
+            retrieval=[],
+            latency_ms=latency_ms,
+            limitations=["awaiting_human_response", "coalesced_sales_followup"],
+            hitl_ticket_id=active_ticket.id,
+        )
+        return {
+            "delivered": delivered,
+            "escalated": True,
+            "response_mode": pipeline_result.response_mode,
+            "answer_text": answer_text,
+            "answerer": metadata.get("answerer"),
+            "hitl_ticket_id": active_ticket.id,
+            "hitl_reason": hitl_reason,
+            "trace_id": persisted_trace_id,
+            "coalesced": True,
+        }
+
+    ticket = hitl_ticket_repository.create(
+        conversation_ref=request.text[:120],
+        reason=hitl_reason,
+        target_chat_id=request.chat_id,
+    )
+    assignee = _pick_assignee_for_chat(request.chat_id)
+    hitl_ticket_repository.assign(
+        ticket_id=ticket.id,
+        operator_username=assignee,
+    )
+    logger.info(
+        "sales_escalation_ticket_created",
+        extra={
+            "trace_id": trace_id,
+            "chat_id": request.chat_id,
+            "ticket_id": ticket.id,
+            "hitl_reason": hitl_reason,
+            "operator_username": assignee,
+            "sales_turn_kind": metadata.get("sales_turn_kind"),
+        },
+    )
+    await _notify_hitl_operator_with_question(
+        ticket_id=ticket.id,
+        question=request.text,
+        customer_username=request.customer_username,
+    )
+    persisted_trace_id = _persist_answer_trace(
+        trace_id=trace_id,
+        request_text=request.text,
+        response_mode=pipeline_result.response_mode or "sales_escalation",
+        guardrail_outcome="escalated",
+        guardrail_reasons=[],
+        guardrail_score=None,
+        retrieval=[],
+        latency_ms=latency_ms,
+        limitations=["awaiting_human_response", "sales_escalation"],
+        hitl_ticket_id=ticket.id,
+    )
+    return {
+        "delivered": delivered,
+        "escalated": True,
+        "response_mode": pipeline_result.response_mode,
+        "answer_text": answer_text,
+        "answerer": metadata.get("answerer"),
+        "hitl_ticket_id": ticket.id,
+        "hitl_operator_username": assignee,
+        "hitl_reason": hitl_reason,
+        "trace_id": persisted_trace_id,
+    }
+
+
 @app.post("/conversations/inbound")
 async def conversations_inbound(request: InboundMessageRequest) -> dict[str, object]:
     if not request.text.strip():
@@ -2013,6 +2148,21 @@ async def conversations_inbound(request: InboundMessageRequest) -> dict[str, obj
             trace_id=trace_id,
             latency_ms=latency_ms,
             metadata=pipeline_result.metadata,
+        )
+
+    if (
+        pipeline_result.handled
+        and pipeline_result.response_mode == RESPONSE_MODE_SALES_ESCALATION
+    ):
+        # Sales answerer wants to deliver a fixed customer-facing line AND open
+        # a HITL ticket so the operator picks up the unknown price / drift /
+        # closing handoff. We deliver the line first, then create+notify the
+        # ticket using ``hitl_reason`` from the answerer metadata.
+        return await _dispatch_sales_escalation(
+            request=request,
+            trace_id=trace_id,
+            latency_ms=latency_ms,
+            pipeline_result=pipeline_result,
         )
 
     if pipeline_result.handled:
@@ -2270,6 +2420,27 @@ async def fire_followup(
         "sent": outcome.sent,
         "fallback_text_used": outcome.fallback_text_used,
     }
+
+
+@app.post("/sales/_dev/tick-followup-now")
+async def dev_tick_followup_now() -> dict[str, object]:
+    """Dev-only fast-forward: fire every currently-due follow-up row.
+
+    Story 12.09 uses this in ``scripts/epic12_signoff.sh`` to drive the
+    proactive nudge without manipulating the system clock. The endpoint
+    is exposed ONLY when ``Settings.app_env == "dev"``; any other env
+    returns 404 so a misconfigured production never accidentally
+    exposes an unauthenticated tick endpoint.
+    """
+    if settings.app_env != "dev":
+        raise HTTPException(status_code=404, detail="not_found")
+    rows = sales_followup_repository.due(now=datetime.now(UTC), limit=100)
+    fired = 0
+    for row in rows:
+        outcome = await sales_followup_fire_handler.fire(row)
+        if outcome.sent or outcome.fallback_text_used:
+            fired += 1
+    return {"fired": fired}
 
 
 class SalesAnalyzeKbFileRequest(BaseModel):
