@@ -29,11 +29,12 @@ import re
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from services.api.app.answerers import AnswerContext, AnswerResult
 from services.api.app.rag import RagChunk
 from services.api.app.sales.acceptance import is_acceptance
+from services.api.app.sales.client_materials_repository import ClientMaterial
 from services.api.app.sales.date_parser import parse_russian_date_span
 from services.api.app.sales.date_proposer import (
     NO_PROPOSAL_AMBIGUOUS_SERVICE,
@@ -84,6 +85,31 @@ PROPOSAL_AMBIGUOUS_SERVICE_CLARIFIER = "На каком туре останов�
 CLOSING_HANDOFF_LINE = "Передам коллегам для подтверждения, на связи."
 PRICING_MISS_FALLBACK = "Уточню у коллег и сразу сообщу"
 EMPTY_CATALOG_ESCALATION_LINE = "Услуг пока нет. Уточню у коллег и сразу сообщу."
+# Story 12.05 — appended to the textual reply when a media dispatch failed
+# mid-turn so the customer never sees a silent bot.
+MATERIAL_DISPATCH_FALLBACK_LINE = (
+    "Видео/фото пришлю чуть позже — уточню у коллег."
+)
+EQUIPMENT_ACK_LINE = "Снаряжение подготовим, расскажу подробнее на месте."
+
+# Story 12.05 — equipment-question lemma triggers. Lowercase lemma roots
+# matched against ``RussianNormalizer.lemmas(question)``; any overlap fires
+# the equipment_gallery media moment.
+_EQUIPMENT_LEMMAS: frozenset[str] = frozenset(
+    {
+        "снаряжение",
+        "экипировка",
+        "шлем",
+        "одежда",
+        "одеваться",
+        "обуть",
+        "одеть",
+        "обувь",
+    }
+)
+_EQUIPMENT_PHRASES: tuple[tuple[str, ...], ...] = (
+    ("что", "нужно"),
+)
 
 _HANDLED_STAGES: frozenset[str] = frozenset(
     {
@@ -232,6 +258,19 @@ class _PriceLookup(Protocol):
     ) -> PriceFound | PriceMissing: ...
 
 
+class _MaterialSelector(Protocol):
+    def pick(
+        self,
+        *,
+        project_id: int,
+        intent_tags: list[str],
+        purpose: str,
+    ) -> ClientMaterial | None: ...
+
+
+MaterialDispatcher = Callable[..., Awaitable[dict[str, Any]]]
+
+
 def _skip(reason: str) -> AnswerResult:
     return AnswerResult(handled=False, metadata={"skip_reason": reason})
 
@@ -260,6 +299,40 @@ def _format_known_fields(intent: Intent) -> str:
 def _format_missing_fields(intent: Intent) -> str:
     missing = intent.missing_fields()
     return "\n".join(f"- {name}" for name in missing) if missing else "(все собраны)"
+
+
+def _is_equipment_ask(text: str, *, normalizer: _Normalizer) -> bool:
+    """True iff the customer is asking about gear / clothing / what to bring.
+
+    Two-pass match: any equipment lemma in the lemmatised text wins; failing
+    that, the multi-lemma "что нужно" phrase fires. Mirrors the structure of
+    ``turn_intent.classify_turn`` so the gate stays cheap.
+    """
+    if not text or not text.strip():
+        return False
+    lemmas = normalizer.lemmas(text)
+    if not lemmas:
+        return False
+    if _EQUIPMENT_LEMMAS & set(lemmas):
+        return True
+    lemma_set = set(lemmas)
+    for phrase_tokens in _EQUIPMENT_PHRASES:
+        phrase_lemmas = normalizer.lemmas(" ".join(phrase_tokens))
+        if phrase_lemmas and all(token in lemma_set for token in phrase_lemmas):
+            return True
+    return False
+
+
+def _intent_to_tags(intent: Intent) -> list[str]:
+    """Derive ``intent_tags`` for the material selector from the collected
+    intent. The output is intentionally small — only string-valued
+    ``difficulty`` is useful as a tag today (e.g. ``"начальный"``); future
+    extensions add per-service tags here without a separate signal.
+    """
+    out: list[str] = []
+    if isinstance(intent.difficulty, str) and intent.difficulty.strip():
+        out.append(intent.difficulty.strip().lower())
+    return out
 
 
 def _build_greeting_prompt(*, persona: str) -> str:
@@ -291,6 +364,8 @@ class SalesPersonaAnswerer:
         followup_repo: _FollowupRepo | None = None,
         date_proposer: _DateProposer | None = None,
         price_lookup: _PriceLookup | None = None,
+        material_selector: _MaterialSelector | None = None,
+        material_dispatcher: MaterialDispatcher | None = None,
     ) -> None:
         self._state_repo = state_repo
         self._services_repo = services_repo
@@ -303,6 +378,8 @@ class SalesPersonaAnswerer:
         self._followup_repo = followup_repo
         self._date_proposer = date_proposer
         self._price_lookup = price_lookup
+        self._material_selector = material_selector
+        self._material_dispatcher = material_dispatcher
 
     async def try_answer(
         self, *, question: str, ctx: AnswerContext
@@ -510,6 +587,20 @@ class SalesPersonaAnswerer:
             current_stage=stage_after,
             intent=merged,
         )
+        # Story 12.05 — scoping → pitching transition is the tour_preview
+        # media moment. The textual pitch (LLM `next_question`) is still the
+        # primary reply; the media dispatch is awaited so a failure can
+        # append a textual fallback within the same turn.
+        media_metadata: dict[str, Any] = {}
+        final_text = next_question
+        if stage_after == STAGE_PITCHING:
+            media_metadata, dispatch_fallback = await self._fire_media_moment(
+                ctx=ctx,
+                intent=merged,
+                purpose="tour_preview",
+            )
+            if dispatch_fallback:
+                final_text = f"{next_question}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
         logger.info(
             "sales_answerer_handled",
             extra={
@@ -525,11 +616,12 @@ class SalesPersonaAnswerer:
         )
         return AnswerResult(
             handled=True,
-            text=next_question,
+            text=final_text,
             metadata={
                 "answerer": NAME,
                 "stage_before": STAGE_SCOPING,
                 "stage_after": stage_after,
+                **media_metadata,
             },
         )
 
@@ -562,7 +654,129 @@ class SalesPersonaAnswerer:
             return await self._handle_pricing(
                 question=question, ctx=ctx, state=state
             )
+        if _is_equipment_ask(question, normalizer=self._normalizer):
+            return await self._handle_equipment_ask(
+                ctx=ctx, state=state
+            )
         return None
+
+    async def _handle_equipment_ask(
+        self,
+        *,
+        ctx: AnswerContext,
+        state: dict[str, Any],
+    ) -> AnswerResult:
+        """Acknowledge an equipment ask + dispatch the equipment_gallery."""
+        current_stage = str(state.get("current_stage") or "")
+        intent = Intent.from_dict(state.get("collected_intent") or {})
+        # Refresh `last_bot_msg_at` so the follow-up queue counts this turn.
+        await self._persist(
+            ctx=ctx, current_stage=current_stage, intent=intent
+        )
+        media_metadata, dispatch_fallback = await self._fire_media_moment(
+            ctx=ctx,
+            intent=intent,
+            purpose="equipment_gallery",
+        )
+        ack = EQUIPMENT_ACK_LINE
+        if dispatch_fallback:
+            ack = f"{ack}\n{MATERIAL_DISPATCH_FALLBACK_LINE}"
+        logger.info(
+            "sales_answerer_handled",
+            extra={
+                "trace_id": ctx.trace_id,
+                "stage_before": current_stage,
+                "stage_after": current_stage,
+                "sales_turn_kind": "equipment_ask",
+                **{
+                    k: v
+                    for k, v in media_metadata.items()
+                    if k != "answerer"
+                },
+            },
+        )
+        return AnswerResult(
+            handled=True,
+            text=ack,
+            metadata={
+                "answerer": NAME,
+                "stage_before": current_stage,
+                "stage_after": current_stage,
+                "sales_turn_kind": "equipment_ask",
+                **media_metadata,
+            },
+        )
+
+    async def _fire_media_moment(
+        self,
+        *,
+        ctx: AnswerContext,
+        intent: Intent,
+        purpose: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Pick + dispatch a client material for the given purpose.
+
+        Returns ``(metadata, dispatch_fallback)`` where ``metadata`` is the
+        dict to merge into the ``AnswerResult.metadata`` and
+        ``dispatch_fallback`` is ``True`` only when the dispatcher returned
+        ``ok=False`` — the caller appends a textual fallback line in that
+        case so the customer never sees a silent bot.
+        """
+        if self._material_selector is None or self._material_dispatcher is None:
+            return {}, False
+        project_id = int(ctx.project_id or 0)
+        intent_tags = _intent_to_tags(intent)
+        try:
+            material = self._material_selector.pick(
+                project_id=project_id,
+                intent_tags=intent_tags,
+                purpose=purpose,
+            )
+        except Exception as exc:  # defensive — never break the answer path
+            logger.warning(
+                "sales_material_pick_failed",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "purpose": purpose,
+                    "error": repr(exc),
+                },
+            )
+            return {}, False
+        if material is None:
+            return {
+                "sales_material_purpose": purpose,
+                "sales_material_picked": False,
+            }, False
+        try:
+            outcome = await self._material_dispatcher(
+                chat_id=int(ctx.chat_id),  # type: ignore[arg-type]
+                material_id=material.id,
+                trace_id=ctx.trace_id,
+                caption_override=None,
+            )
+        except Exception as exc:  # defensive — fall back to text
+            logger.warning(
+                "sales_material_dispatch_call_failed",
+                extra={
+                    "trace_id": ctx.trace_id,
+                    "purpose": purpose,
+                    "material_id": material.id,
+                    "error": repr(exc),
+                },
+            )
+            return {
+                "sales_material_purpose": purpose,
+                "sales_material_picked": True,
+                "sales_material_dispatched": False,
+                "sales_material_id": material.id,
+            }, True
+        dispatched_ok = bool(outcome.get("ok"))
+        return {
+            "sales_material_purpose": purpose,
+            "sales_material_picked": True,
+            "sales_material_dispatched": dispatched_ok,
+            "sales_material_id": material.id,
+        }, (not dispatched_ok)
 
     async def _handle_catalog_ask(
         self,
@@ -1451,6 +1665,7 @@ class SalesPersonaAnswerer:
 __all__ = [
     "CLOSING_HANDOFF_LINE",
     "EMPTY_CATALOG_ESCALATION_LINE",
+    "EQUIPMENT_ACK_LINE",
     "HITL_REASON_CALENDAR_DISABLED",
     "HITL_REASON_CLOSING_HANDOFF",
     "HITL_REASON_EMPTY_CATALOG",
@@ -1458,6 +1673,8 @@ __all__ = [
     "HITL_REASON_PROPOSAL_DRIFT",
     "HITL_REASON_PROPOSAL_FAILED",
     "LlmSchemaViolation",
+    "MATERIAL_DISPATCH_FALLBACK_LINE",
+    "MaterialDispatcher",
     "NAME",
     "PRICING_MISS_FALLBACK",
     "PROPOSAL_AMBIGUOUS_SERVICE_CLARIFIER",
@@ -1466,6 +1683,7 @@ __all__ = [
     "RESPONSE_MODE_SALES_ESCALATION",
     "STAGE_AWAITING_OPERATOR_PRICE",
     "STAGE_CLOSING",
+    "STAGE_PITCHING",
     "STAGE_PRICING",
     "STAGE_PROPOSING",
     "STAGE_SCOPING",

@@ -74,6 +74,9 @@ class AppSettings(BaseSettings):
     operator_upload_max_audio_seconds: int = 900
     operator_upload_pdf_ocr_max_pages: int = 50
     operator_upload_storage_dir: str = ".data/operator_uploads"
+    # Story 12.05 — registered sales materials live under this directory,
+    # one subfolder per project_id (e.g. ``.data/sales_materials/7/abc.mp4``).
+    sales_materials_storage_dir: str = ".data/sales_materials"
     operator_kb_intent_phrases_path: str = "data/russian_kb_intent_phrases.txt"
     operator_upload_api_timeout_seconds: int = 120
     operator_kb_session_ttl_seconds: int = 600

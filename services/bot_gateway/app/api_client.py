@@ -198,6 +198,93 @@ class ApiClient:
         _raise_for_status(response)
         return response.json()
 
+    async def add_sales_material(
+        self,
+        *,
+        project_id: int,
+        kind: str,
+        local_path: str,
+        byte_size: int,
+        internal_token: str,
+        duration_seconds: int | None = None,
+        caption: str | None = None,
+        tags: list[str] | None = None,
+        telegram_file_id: str | None = None,
+        source_operator_file_id: str | None = None,
+    ) -> dict:
+        """Story 12.05: register a client material row from the `/material` bot command."""
+        response = await self._bearer_post(
+            "/sales/materials",
+            internal_token=internal_token,
+            json={
+                "project_id": project_id,
+                "kind": kind,
+                "local_path": local_path,
+                "byte_size": byte_size,
+                "duration_seconds": duration_seconds,
+                "caption": caption,
+                "tags": tags,
+                "telegram_file_id": telegram_file_id,
+                "source_operator_file_id": source_operator_file_id,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def list_sales_materials(
+        self,
+        *,
+        project_id: int,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.05: list active client materials for a project."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.get(
+                f"{self._base_url}/sales/materials",
+                params={"project_id": project_id},
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
+    async def delete_sales_material(
+        self,
+        *,
+        material_id: int,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.05: soft-delete a client material row."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.delete(
+                f"{self._base_url}/sales/materials/{material_id}",
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
+    async def dispatch_sales_material(
+        self,
+        *,
+        chat_id: int,
+        material_id: int,
+        internal_token: str,
+        caption_override: str | None = None,
+        trace_id: str | None = None,
+    ) -> dict:
+        """Story 12.05: send a registered material to a customer chat."""
+        response = await self._bearer_post(
+            "/sales/dispatch/material",
+            internal_token=internal_token,
+            json={
+                "chat_id": chat_id,
+                "material_id": material_id,
+                "caption_override": caption_override,
+                "trace_id": trace_id,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
     async def analyze_kb_material(
         self,
         *,
