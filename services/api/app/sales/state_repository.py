@@ -1,11 +1,10 @@
-"""Minimal `StateRepository` for SalesPersonaAnswerer (Story 12.03).
+"""`StateRepository` for the sales persona answerer.
 
-Story 12.01 owns the canonical sales DB schema (4 tables + indexes); this
-module ships only what 12.03's answerer needs — the `sales_conversation_state`
-table with idempotent bootstrap, `get`, and `upsert`. Later stories (and the
-broader Story 12.01 PR) will add `transition_stage`, `mark_*`, `list_active`,
-plus the other three repositories. Keeping the surface tight here makes 12.03
-mergeable in isolation.
+Owns the ``sales_conversation_state`` table in ``.data/semantaix_sales.db``:
+idempotent bootstrap, ``get`` / ``upsert`` round-trip, atomic ``transition_stage``
+(``StateNotFound`` when the row is missing), ``mark_customer_msg`` /
+``mark_bot_msg`` timestamp-only updates, and ``list_active`` for the
+``/sales_state`` operator command.
 
 Sync ``sqlite3`` per the project-context rule; callers dispatch via
 ``asyncio.to_thread`` from the async answerer.
@@ -18,6 +17,14 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+
+class StateNotFound(Exception):
+    """Raised when a state-mutation method targets a missing ``chat_id``.
+
+    ``args[0]`` is the offending ``chat_id`` so callers can echo it in
+    debug logs without re-parsing the message.
+    """
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -99,6 +106,53 @@ class StateRepository:
             "last_bot_msg_at": _parse_iso(row["last_bot_msg_at"]),
         }
 
+    def list_active(
+        self,
+        *,
+        project_id: int,
+        chat_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return non-dormant state rows for the project.
+
+        Optional ``chat_id`` filters to a single chat server-side so the
+        ``/sales_state @customer`` command doesn't have to fetch + scan
+        the whole project. Each returned dict matches the shape :meth:`get`
+        returns so callers can render either path with one map function.
+        """
+        sql = (
+            "SELECT chat_id, project_id, current_stage, collected_intent_json, "
+            "last_proposal_json, last_customer_msg_at, last_bot_msg_at "
+            "FROM sales_conversation_state "
+            "WHERE project_id = ? AND current_stage != 'dormant'"
+        )
+        params: tuple[Any, ...] = (int(project_id),)
+        if chat_id is not None:
+            sql += " AND chat_id = ?"
+            params = (*params, int(chat_id))
+        sql += " ORDER BY chat_id ASC"
+        with _connect(self.db_path) as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [
+            {
+                "chat_id": int(row["chat_id"]),
+                "project_id": int(row["project_id"]),
+                "current_stage": str(row["current_stage"]),
+                "collected_intent": (
+                    json.loads(row["collected_intent_json"])
+                    if row["collected_intent_json"]
+                    else {}
+                ),
+                "last_proposal": (
+                    json.loads(row["last_proposal_json"])
+                    if row["last_proposal_json"]
+                    else None
+                ),
+                "last_customer_msg_at": _parse_iso(row["last_customer_msg_at"]),
+                "last_bot_msg_at": _parse_iso(row["last_bot_msg_at"]),
+            }
+            for row in rows
+        ]
+
     def upsert(
         self,
         *,
@@ -159,3 +213,47 @@ class StateRepository:
                     _format_now(now),
                 ),
             )
+
+    def transition_stage(
+        self,
+        *,
+        chat_id: int,
+        new_stage: str,
+        now: datetime,
+    ) -> None:
+        timestamp = _format_now(now)
+        with _connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE sales_conversation_state
+                   SET current_stage = ?, updated_at = ?
+                 WHERE chat_id = ?
+                """,
+                (new_stage, timestamp, int(chat_id)),
+            )
+            if cursor.rowcount == 0:
+                raise StateNotFound(int(chat_id))
+
+    def mark_customer_msg(self, *, chat_id: int, now: datetime) -> None:
+        self._touch_timestamp(
+            chat_id=chat_id, column="last_customer_msg_at", now=now
+        )
+
+    def mark_bot_msg(self, *, chat_id: int, now: datetime) -> None:
+        self._touch_timestamp(
+            chat_id=chat_id, column="last_bot_msg_at", now=now
+        )
+
+    def _touch_timestamp(
+        self, *, chat_id: int, column: str, now: datetime
+    ) -> None:
+        timestamp = _format_now(now)
+        with _connect(self.db_path) as connection:
+            cursor = connection.execute(
+                f"UPDATE sales_conversation_state "
+                f"SET {column} = ?, updated_at = ? "
+                f"WHERE chat_id = ?",
+                (timestamp, timestamp, int(chat_id)),
+            )
+            if cursor.rowcount == 0:
+                raise StateNotFound(int(chat_id))

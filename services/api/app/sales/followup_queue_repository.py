@@ -77,7 +77,7 @@ def init_schema(db_path: str) -> None:
         )
         connection.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_sales_followup_queue_status_fire
+            CREATE INDEX IF NOT EXISTS idx_followup_due
             ON sales_followup_queue (status, fire_at)
             """
         )

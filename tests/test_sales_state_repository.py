@@ -1,8 +1,7 @@
-"""Unit tests for the minimal `StateRepository` shipped in Story 12.03.
+"""Unit tests for `StateRepository`.
 
-The full 12.01 surface (transition_stage, mark_*, list_active, …) lands
-later — these tests cover the round-trip + invariants needed by the
-SalesPersonaAnswerer.
+Round-trip + invariants plus the Story 12.01 surface
+(transition_stage, mark_customer_msg, mark_bot_msg, StateNotFound).
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from services.api.app.sales.intent import Intent
-from services.api.app.sales.state_repository import StateRepository
+from services.api.app.sales.state_repository import StateNotFound, StateRepository
 
 _AWARE_NOW = datetime(2026, 5, 1, 13, 33, tzinfo=UTC)
 
@@ -166,3 +165,84 @@ def test_aware_non_utc_datetime_is_stored_as_utc(repo: StateRepository) -> None:
     stored = state["last_bot_msg_at"]
     assert stored is not None
     assert stored == aware.astimezone(UTC)
+
+
+def test_transition_stage_updates_current_stage(repo: StateRepository) -> None:
+    repo.upsert(
+        chat_id=7,
+        project_id=1,
+        current_stage="new",
+        collected_intent=Intent().to_dict(),
+        now=_AWARE_NOW,
+    )
+    later = datetime(2026, 5, 1, 14, 0, tzinfo=UTC)
+    repo.transition_stage(chat_id=7, new_stage="scoping", now=later)
+    state = repo.get(7)
+    assert state is not None
+    assert state["current_stage"] == "scoping"
+
+
+def test_transition_stage_missing_chat_raises(repo: StateRepository) -> None:
+    with pytest.raises(StateNotFound):
+        repo.transition_stage(chat_id=999, new_stage="scoping", now=_AWARE_NOW)
+
+
+def test_mark_customer_msg_updates_only_customer_timestamp(
+    repo: StateRepository,
+) -> None:
+    bot_time = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    repo.upsert(
+        chat_id=7,
+        project_id=1,
+        current_stage="scoping",
+        collected_intent=Intent().to_dict(),
+        now=_AWARE_NOW,
+        last_bot_msg_at=bot_time,
+    )
+    customer_time = datetime(2026, 5, 1, 13, 0, tzinfo=UTC)
+    repo.mark_customer_msg(chat_id=7, now=customer_time)
+    state = repo.get(7)
+    assert state is not None
+    assert state["last_customer_msg_at"] == customer_time
+    assert state["last_bot_msg_at"] == bot_time
+
+
+def test_mark_bot_msg_updates_only_bot_timestamp(repo: StateRepository) -> None:
+    customer_time = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    repo.upsert(
+        chat_id=7,
+        project_id=1,
+        current_stage="scoping",
+        collected_intent=Intent().to_dict(),
+        now=_AWARE_NOW,
+        last_customer_msg_at=customer_time,
+    )
+    bot_time = datetime(2026, 5, 1, 14, 0, tzinfo=UTC)
+    repo.mark_bot_msg(chat_id=7, now=bot_time)
+    state = repo.get(7)
+    assert state is not None
+    assert state["last_bot_msg_at"] == bot_time
+    assert state["last_customer_msg_at"] == customer_time
+
+
+def test_mark_customer_msg_missing_chat_raises(repo: StateRepository) -> None:
+    with pytest.raises(StateNotFound):
+        repo.mark_customer_msg(chat_id=999, now=_AWARE_NOW)
+
+
+def test_mark_bot_msg_missing_chat_raises(repo: StateRepository) -> None:
+    with pytest.raises(StateNotFound):
+        repo.mark_bot_msg(chat_id=999, now=_AWARE_NOW)
+
+
+def test_transition_stage_rejects_naive_datetime(repo: StateRepository) -> None:
+    repo.upsert(
+        chat_id=7,
+        project_id=1,
+        current_stage="new",
+        collected_intent=Intent().to_dict(),
+        now=_AWARE_NOW,
+    )
+    naive = datetime(2026, 5, 1, 14, 0)
+    with pytest.raises(ValueError):
+        repo.transition_stage(chat_id=7, new_stage="scoping", now=naive)

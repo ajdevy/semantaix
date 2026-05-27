@@ -1,8 +1,8 @@
-"""Story 12.03 — main.py wiring smoke tests.
+"""Story 12.03 + 12.09 — main.py wiring smoke tests.
 
 The SalesPersonaAnswerer is constructed at startup (so the DB schema is
-bootstrapped) but MUST NOT yet be inserted into the AnswerPipeline.
-Story 12.09 owns pipeline insertion.
+bootstrapped). Story 12.09 inserts it into the live ``AnswerPipeline``
+immediately before the calendar availability answerer.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ def test_sales_persona_answerer_constructed() -> None:
     assert main.sales_persona_answerer.name == "sales_persona"
 
 
-def test_sales_persona_answerer_not_in_pipeline() -> None:
-    """Story 12.09 will insert this; 12.03 must NOT."""
+def test_sales_persona_answerer_inserted_into_pipeline() -> None:
+    """Story 12.09 wires the answerer into the live pipeline."""
     pipeline_names = [a.name for a in main.answer_pipeline.answerers]
-    assert "sales_persona" not in pipeline_names
+    assert "sales_persona" in pipeline_names
 
 
 def test_sales_state_repository_bootstrap_creates_table() -> None:
@@ -52,8 +52,10 @@ def test_effective_sales_persona_name_uses_first_only_when_last_empty(
     assert main._effective_sales_persona_name() == "Анна"
 
 
-def test_sales_services_repo_stub_returns_zero() -> None:
-    """The stub satisfies the constructor protocol but never gates the
-    answerer — calling it just returns 0 until story 12.01 lands."""
-    stub = main._SalesServicesRepoStub()
-    assert stub.count_active(project_id=1) == 0
+def test_sales_services_repository_constructed() -> None:
+    """Story 12.02 replaces the 12.03 stub with the real
+    ``ServicesRepository`` so the answerer + endpoints share the same
+    backing table from boot."""
+    from services.api.app.sales.services_repository import ServicesRepository
+
+    assert isinstance(main.sales_services_repository, ServicesRepository)

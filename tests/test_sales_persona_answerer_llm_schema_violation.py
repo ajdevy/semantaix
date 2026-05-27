@@ -98,15 +98,23 @@ async def test_schema_violation_returns_skip_and_logs(caplog) -> None:
 
 
 @pytest.mark.asyncio
-async def test_llm_transport_error_propagates(caplog) -> None:
-    """A non-schema error (network / 5xx) should NOT be silently swallowed —
-    only structured schema violations are caught."""
+async def test_llm_transport_error_falls_through_to_pipeline(caplog) -> None:
+    """Story 12.09: with sales as an always-on pipeline stage, a transient
+    LLM transport failure must NOT crash the inbound pipeline. The answerer
+    logs the error and skips so the message reaches RAG / HITL like any
+    non-sales message — sales stays a thin gate, never a hard dependency."""
     openrouter = _RaisingOpenRouter(exc=RuntimeError("boom"))
-    answerer, _ = _build(openrouter=openrouter)
-    with pytest.raises(RuntimeError):
-        await answerer.try_answer(
+    answerer, state_repo = _build(openrouter=openrouter)
+    with caplog.at_level("WARNING"):
+        result = await answerer.try_answer(
             question="Хочу прокат квадроциклов", ctx=_ctx()
         )
+    assert result.handled is False
+    assert result.metadata.get("skip_reason") == "llm_transport_error"
+    assert any(
+        r.message == "sales_llm_transport_error" for r in caplog.records
+    )
+    assert state_repo.upsert_calls == []
 
 
 class _ScriptedOpenRouter:
@@ -117,6 +125,43 @@ class _ScriptedOpenRouter:
         self, *, system: str, user: str, model: str | None = None
     ) -> Any:
         return self._payload
+
+
+@pytest.mark.asyncio
+async def test_scoping_transport_error_falls_through_to_pipeline(caplog) -> None:
+    """Same defensive contract as greeting: scoping must not crash the
+    pipeline when the LLM transport is briefly unavailable."""
+    from services.api.app.sales.intent import Intent
+
+    state_repo = _FakeStateRepo()
+    state_repo.rows[7] = {
+        "chat_id": 7,
+        "project_id": 1,
+        "current_stage": "scoping",
+        "collected_intent": Intent(dates="1 мая").to_dict(),
+        "last_proposal": None,
+        "last_customer_msg_at": None,
+        "last_bot_msg_at": None,
+    }
+    openrouter = _RaisingOpenRouter(exc=RuntimeError("boom-scoping"))
+    answerer = SalesPersonaAnswerer(
+        state_repo=state_repo,
+        services_repo=_FakeServicesRepo(),
+        openrouter=openrouter,
+        normalizer=get_russian_normalizer(),
+        clock=_clock,
+        bot_persona_getter=lambda: "Николай",
+    )
+    with caplog.at_level("WARNING"):
+        result = await answerer.try_answer(question="нас 6", ctx=_ctx())
+    assert result.handled is False
+    assert result.metadata.get("skip_reason") == "llm_transport_error"
+    assert any(
+        getattr(r, "stage", None) == "scoping"
+        and r.message == "sales_llm_transport_error"
+        for r in caplog.records
+    )
+    assert state_repo.upsert_calls == []
 
 
 @pytest.mark.asyncio

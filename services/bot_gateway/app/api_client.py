@@ -115,6 +115,89 @@ class ApiClient:
             timeout_override=timeout_seconds,
         )
 
+    async def add_sales_service(
+        self,
+        *,
+        project_id: int,
+        name: str,
+        description_md: str | None,
+        tags: list[str] | None,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.02: create a row on the sales services catalog.
+
+        Returns ``{"id": int}`` on success. Raises :class:`ApiError` with
+        ``.detail == "service_already_exists"`` on a 409 duplicate so the
+        slash-command dispatcher can DM a one-line "уже есть" message.
+        """
+        response = await self._bearer_post(
+            "/sales/services",
+            internal_token=internal_token,
+            json={
+                "project_id": project_id,
+                "name": name,
+                "description_md": description_md,
+                "tags": tags,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
+    async def list_sales_services(
+        self,
+        *,
+        project_id: int,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.02: list active sales services for a project."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.get(
+                f"{self._base_url}/sales/services",
+                params={"project_id": project_id},
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
+    async def delete_sales_service(
+        self,
+        *,
+        service_id: int,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.02: soft-delete a sales service row."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.delete(
+                f"{self._base_url}/sales/services/{service_id}",
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
+    async def get_sales_state(
+        self,
+        *,
+        project_id: int,
+        chat_id: int | None,
+        internal_token: str,
+    ) -> dict:
+        """Story 12.02: read the sales-conversation state for a project.
+
+        Optional ``chat_id`` filters server-side so the ``/sales_state @name``
+        command doesn't have to fetch + scan the whole project.
+        """
+        params: dict[str, object] = {"project_id": project_id}
+        if chat_id is not None:
+            params["chat_id"] = chat_id
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.get(
+                f"{self._base_url}/sales/state",
+                params=params,
+                headers={"Authorization": f"Bearer {internal_token}"},
+            )
+        _raise_for_status(response)
+        return response.json()
+
     async def analyze_kb_material(
         self,
         *,
