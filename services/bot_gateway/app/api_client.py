@@ -223,6 +223,32 @@ class ApiClient:
         _raise_for_status(response)
         return response.json()
 
+    async def extract_kb_services(
+        self,
+        *,
+        project_id: int,
+        operator_file_short_id: str,
+        internal_token: str,
+    ) -> dict:
+        """Call the 12.05c services extractor endpoint.
+
+        Returns the api body ``{added: list, skipped_existing: list, reason:
+        str}``. Raises ``ApiError`` on a non-2xx response — the caller in the
+        bot KB-upload hook swallows the exception, logs it, and keeps the
+        KB ack visible (services-extract failure must never block the
+        materials hook or the bare KB ack).
+        """
+        response = await self._bearer_post(
+            "/sales/services/extract-from-kb-file",
+            internal_token=internal_token,
+            json={
+                "project_id": project_id,
+                "operator_file_short_id": operator_file_short_id,
+            },
+        )
+        _raise_for_status(response)
+        return response.json()
+
     async def initiate_calendar_connect(
         self,
         *,

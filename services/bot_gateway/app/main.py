@@ -822,12 +822,20 @@ async def _analyze_kb_uploads_for_materials(
     successes: list[dict],
     successes_meta: list[tuple[str | None, str | None]],
 ) -> list[str]:
-    """Story 12.05b hook: register each non-confidential KB upload as a
-    candidate ``client_materials`` row via the analyzer endpoint.
+    """Stories 12.05b + 12.05c hook: for each non-confidential KB upload,
+    fan out the materials analyzer + services extractor in parallel and
+    append the resulting lines to the KB-upload ack.
 
-    Returns the lines (zero or more) to append to the KB-upload ack. The
-    analyze call is silent to the operator on every failure path — KB
-    ingest succeeds regardless.
+    The fan-out is per-upload: each upload runs both hooks via
+    ``asyncio.gather`` so a single KB upload triggers at most two LLM
+    calls. Each hook is independent — an exception in one MUST NOT
+    block the other (each fan-out branch is wrapped in its own
+    try/except). Failures are silent to the operator and structured
+    logs carry only the short_id + project_id + error (never the file
+    text).
+
+    Per the story rules, output order is: materials line FIRST, then
+    services line. When both are empty the ack stays bare.
     """
     lines: list[str] = []
     token = settings.internal_service_token or ""
@@ -841,30 +849,92 @@ async def _analyze_kb_uploads_for_materials(
         project_id = item.get("project_id")
         if project_id is None:
             continue
-        try:
-            outcome = await api_client.analyze_kb_material(
+        materials_outcome, services_outcome = await asyncio.gather(
+            _safe_analyze_kb_material(
+                short_id=short_id,
                 project_id=int(project_id),
-                operator_file_short_id=short_id,
-                internal_token=token,
-            )
-        except Exception as exc:
-            logger.warning(
-                "sales_kb_material_analyze_failed",
-                extra={
-                    "operator_file_short_id": short_id,
-                    "project_id": project_id,
-                    "error": _redact_token(str(exc)),
-                },
-            )
-            continue
-        if outcome.get("registered"):
-            material_id = outcome.get("material_id")
+                token=token,
+            ),
+            _safe_extract_kb_services(
+                short_id=short_id,
+                project_id=int(project_id),
+                token=token,
+            ),
+        )
+        if materials_outcome is not None and materials_outcome.get("registered"):
+            material_id = materials_outcome.get("material_id")
             if material_id is not None:
                 lines.append(
                     f"📎 Добавлен в материалы для клиентов "
                     f"(id={material_id})."
                 )
+        if services_outcome is not None:
+            added = services_outcome.get("added") or []
+            names = [
+                str(entry.get("name"))
+                for entry in added
+                if isinstance(entry, dict)
+                and isinstance(entry.get("name"), str)
+                and entry.get("name").strip()
+            ]
+            if names:
+                lines.append(
+                    "📦 Услуги добавлены: " + ", ".join(names) + "."
+                )
     return lines
+
+
+async def _safe_analyze_kb_material(
+    *, short_id: str, project_id: int, token: str
+) -> dict | None:
+    """Run the 12.05b materials analyzer; swallow + log any error.
+
+    Returns ``None`` when the analyzer call raised — the caller treats
+    that as "no line to append" and keeps the bare KB ack visible.
+    """
+    try:
+        return await api_client.analyze_kb_material(
+            project_id=project_id,
+            operator_file_short_id=short_id,
+            internal_token=token,
+        )
+    except Exception as exc:
+        logger.warning(
+            "sales_kb_material_analyze_failed",
+            extra={
+                "operator_file_short_id": short_id,
+                "project_id": project_id,
+                "error": _redact_token(str(exc)),
+            },
+        )
+        return None
+
+
+async def _safe_extract_kb_services(
+    *, short_id: str, project_id: int, token: str
+) -> dict | None:
+    """Run the 12.05c services extractor; swallow + log any error.
+
+    Returns ``None`` when the extract call raised — the caller treats
+    that as "no line to append" and keeps the materials line + bare KB
+    ack visible.
+    """
+    try:
+        return await api_client.extract_kb_services(
+            project_id=project_id,
+            operator_file_short_id=short_id,
+            internal_token=token,
+        )
+    except Exception as exc:
+        logger.warning(
+            "sales_services_extract_failed",
+            extra={
+                "operator_file_short_id": short_id,
+                "project_id": project_id,
+                "error": _redact_token(str(exc)),
+            },
+        )
+        return None
 
 
 _API_DETAIL_FRIENDLY: dict[str, str] = {
