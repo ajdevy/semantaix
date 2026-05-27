@@ -11,6 +11,7 @@ from fastapi import BackgroundTasks, HTTPException, Request
 from platform_common.app_factory import create_service_app
 from platform_common.settings import get_settings
 from services.api.app.hitl import HitlTicketRepository
+from services.api.app.openrouter_client import OpenRouterClient
 from services.api.app.russian_text import get_russian_normalizer
 from services.api.app.telegram_bot_sender import TelegramBotSender
 from services.bot_gateway.app.admin_commands import handle_admin_project_command
@@ -25,6 +26,9 @@ from services.bot_gateway.app.media_group_buffer import (
 from services.bot_gateway.app.operator_files import (
     OperatorFileRecord,
     OperatorFileRepository,
+)
+from services.bot_gateway.app.operator_service_nl import (
+    handle_operator_service_nl_message,
 )
 from services.bot_gateway.app.persistence import persist_normalized_message
 from services.bot_gateway.app.prompt_commands import (
@@ -67,6 +71,11 @@ telegram_file_sender = TelegramFileSender(
     bot_token=settings.telegram_bot_token,
     base_url=settings.telegram_bot_api_base_url,
 )
+# Story 12.02b — OpenRouter client used by the operator services NL classifier.
+# Single shared instance: each ``complete_json`` call opens its own httpx
+# AsyncClient with a 30s timeout, so a long-running LLM call cannot block
+# concurrent webhook handlers.
+operator_service_nl_openrouter = OpenRouterClient()
 
 _BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 
@@ -2107,6 +2116,25 @@ async def _process_telegram_update(
             trace_id=trace_id,
             result=sales_command_result,
             fallback="sales_command",
+        )
+        return response
+
+    operator_service_nl_result = await handle_operator_service_nl_message(
+        normalized=normalized,
+        api_client=api_client,
+        send_dm=_send_dm,
+        openrouter=operator_service_nl_openrouter,
+        primary_operator_username=_effective_operator_username(),
+        admin_username=settings.hitl_config_admin_username,
+        internal_token=settings.internal_service_token or "",
+    )
+    if operator_service_nl_result is not None:
+        response = {"trace_id": trace_id}
+        response.update(operator_service_nl_result)
+        _log_routed(
+            trace_id=trace_id,
+            result=operator_service_nl_result,
+            fallback="operator_service_nl",
         )
         return response
 
