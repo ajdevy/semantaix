@@ -170,3 +170,36 @@ def test_add_rejects_blank_name(repo: ServicesRepository) -> None:
     refuse blank rows so a programmatic caller cannot poison the catalog."""
     with pytest.raises(ValueError):
         repo.add(project_id=1, name="   ", now=_NOW)
+
+
+def test_find_by_name_case_insensitive(repo: ServicesRepository) -> None:
+    """Alias matching the Story 12.01 spec surface — case-insensitive lookup."""
+    sid = repo.add(project_id=1, name="каньонинг", now=_NOW)
+    found = repo.find_by_name(project_id=1, name="КАНЬОНИНГ")
+    assert found is not None
+    assert found.id == sid
+
+
+def test_find_by_name_returns_none_for_unknown(repo: ServicesRepository) -> None:
+    assert repo.find_by_name(project_id=1, name="ghost") is None
+
+
+def test_get_returns_row_by_id(repo: ServicesRepository) -> None:
+    sid = repo.add(project_id=1, name="alpha", now=_NOW)
+    found = repo.get(service_id=sid)
+    assert found is not None
+    assert found.id == sid
+    assert found.name == "alpha"
+
+
+def test_get_returns_none_for_unknown_id(repo: ServicesRepository) -> None:
+    assert repo.get(service_id=99999) is None
+
+
+def test_get_returns_soft_deleted_row(repo: ServicesRepository) -> None:
+    """``get`` ignores ``is_active`` so callers can introspect audit history."""
+    sid = repo.add(project_id=1, name="alpha", now=_NOW)
+    repo.soft_delete(service_id=sid)
+    found = repo.get(service_id=sid)
+    assert found is not None
+    assert found.is_active is False

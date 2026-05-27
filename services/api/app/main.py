@@ -132,6 +132,9 @@ from services.api.app.projects import (
 )
 from services.api.app.rag import RagRepository
 from services.api.app.russian_text import get_russian_normalizer
+from services.api.app.sales.bootstrap import (
+    init_schema as sales_bootstrap_init_schema,
+)
 from services.api.app.sales.client_materials_analyzer import (
     AnalysisOutcome,
     ClientMaterialsAnalyzer,
@@ -430,6 +433,12 @@ def _effective_sales_persona_name() -> str:
     first, last = _effective_bot_persona()
     return f"{first} {last}".strip() if last else first
 
+
+# Epic 12 story 12.01: bootstrap every sales DB table + index in a single
+# call so the schema is fully shaped before any repository handle opens
+# the file. The repositories below still run their own per-table
+# init_schema (idempotent) for tests that construct them in isolation.
+sales_bootstrap_init_schema(settings.sales_db_path)
 
 # Epic 12 story 12.03: construct the SalesPersonaAnswerer eagerly so the
 # `sales_conversation_state` table is bootstrapped at startup. Story 12.09

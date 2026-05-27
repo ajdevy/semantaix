@@ -103,7 +103,7 @@ def init_schema(db_path: str) -> None:
             "ON services(project_id, lower(name)) WHERE is_active = 1"
         )
         connection.execute(
-            "CREATE INDEX IF NOT EXISTS services_project_active_idx "
+            "CREATE INDEX IF NOT EXISTS idx_services_project "
             "ON services(project_id, is_active)"
         )
 
@@ -197,6 +197,18 @@ class ServicesRepository:
                     "AND lower(name) = lower(?)"
                 ),
                 (int(project_id), name),
+            ).fetchone()
+        return _row_to_service(row) if row is not None else None
+
+    def find_by_name(self, *, project_id: int, name: str) -> Service | None:
+        """Alias for :meth:`get_by_name` matching the Story 12.01 surface."""
+        return self.get_by_name(project_id=project_id, name=name)
+
+    def get(self, *, service_id: int) -> Service | None:
+        with _connect(self.db_path) as connection:
+            row = connection.execute(
+                _SELECT_SQL + " WHERE id = ?",
+                (int(service_id),),
             ).fetchone()
         return _row_to_service(row) if row is not None else None
 
